@@ -33,6 +33,7 @@ import {
 import { resolvePersonaFile } from './persona.js'
 import { readUnified } from './store.js'
 import { memoryCardPromptBlock } from './memory-card.js'
+import { readQqForBili } from './memory.js'
 import { buildSelfIdentityBlock, readQqSelfIdentity } from '../../../src/self-identity.js'
 import { adminFromSources, adminPromptBlock } from '../../../src/admin-identity.js'
 import { activeMemoryPaths, activePlatformStateDir } from '../../../src/character-persona.js'
@@ -145,9 +146,12 @@ export function adminBlockForBili() {
 function qqMemoryBlockForBili() {
   const unified = readUnified().config
   if (unified.memory?.qqToBili?.enabled !== true) return ''
-  const text = readTextFile(activeMemoryPaths().qqForBili)
-  if (!text) return ''
-  return `［QQ 群里的近况（已脱敏；不含私信/联系方式）］\n${text}`
+  // P1-7：不能直读文件——写侧闸门、读侧复检都在 memory.js 里。这里必须走会扫描的读取函数，
+  // 否则「UI 显示 blocked」时注入链路照样把内容喂给 B站 提示词（旧实现就是这样）。
+  const maxChars = Math.max(1200, Math.min(20_000, Number(unified.memory?.qqToBili?.maxChars) || 6000))
+  const memory = readQqForBili({ maxChars })
+  if (!memory.ok || !memory.text) return ''
+  return `［QQ 群里的近况（已脱敏；不含私信/联系方式）］\n${memory.text}`
 }
 
 /** 记忆卡（B站侧）：只拿公开冲浪记忆 + 共享锚点，不含 QQ 私事（隐私边界）。 */

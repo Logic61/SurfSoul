@@ -159,9 +159,14 @@ export function collectQqMemory({ unified, qqConfig } = {}) {
   return { cfg, privacy, allowedGroups, stats, kept, groups };
 }
 
-function buildQqForBiliDoc(collected, { qqConfig } = {}) {
+/**
+ * 生成 QQ → B站 的脱敏记忆文件内容。
+ * 2026-10-30 P1-7：导出以便单测；links 可注入（默认读身份对齐表）。
+ */
+export function buildQqForBiliDoc(collected, { qqConfig, links: linksOverride } = {}) {
   const { cfg, stats, kept, groups } = collected;
-  const links = listLinks();
+  const links = Array.isArray(linksOverride) ? linksOverride : listLinks();
+
   const qqById = new Map(links.filter((link) => link.identities.qq).map((link) => [link.identities.qq.id, link]));
   const lines = [];
   lines.push('# QQ 群里的近况（给 B站 那边看）');
@@ -227,14 +232,30 @@ function buildQqForBiliDoc(collected, { qqConfig } = {}) {
   lines.push('');
 
   // 与 B 站交集
+  // 隐私（P1-7）：旧实现写 `QQ 群友「原始昵称」= B站「名字」(mid 12345678)`——
+  // 原始 QQ 昵称 + B站 mid 都是身份信息，且会让最后一道隐私闸「扫副本」时漏掉。
+  // 现在只保留「群友别名 ↔ B站公开昵称」的认人映射：不写 mid、不写原始昵称；
+  // 数值/号码一律过 sanitizeText（保留数字会挡住最后的 assertSafeOutput）。
   lines.push('## 四、和 B 站的交集');
   lines.push('');
-  if (links.length) {
-    for (const link of links.slice(0, 30)) {
-      const qq = link.identities.qq;
-      const bili = link.identities.bili;
-      if (!qq || !bili) continue;
-      lines.push(`- QQ 群友「${qq.name || '群友'}」= B站「${bili.name || bili.id}」(mid ${bili.id})`);
+  const aligned = links.filter((link) => link?.identities?.qq && link?.identities?.bili);
+  if (aligned.length) {
+    lines.push(`- 已登记 ${aligned.length} 个身份对齐（只用于认人；不写 QQ 号、不写 B站 mid）。`);
+    // 关键：QQ 侧名字只使用**公开群消息里已经出现的别名**，绝不读对齐表里的原始 QQ 昵称。
+    const aliasByQqId = new Map();
+    for (const item of kept) aliasByQqId.set(String(item.senderId ?? ''), item.senderAlias || '群友');
+    const safeName = (raw) => {
+      const result = sanitizeText(raw, { dropUnsafeLines: false, keepNumbers: false, maxChars: 24 });
+      return result.ok ? result.text : '';
+    };
+    let printed = 0;
+    for (const link of aligned) {
+      if (printed >= 20) break;
+      const biliName = safeName(link.identities.bili.name ?? '');
+      if (!biliName) continue;
+      const alias = aliasByQqId.get(String(link.identities.qq.id ?? '')) || '一位群友';
+      lines.push(`- ${alias} 在 B 站是「${biliName}」`);
+      printed += 1;
     }
   } else {
     lines.push('- （还没有登记身份对齐；如果群友在群里说过自己的 B 站号，可以在「身份对齐」里确认）');
@@ -292,6 +313,27 @@ function writeSyncState(patch) {
   return next;
 }
 
+/**
+ * 落盘 QQ → B站 记忆：最后一道闸必须扫**真实要写的内容**。
+ * P1-7（2026-10-30 审计）：旧实现是 `assertSafeOutput(doc.replace(/\\b\\d{5,12}\\b/g, ''))`——
+ * 扫的是「删掉数字的副本」，落盘的却是含 B站 mid / 原始 QQ 昵称的原件，闸门形同虚设。
+ */
+function writeQqForBiliDoc(doc) {
+  assertSafeOutput(doc, 'QQ→B站记忆');
+  backupFile(qqForBiliFile(), 'qq-for-bili');
+  writeTextAtomic(qqForBiliFile(), `${doc}\n`);
+}
+
+function privacyBlockedResult(error) {
+  const hits = Array.isArray(error?.hits) ? error.hits : [];
+  return {
+    ok: false,
+    blocked: true,
+    error: String(error?.message ?? error),
+    labels: [...new Set(hits.map((hit) => hit.label))],
+  };
+}
+
 /** QQ → B站：生成脱敏记忆文件。 */
 export function syncQqToBili({ force = false } = {}) {
   const all = readAll();
@@ -303,8 +345,13 @@ export function syncQqToBili({ force = false } = {}) {
   const collected = collectQqMemory({ unified, qqConfig: qq });
   if (!collected.kept.length) {
     const doc = buildQqForBiliDoc(collected);
-    backupFile(qqForBiliFile(), 'qq-for-bili');
-    writeTextAtomic(qqForBiliFile(), `${doc}\n`);
+    try {
+      writeQqForBiliDoc(doc);
+    } catch (error) {
+      appendAudit({ direction: 'qq->bili', ok: false, blocked: true });
+      writeSyncState({ lastQqToBili: { at: new Date().toISOString(), ok: false, blocked: true, error: String(error?.message ?? error) } });
+      return privacyBlockedResult(error);
+    }
     const stats = { ...collected.stats, chars: doc.length, ok: true, empty: true };
     writeSyncState({ lastQqToBili: { at: new Date().toISOString(), ...stats } });
     appendAudit({ direction: 'qq->bili', ok: true, ...stats });
@@ -312,9 +359,13 @@ export function syncQqToBili({ force = false } = {}) {
   }
   const doc = buildQqForBiliDoc(collected, { qqConfig: qq });
   // 最后一道闸：任何严重命中都拒绝落盘（不把“疑似泄露”写成事实）。
-  assertSafeOutput(doc.replace(/\b\d{5,12}\b/g, ''), 'QQ→B站记忆');
-  backupFile(qqForBiliFile(), 'qq-for-bili');
-  writeTextAtomic(qqForBiliFile(), `${doc}\n`);
+  try {
+    writeQqForBiliDoc(doc);
+  } catch (error) {
+    appendAudit({ direction: 'qq->bili', ok: false, blocked: true });
+    writeSyncState({ lastQqToBili: { at: new Date().toISOString(), ok: false, blocked: true, error: String(error?.message ?? error) } });
+    return privacyBlockedResult(error);
+  }
   const stats = { ...collected.stats, chars: doc.length, ok: true };
   writeSyncState({ lastQqToBili: { at: new Date().toISOString(), ...stats } });
   appendAudit({ direction: 'qq->bili', ok: true, ...stats });

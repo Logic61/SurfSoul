@@ -81,6 +81,8 @@ const tests = [
   'test-bili-state-paths.mjs',
   // B站→QQ 记忆生成器输入目录（P1-6）：只读当前角色 bili/，不再读旧全局目录；hermetic 不联网。
   'test-bili-memory-path.mjs',
+  // 双向记忆同步隐私（P1-7）：闸门扫真身、调度器走 readQqForBili、身份对齐不写 mid/原始昵称。
+  'test-memory-sync-privacy.mjs',
   // 体检修复回归：无令牌智能体调用面、send-burst 失败回滚、唤醒限频重试、
   // 定时器类暂存唤醒补发、collector 生命周期、ownerQQ 覆盖语义、预设名校验、
   // wake triggers 白名单、memory-update 边界、wait 租约归一化、md/黑话/表情/账本；
