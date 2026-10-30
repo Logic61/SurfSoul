@@ -363,7 +363,27 @@ const BROWSER_BLOCKED_TOOL_NAMES = [
   'mcp__browser__site_read_page', 'mcp__browser__site_login_status',
 ]
 
+/**
+ * 第三方插件运行期注册的全局工具（2026-10-30，路线 A）。
+ *
+ * 为什么单列、不塞进 KNOWN_DANGEROUS_GLOBAL_TOOLS：
+ *   · 这些名字来自**用户自己装的插件**（这里是 `dsh-video-storyboard` 的
+ *     video_storyboard / video_zoom / video_probe / video_locate），不随 DSH 安装包分发，
+ *     `scripts/dsh-tool-names.mjs` 的安装包对账扫不到它们；
+ *   · 放进 RESTRICTED_TOOL_NAMES 会让 `test-preset-local-tools.mjs` 的「拼错假名」断言失败
+ *     （它只接受安装包里真实存在的名字），所以只在本文件的 apply() 里用，不导出。
+ *   · 但它们会执行本机 ffmpeg / yt-dlp、读写缓存，属于**本地执行面**，QQ 仿真会话 schema
+ *     里不该出现 → 照样 restrict；名字不存在时 restrict 抛错会被逐个跳过，安全。
+ */
+const PLUGIN_PROVIDED_GLOBAL_TOOLS = [
+  'video_storyboard',
+  'video_zoom',
+  'video_probe',
+  'video_locate',
+]
+
 // 供 test-preset-local-tools.mjs 导入并与 DSH 真实工具名对账，避免两份名单漂移。
+// 注意：PLUGIN_PROVIDED_GLOBAL_TOOLS 故意**不**导出（不在安装包里，对账会误报假名）。
 export const RESTRICTED_TOOL_NAMES = Object.freeze([...KNOWN_DANGEROUS_GLOBAL_TOOLS, ...BROWSER_BLOCKED_TOOL_NAMES])
 
 // 无害模型侧工具：ask_user_question 用于把问题转给管理员/用户，
@@ -388,7 +408,7 @@ export function apply(ctx) {
   // 名字不存在时跳过（执行期白名单仍然兜底），但**只汇总一行**：
   // 以前每个工具打一行，DSH 启动时刷几百行日志，把真实告警淹没（2026-10-28 用户反馈）。
   const skipped = []
-  const restrictNames = [...KNOWN_DANGEROUS_GLOBAL_TOOLS, ...BROWSER_BLOCKED_TOOL_NAMES]
+  const restrictNames = [...KNOWN_DANGEROUS_GLOBAL_TOOLS, ...PLUGIN_PROVIDED_GLOBAL_TOOLS, ...BROWSER_BLOCKED_TOOL_NAMES]
   for (const name of restrictNames) {
     try {
       ctx.tools.restrict({ deny: [name] })

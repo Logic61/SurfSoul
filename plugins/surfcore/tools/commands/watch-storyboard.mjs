@@ -23,7 +23,7 @@ import { appendWatch } from '../lib/watch-history.mjs'
 import { fetchWithTimeout, DEFAULT_HTTP_TIMEOUT_MS } from '../lib/http-timeout.mjs'
 import {
   USAGE, parseArgs, gridForCells, resolveStoryboardCli, buildStoryboardArgs,
-  storyboardPaths, pickSubtitleJson, parseStoryboardStdout, summaryLines,
+  storyboardPaths, pickSubtitleJson, parseStoryboardStdout, summaryLines, downloadOnlyLines,
 } from '../lib/watch-storyboard.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
@@ -104,6 +104,15 @@ async function main() {
     }
     if (subtitleJson) line(`官方字幕: ${subtitleJson}`)
     else warn('（这视频没有可用官方字幕轨 → 分镜只出画面，台词层留空）')
+  }
+
+  // ── ②.5 --download-only：只准备素材，图交给原生 video_storyboard 工具出（本机路线 A）
+  //   · 不写观看历史：这一步还没"看"，真正看是下一步的工具调用；
+  //   · 插件没装也照样成立（MP4/SUBS 交给谁用由调用方决定）。
+  if (opts.downloadOnly) {
+    line('')
+    for (const row of downloadOnlyLines({ mp4: paths.mp4, subs: subtitleJson, title, duration })) line(row)
+    return
   }
 
   // ── ③ 主路径：dsh-video-storyboard 出分镜；没装则降级九宫格（不阻断）

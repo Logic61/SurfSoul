@@ -16,7 +16,7 @@ import path from 'node:path'
 
 import {
   parseArgs, gridForCells, resolveStoryboardCli, buildStoryboardArgs,
-  storyboardPaths, pickSubtitleJson, parseStoryboardStdout, summaryLines,
+  storyboardPaths, pickSubtitleJson, parseStoryboardStdout, summaryLines, downloadOnlyLines,
   DEFAULT_CELLS,
 } from '../tools/lib/watch-storyboard.mjs'
 
@@ -27,8 +27,8 @@ assert.deepEqual(
   { ...parseArgs(['BV1q8no6rE3Q']) },
   {
     bvid: 'BV1q8no6rE3Q', cells: DEFAULT_CELLS, from: 0, to: 0, detail: 'med',
-    lan: 'ai-zh', noSubs: false, noHistory: false, outDir: '', subsOutDir: '',
-    storyboardCli: '', help: false,
+    lan: 'ai-zh', noSubs: false, noHistory: false, downloadOnly: false,
+    outDir: '', subsOutDir: '', storyboardCli: '', help: false,
   },
   '默认值',
 )
@@ -58,6 +58,7 @@ for (const bad of [
 }
 assert.equal(parseArgs(['-h']).help, true, '--help 不需要 BV')
 assert.equal(parseArgs(['foo', 'BV1q8no6rE3Q']).bvid, 'BV1q8no6rE3Q', '位置参数里取合法 BV')
+assert.equal(parseArgs(['BV1q8no6rE3Q', '--download-only']).downloadOnly, true, '--download-only 解析')
 console.log('parseArgs OK')
 
 // ── 2. cells → 降级格表 ─────────────────────────────────────────────────────
@@ -165,6 +166,17 @@ assert.ok(lines.some((l) => l.includes('标题')), '带标题')
 assert.ok(summaryLines({ sheet: 's', manifest: 'm', index: 'i', cells: 9, fallback: true })
   .some((l) => l.includes('降级')))
 console.log('parseStoryboardStdout / summaryLines OK')
+
+// ── 8. --download-only 的收尾（路线 A：交给原生 video_storyboard 工具） ─────
+const onlyWithSubs = downloadOnlyLines({ mp4: 'D:/v.mp4', subs: 'D:/subs.json', title: '标题', duration: 90 })
+assert.ok(onlyWithSubs[0].startsWith('MP4 : D:/v.mp4'))
+assert.ok(onlyWithSubs.some((l) => l.startsWith('SUBS: D:/subs.json')))
+assert.ok(onlyWithSubs.some((l) => l.includes('video_storyboard({ input:')))
+assert.ok(onlyWithSubs.some((l) => l.includes('video_zoom')))
+assert.ok(onlyWithSubs.some((l) => l.includes('标题') && l.includes('90s')))
+const onlyNoSubs = downloadOnlyLines({ mp4: 'D:/v.mp4', subs: null })
+assert.ok(onlyNoSubs.some((l) => l.includes('不要传 transcriptFile')), '没字幕时明确不传 transcriptFile')
+console.log('downloadOnlyLines OK')
 
 fs.rmSync(tmp, { recursive: true, force: true })
 console.log('watch-storyboard tests OK')

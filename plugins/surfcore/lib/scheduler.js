@@ -304,13 +304,15 @@ function wakePrompt(st, tools = '') {
     '   3.2) 如果你发现自己总在看同一类：不要自己改配置文件 —— 让主人去设置页「B站 → 口味权重 / 一键抓取」调低那个词、调高别的。',
     '   3.5) ⭐ 如果 `feed` 没有新内容（全是看过的/候选不够）→ **不要硬重复深读、不要为了凑数**；',
     '        写一段日记或扫一眼消息就按“轻醒”收工，保住这一趟的质量 ✓',
-    // 2026-10-30（C-1）：深读拆成「文字五路（debrief --no-frames）+ 可引用分镜（watch-storyboard）」。
-    //   分镜图带编号/每格起止/音频条，能引用「第 N 格」；图片 token 也从 3 张 968 降到 1 张 392（见 SUBSYSTEM-BILI §4.3）。
+    // 2026-10-30（C-1 + 路线 A）：深读拆成「文字五路（debrief --no-frames）+ 分镜」。
+    //   A（本机装了 dsh-video-storyboard 原生工具）：只下载 → 直接调 video_storyboard，图进上下文；
+    //   C-1（没装/没工具面）：一条 watch-storyboard 出图 + 清单，插件缺失自动降级九宫格。
     '4) 挑 2–3 条深读：先 `debrief <BV> --no-frames` 拿文字五路（封面/官方字幕/弹幕热区/热评），',
-    '   再 `watch-storyboard <BV>` 出 9 格分镜（编号 + 每格起止时间 + 音频条；官方字幕会自动对齐），',
-    '   然后 `read_image` 分镜图、`read` 它打印的 INDEX —— 之后引用画面请说「第 N 格」✓',
-    '   要读小字/界面细节：`watch-storyboard <BV> --from <秒> --to <秒> --cells 4` 重出（别重抽全片）✗',
-    '   （没装分镜插件时它会自动退回九宫格，照旧可用；实在不行再退回完整 `debrief`）',
+    '   再看本轮工具面：**有 `video_storyboard` 原生工具就走下面两步（图直接进上下文，最好用）**：',
+    '   ① `watch-storyboard <BV> --download-only` → 拿到它打印的 `MP4:` / `SUBS:` 两个路径',
+    '   ② `video_storyboard({ input: <MP4>, transcriptFile: <SUBS>, cells: 9, detail: "med" })`（没有 SUBS 就不传 transcriptFile）',
+    '   ③ 之后引用画面说「第 N 格」；读小字/界面细节用 `video_zoom({ input: <MP4>, cellId: N, cells: 4 })` —— **别重抽全片** ✗',
+    '   没有 `video_storyboard` 工具时，退回一条命令出图：`watch-storyboard <BV>`（插件缺失会自动降级九宫格）',
     // 2026-10-20：收藏 ≠ 低配的分享 ✓ 它是「我想留着」（内向），和分享（外向）并列
     '4.5) 深读的那几条里，如果某条「我想留着」→ `fav <BV> --reason "…" --dry` → `--go`',
     '     判据（缺一条就别收 ✗）：① 三个月后还会想点开 ② 说得出为什么留（≥6 字）③ 同类已 ≥2 条要 --better',

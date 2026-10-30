@@ -37,6 +37,7 @@ export const USAGE = `用法: node bili.mjs watch-storyboard <BV> [选项]
   --detail low|med|high   清单里每格台词长度（默认 ${DEFAULT_DETAIL}；high=400 字）
   --lan ai-zh        官方字幕语言（默认 ${DEFAULT_LAN}）
   --no-subs          不拉官方字幕（只出画面分镜）
+  --download-only    只下载 + 取字幕，打印 MP4:/SUBS: 两个路径后退出（给原生 video_storyboard 工具用）
   --out 目录         原片/分镜图落盘目录（默认 ~/.dsh/shots/video）
   --subs-out 目录    字幕 JSON 落盘目录（默认 ~/.dsh/shots/subs）
   --storyboard-cli   显式指定 dsh-video-storyboard 的 bin/storyboard.mjs
@@ -47,7 +48,10 @@ export const USAGE = `用法: node bili.mjs watch-storyboard <BV> [选项]
   · 分镜出图/清单由已安装的 ${STORYBOARD_PKG} 提供（MIT）；
     没装也不会报错——自动退回 bili-watch 九宫格，并把原因写在第一行。
   · 看图后请按「第 N 格」引用（清单里带每格起止时间与 frame@）；要读小字用
-    --from/--to --cells 4 重出，不要重抽全片。`
+    --from/--to --cells 4 重出，不要重抽全片。
+  · 本机装了 dsh-video-storyboard 的原生工具时，推荐两步走：
+    \`watch-storyboard <BV> --download-only\` → \`video_storyboard({input: MP4, transcriptFile: SUBS})\`，
+    图直接进模型上下文，还能用 \`video_zoom({cellId})\` 按格回看。`
 
 function fail(message) {
   const error = new Error(message)
@@ -69,6 +73,7 @@ export function parseArgs(argv = []) {
     lan: DEFAULT_LAN,
     noSubs: false,
     noHistory: false,
+    downloadOnly: false,
     outDir: '',
     subsOutDir: '',
     storyboardCli: '',
@@ -136,6 +141,9 @@ export function parseArgs(argv = []) {
         break
       case '--no-history':
         opts.noHistory = true
+        break
+      case '--download-only':
+        opts.downloadOnly = true
         break
       default:
         if (arg.startsWith('--')) fail(`未知参数: ${arg}（跑 --help 看清单）`)
@@ -259,6 +267,17 @@ export function parseStoryboardStdout(stdout = '') {
     image: attr('image'),
     tokens: attr('tokens'),
   }
+}
+
+/** `--download-only` 的收尾：把两个路径交给 agent，下一步直接调原生 video_storyboard。 */
+export function downloadOnlyLines({ mp4, subs, title, duration }) {
+  const lines = [`MP4 : ${mp4}`]
+  if (subs) lines.push(`SUBS: ${subs}`)
+  else lines.push('SUBS: （无官方字幕；调原生工具时不要传 transcriptFile）')
+  lines.push('下一步：`video_storyboard({ input: <MP4>, transcriptFile: <SUBS>, cells: 9, detail: "med" })`'
+    + '；引用画面说「第 N 格」，读细节用 `video_zoom({ input: <MP4>, cellId: N, cells: 4 })`。')
+  if (title) lines.push(`（${title}${duration ? ` · ${duration}s` : ''}）`)
+  return lines
 }
 
 /** 给 agent 看的收尾摘要（marker 风格和 debrief 的 SHEET:/SUBS: 保持一致）。 */
