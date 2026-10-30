@@ -3,7 +3,7 @@
 > 这份文档回答：**agent 的手从哪来**（三个 MCP server + 39 个 `qq_*` 工具）、**哪些手被绑住**
 > （五层闸门 + fail-closed 守卫）、**她戴哪张面具**（`qq-chat` / `qq-chat-v2` 两代 preset）、
 > **这些是怎么装进 DSH 的**。
-> **最后核对**：2026-10-26（全仓库逐行梳理）。配套阅读：总纲 [ARCHITECTURE.md](ARCHITECTURE.md) · 边界 [BOUNDARIES.md](BOUNDARIES.md) · 索引 [../README.md](../README.md)。
+> **最后核对**：2026-10-30（dsh-memewiki v2 的 4 个工具进 QQ 白名单）。配套阅读：总纲 [ARCHITECTURE.md](ARCHITECTURE.md) · 边界 [BOUNDARIES.md](BOUNDARIES.md) · 索引 [../README.md](../README.md)。
 
 ---
 
@@ -132,7 +132,7 @@
 
 ## 4. 工具守卫：fail-closed 的两段式
 
-文件：`plugins/surfcore/qq-tool-restrict.mjs`（204 行，**唯一权威实现**）。
+文件：`plugins/surfcore/qq-tool-restrict.mjs`（469 行，**唯一权威实现**）。
 两个 preset 目录下的同名文件只是 `export * from` 的壳，避免两份实现漂移。
 
 **名单规模（实测）**
@@ -143,6 +143,7 @@
 | `KNOWN_DANGEROUS_GLOBAL_TOOLS` | 49 + 18 = **67** | 上面 49 个 + 18 个 `dev_*`（插件注入/打包/自测） |
 | `SAFE_PREFIXES` | 3 | `mcp__snowluma__`、`mcp__snowluma-host__`、`mcp__web-search-safe__` |
 | `SAFE_EXACT` | 2 | `ask_user_question`、`todo_write` |
+| `MEMEWIKI_TOOL_NAMES` | 4 | `search_meme_wiki`、`meme_recall`、`meme_feedback`、`meme_remember`（dsh-memewiki v2，2026-10-30 放行） |
 
 **为什么必须两段**（这是设计要点，不是啰嗦）：
 
@@ -151,6 +152,13 @@
 
 只做第 2 段不够——工具名仍会出现在模型面前，既违反"仿真会话不得拥有本地执行能力"，
 也会诱导模型去调它。反过来只做第 1 段也不够——别的 composition 可能再把名字注册进全局层。
+
+**第三方插件的模型侧工具**（例如 `dsh-memewiki` v2 的 `search_meme_wiki` / `meme_recall` /
+`meme_feedback` / `meme_remember`）：它们不在 DSH 安装包里，`scan-dsh-tool-names` 对账扫不到，
+但 QQ 会话要用就必须进执行期白名单。2026-10-30 起这 4 个名字在 `MEMEWIKI_TOOL_NAMES` 里单独放行；
+**故意不进 `RESTRICTED_TOOL_NAMES`**（restrict 是"从 schema 隐藏"，加进去模型就看不见、功能等于没装）。
+判断标准同 `todo_write`：只读公共数据 / 只写插件自己的数据目录、没有 shell、没有任意文件与账号动作。
+以后再加第三方插件工具，照这个模式：独立导出名单 + 三条测试断言（导出/放行/不在 restrict）+ 本节登记。
 
 **历史教训（写进代码注释里）**：名单初版把 `pwsh_persistent`/`bash_persistent`/`cordis`/`goal_write`
 当成工具名，这五个**根本不存在**；而 `tools.restrict()` 对未知名字会抛错、被逐条 try/catch 吞掉，

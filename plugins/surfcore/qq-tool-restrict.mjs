@@ -386,6 +386,30 @@ const PLUGIN_PROVIDED_GLOBAL_TOOLS = [
 // 注意：PLUGIN_PROVIDED_GLOBAL_TOOLS 故意**不**导出（不在安装包里，对账会误报假名）。
 export const RESTRICTED_TOOL_NAMES = Object.freeze([...KNOWN_DANGEROUS_GLOBAL_TOOLS, ...BROWSER_BLOCKED_TOOL_NAMES])
 
+/**
+ * 梗记忆（dsh-memewiki v2）：2026-10-30 主人要求写进 QQ 会话工具白名单。
+ *
+ * 为什么可以放行：四个工具都只碰「公共梗词库」和插件自己的 `$DSH_HOME/memewiki/memory/`——
+ *   · search_meme_wiki  只读本地 6668 条词库（online=true 时最多多一次 cnmeme.wiki 只读请求）；
+ *   · meme_recall       只读本地梗记忆，返回候选，不注入、不发送；
+ *   · meme_feedback / meme_remember 只写本插件的 social.json / episodes.jsonl（亲和度、内部梗）。
+ * 没有 shell、没有任意文件读写、不碰 QQ 账号动作，与 `todo_write` 同为无害模型侧工具。
+ *
+ * 为什么**不**进 restrict 名单：两个名单语义不同——restrict 是「从 schema 隐藏」，
+ * 而这些工具恰恰要留在 schema 里给模型用；执行期白名单才是开关。若误加进
+ * RESTRICTED_TOOL_NAMES，模型看不见它，功能等于没装（还会与下面的放行自相矛盾）。
+ *
+ * 导出给 `scripts/test-preset-local-tools.mjs` 逐名断言「放行且不在 restrict 名单」，
+ * 防止下次改守卫时只加名字忘了接线。
+ */
+export const MEMEWIKI_TOOL_NAMES = Object.freeze([
+  'search_meme_wiki',
+  'meme_recall',
+  'meme_feedback',
+  'meme_remember',
+])
+const MEMEWIKI_TOOLS = new Set(MEMEWIKI_TOOL_NAMES)
+
 // 无害模型侧工具：ask_user_question 用于把问题转给管理员/用户，
 // todo_write 仅维护任务列表。若后续 preset 不再挂载这些工具，保留无害。
 const SAFE_EXACT = new Set([
@@ -437,6 +461,8 @@ export function apply(ctx) {
       return `工具 "${name}" 是本地能力，只允许主人在私聊里调用（当前会话 ${key || '未知'} 不在授权范围）`
     }
     if (SAFE_EXACT.has(name)) return
+    // 第三方插件（dsh-memewiki v2）的模型侧工具：能读公共词库/只写自己的 memory，放行。
+    if (MEMEWIKI_TOOLS.has(name)) return
     if (SAFE_PREFIXES.some((prefix) => name.startsWith(prefix))) return
     return `工具 "${name}" 不在 QQ 桥接白名单内，已拒绝（仅允许 QQ MCP 工具与无害模型侧工具）`
   })

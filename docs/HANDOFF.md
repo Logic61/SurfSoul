@@ -5,6 +5,36 @@
 
 ---
 
+## 快照（2026-10-30 20:45–21:05，QQ 会话工具白名单放行梗记忆）
+
+### 用户原话
+> 「写进QQ会话工具白名单」
+
+### 做到哪
+- `plugins/surfcore/qq-tool-restrict.mjs`：新增导出 `MEMEWIKI_TOOL_NAMES`（`search_meme_wiki` /
+  `meme_recall` / `meme_feedback` / `meme_remember`），在执行期 guard 放行，**故意不进** `RESTRICTED_TOOL_NAMES`。
+- 测试：`test-preset-local-tools.mjs`（导出 4 个 / 放行 / 不在 restrict）、`test-audit-setup-guards.mjs`（四个名字放行）。
+- 文档：`docs/guides/AGENT-TOOLS-AND-PRESETS.md` 名单表 + 第三方插件工具说明；`docs/PITFALLS.md` 新增条目；CHANGELOG 未发布/新增。
+- 为什么必须显式维护：QQ 守卫 fail-closed，且第三方插件工具不在 DSH 安装包里，对账扫不到（见 PITFALLS 新条目）。
+
+### 已验证
+- `node scripts/test-audit-setup-guards.mjs` → exit 0（四个梗记忆工具在 QQ 白名单里放行）。
+- 独立脚本直接 import 守卫验证行为：4 个名字放行；`pwsh`/`read`/`web_fetch`/未知工具名仍被拒；
+  4 个名字都不在 `RESTRICTED_TOOL_NAMES`。
+- 全量 `npm run test:audit`：**改动前（git stash 后）与改动后都是 72/83，11 项失败清单完全相同**
+  ⇒ 非本次引入。其中 `test-preset-local-tools` / `test-agent-preset-patches` 是既有基线红
+  （2026-10-29 本地工具改 owner-only 后，测试旧期望未同步）；本次新增的三条断言要等该脚本变绿才会执行。
+- 定向复跑：`test-preset-local-tools`、`test-agent-preset-patches` 改动前后失败数一致（4 pass / 3 fail、1 项失败）。
+
+### 没验证 / 下一步
+- 真机 QQ 会话要重启 DSH（desktop profile）后，让模型调一次 `meme_recall` / `search_meme_wiki` 确认放行。
+- desktop profile 的 `node_modules/surfcore` 是指向 `~/.dsh/plugins/surfcore` 的 junction（后者再指回本仓库），
+  仓库改完重启即生效，无需重跑 setup（preset yml/patch 未变）。
+- 既有基线红（上述 2 个安全测试的旧期望）建议另开一轮修：要么把 owner-only 本地工具从「restrict 隐藏」
+  名单语义里剥离、测试随之改，要么恢复旧设计——属安全边界口径变更，需要主人拍板，本次不擅自改。
+
+---
+
 ## 快照：2026-10-30 20:12–20:45（路线 A：B站 会话直连原生分镜工具，本机专用）
 
 ### 用户原话

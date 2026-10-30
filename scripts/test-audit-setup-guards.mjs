@@ -15,7 +15,10 @@ for (const preset of ['qq-chat', 'qq-chat-v2']) {
   } });
   assert.equal(typeof guard, 'function');
   assert.ok(restricted.includes('dev_install_package'));
-  for (const name of ['ask_user_question', 'todo_write', 'mcp__snowluma__qq_send_message',
+  for (const name of ['ask_user_question', 'todo_write',
+    // 梗记忆（dsh-memewiki v2，2026-10-30 主人要求写进 QQ 工具白名单）
+    'search_meme_wiki', 'meme_recall', 'meme_feedback', 'meme_remember',
+    'mcp__snowluma__qq_send_message',
     'mcp__snowluma-host__snowluma_status', 'mcp__web-search-safe__web_fetch']) {
     assert.equal(guard({ name }), undefined, `${preset}: expected allowed ${name}`);
   }

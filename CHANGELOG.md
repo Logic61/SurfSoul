@@ -8,6 +8,10 @@
 
 ### 新增
 
+- **QQ 会话工具白名单放行梗记忆（dsh-memewiki v2）**：`search_meme_wiki` / `meme_recall` /
+  `meme_feedback` / `meme_remember` 进 `qq-tool-restrict.mjs` 的执行期白名单（**不进** restrict 隐藏名单）；
+  之前这些工具在 QQ 里 schema 可见但一调就报「不在 QQ 桥接白名单内」。配套三条断言防漂移（PITFALLS 新增条目）。
+
 - **B站 可引用分镜 `watch-storyboard`**（C-1：surfcore 取流/字幕 + 已装的 dsh-video-storyboard 出图）：
   720p 直链 + WBI 官方字幕 → 9 格**编号**图 + 每格 `起止时间/frame@/台词` 清单 + 音频包络条；
   看图后按「第 N 格」引用，细节用 `--from/--to --cells 4` 重出（1 张 392 token，替代旧深读 3 张 ≈968/张）。

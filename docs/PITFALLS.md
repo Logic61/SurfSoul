@@ -2831,3 +2831,20 @@ return list[0] ?? pool[0];
 - **验证**：`test-memory-card-backup.mjs`「维护器锁」（跳过/陈旧锁回收/结束释放）；
   `test-memory-card-narrative-api.mjs` 静态断言桥接两处开关接线。
 
+
+## 第三方插件的模型侧工具在 QQ 里「看得见、调不动」（QQ 工具白名单）
+
+- **现象**：QQ 会话的模型 schema 里能看到 `search_meme_wiki` / `meme_recall` 等工具，但每次调用都被拒：
+  「工具 "xxx" 不在 QQ 桥接白名单内」。插件装好了、设置页也正常，看起来像插件坏了。
+- **根因**：QQ 守卫 `plugins/surfcore/qq-tool-restrict.mjs` 的执行期白名单是 fail-closed；第三方插件
+  运行期注册的模型侧工具不在 `SAFE_EXACT` / `SAFE_PREFIXES` 里，而它们又不在 DSH 安装包的工具清单里，
+  `scan-dsh-tool-names` 的对账也覆盖不到 → 没有任何报警。
+- **修法（2026-10-30）**：新增导出 `MEMEWIKI_TOOL_NAMES`（`search_meme_wiki` / `meme_recall` /
+  `meme_feedback` / `meme_remember`），在 guard 里单独放行；**故意不进** `RESTRICTED_TOOL_NAMES`
+  （restrict 是隐藏名单，加进去反而让模型看不到）。`test-preset-local-tools.mjs` 加三条断言：
+  导出 4 个名字 / 执行期放行 / 不在 restrict 名单；`test-audit-setup-guards.mjs` 加"四个名字放行"。
+- **验证**：`node scripts/test-audit-setup-guards.mjs`（四个名字放行，本次通过）；另用独立脚本直接
+  import 守卫断言「放行 / 危险工具仍拒 / 不在 restrict 名单」。三条新断言在 `test-preset-local-tools.mjs`
+  里，但**该脚本与 `test-agent-preset-patches.mjs` 当前是既有基线红**（2026-10-29 本地工具改 owner-only
+  后测试旧期望未同步，与本次无关；全量 `npm run test:audit` 改动前后同为 72/83、失败清单相同）。
+  以后新增任何第三方插件工具，都照此同步名单与断言。

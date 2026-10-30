@@ -201,6 +201,14 @@ test('守卫导出的名单与本测试的清单一致（防两份名单各自�
       assert.ok(!mod.RESTRICTED_TOOL_NAMES.includes(allowed),
         `${id}: ${allowed} 是无害模型侧工具，不应出现在 restrict 名单里（会与 SAFE_EXACT 自相矛盾）`);
     }
+    // 梗记忆（dsh-memewiki v2，2026-10-30 主人要求写进 QQ 工具白名单）：
+    // 必须导出名单供本测试逐名断言；四个名字都放行、且绝不能混进 restrict 隐藏名单。
+    assert.ok(Array.isArray(mod.MEMEWIKI_TOOL_NAMES) && mod.MEMEWIKI_TOOL_NAMES.length === 4,
+      `${id}: 守卫必须导出 MEMEWIKI_TOOL_NAMES（4 个梗记忆工具），供 QQ 工具白名单对账`);
+    for (const allowed of mod.MEMEWIKI_TOOL_NAMES) {
+      assert.ok(!mod.RESTRICTED_TOOL_NAMES.includes(allowed),
+        `${id}: ${allowed} 在 QQ 里要可用，不应出现在 restrict 名单里`);
+    }
   }
 });
 
@@ -241,6 +249,9 @@ test('守卫仍放行 QQ MCP 命名空间与无害模型侧工具', async () => 
     }
     for (const name of ['ask_user_question', 'todo_write']) {
       assert.equal(fakeTools._guard({ name }), undefined, `${id}: ${name} 应放行`);
+    }
+    for (const name of mod.MEMEWIKI_TOOL_NAMES ?? []) {
+      assert.equal(fakeTools._guard({ name }), undefined, `${id}: 梗记忆工具 ${name} 应放行（QQ 白名单）`);
     }
     // 未知工具名必须 fail-closed。
     for (const name of ['', null, undefined, 'mcp__unknown__x', 'totally_new_tool']) {
