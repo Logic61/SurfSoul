@@ -303,7 +303,9 @@ export function pruneBackups(keep = 40) {
   try {
     // 2026-10-22 审计：旧版是「全局只留 40 条」，而「全部备份」一次就写 8 份，
     // 点 5 次就会把 persona / config 的唯一历史副本挤掉。改为**按来源分别保留**。
-    const RE = /^(.*)-(\d{4}-\d{2}-\d{2}T[^-]+)$/;
+    // 2026-10-30 修：旧正则 `T[^-]+` 永远匹配不到 iso 时间里的 `-`（12-00-00），
+    // 导致 pruneBackups 实际从不删除（备份目录无限增长，真实 44 个文件）。
+    const RE = /^(.*)-(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z)(\.[A-Za-z0-9]+)?$/;
     const groups = new Map();
     for (const name of fs.readdirSync(BACKUP_DIR)) {
       const full = path.join(BACKUP_DIR, name);

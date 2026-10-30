@@ -302,6 +302,8 @@ export function createEmptyCard(now = Date.now()) {
       firstMetAt: '',
       firstMetRecordIds: [],
       firstMetEventId: '',
+      // P2-7：每日备份闸门。旧实现用 lastDecayDate 当闸门 → 00:00–04:00 每 10 分钟备份一次。
+      lastBackupDate: '',
     },
     alerts: {
       level: 0,
@@ -747,14 +749,33 @@ function archivedLine(record, now) {
 
 function statsFromJsonl(paths, now = Date.now()) {
   const stats = createEmptyFullStats(now);
+  // 2026-10-30（P2-9）：stats 丢失/损坏时，旧实现把整份 JSONL 读进内存再 split；
+  // 10GB 档案会直接打爆宿主。改为按 4MB 块流式读、只保留未结束的最后一行。
+  let fd;
+  try { fd = fs.openSync(paths.fullJsonl, 'r'); } catch { return stats; }
+  const chunk = Buffer.alloc(4 * 1024 * 1024);
+  let carry = '';
   try {
-    const text = fs.readFileSync(paths.fullJsonl, 'utf8');
-    for (const line of text.split('\n')) {
-      if (!line.trim()) continue;
+    let bytesRead = 0;
+    while ((bytesRead = fs.readSync(fd, chunk, 0, chunk.length, null)) > 0) {
+      const text = carry + chunk.toString('utf8', 0, bytesRead);
+      const lines = text.split('\n');
+      carry = lines.pop() ?? '';
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        stats.records += 1;
+        try {
+          const record = JSON.parse(line);
+          stats.chars += String(record.text ?? '').length;
+          const section = fullSectionOf(record);
+          stats.counts[section] = (stats.counts[section] ?? 0) + 1;
+        } catch {}
+      }
+    }
+    if (carry.trim()) {
       stats.records += 1;
-      stats.bytes += Buffer.byteLength(line, 'utf8') + 1;
       try {
-        const record = JSON.parse(line);
+        const record = JSON.parse(carry);
         stats.chars += String(record.text ?? '').length;
         const section = fullSectionOf(record);
         stats.counts[section] = (stats.counts[section] ?? 0) + 1;
@@ -762,7 +783,11 @@ function statsFromJsonl(paths, now = Date.now()) {
     }
     try { stats.bytes = fs.statSync(paths.fullJsonl).size; } catch {}
     stats.updatedAt = iso(now);
-  } catch {}
+  } catch {
+    // 读失败就返回已统计到的部分；调用方只用于展示，不会反向写坏档案。
+  } finally {
+    try { fs.closeSync(fd); } catch {}
+  }
   return stats;
 }
 

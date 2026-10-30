@@ -73,6 +73,8 @@ const tests = [
   'test-admin-identity.mjs', 'test-admin-prompt-wiring.mjs',
   // 记忆卡：重要度评分 / 主人锚点 / 每日模糊与遗忘 / 80·90·100% 容量 / 提示词裁剪 / 隐私 scope。
   'test-memory-card.mjs', 'test-memory-card-wiring.mjs',
+  // 备份 / 恢复 / 轮转 / stats 重建（P1-10 / P2-7 / P2-8 / P2-9）。
+  'test-memory-card-backup.mjs',
   // 叙事层（2026-10-30 新增）：文件容错 / 注入分档 / hidden 覆盖 / 不可信模型输出 / 渲染集成。
   'test-memcard-narrative.mjs',
   // 角色人格：多角色目录隔离 / 切换 epoch / 快照回档 / 旧数据迁移（含凭证不进角色包）。

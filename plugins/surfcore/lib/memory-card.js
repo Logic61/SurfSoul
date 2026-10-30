@@ -14,7 +14,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { BACKUP_DIR, QQ_STATE_DIR, maskPath } from './paths.js';
 import {
-  activeMemoryPaths, activePlatformStateDir,
+  activeMemoryPaths, activePlatformStateDir, readCurrentCharacter,
 } from '../../../src/character-persona.js';
 import { backupFile, listBackups, readUnified, writeJsonAtomic, writeTextAtomic } from './store.js';
 import {
@@ -40,6 +40,35 @@ function biliStateDir() {
 
 function biliMemoryFile() {
   return path.join(biliStateDir(), 'bili-memory.json');
+}
+
+/**
+ * 备份名里的角色 id（P1-10，2026-10-30）。
+ * 旧备份名不含角色 → 多角色用户点错「恢复」会用别的角色的卡覆盖当前角色（隔离实验 ok:true）。
+ * 新备份统一带 `-<charId>`；旧格式（memory-card-<iso>）仍可识别/恢复，因为它们是角色系统之前的同一份数据。
+ */
+function currentCharacterTag() {
+  try {
+    return String(readCurrentCharacter()?.id ?? '').replace(/[^A-Za-z0-9_.-]/g, '_').slice(0, 40);
+  } catch {
+    return '';
+  }
+}
+
+function memoryBackupLabel(kind) {
+  const tag = currentCharacterTag();
+  return tag ? `${kind}-${tag}` : kind;
+}
+
+/** 这份备份名是否属于当前角色（空角色系统/旧格式一并放行）。 */
+function backupBelongsToCurrentCharacter(name) {
+  const base = String(name ?? '');
+  if (!base.startsWith('memory-card-')) return false;
+  const tag = currentCharacterTag();
+  if (!tag) return true;
+  if (base.startsWith(`memory-card-${tag}-`)) return true;
+  // 旧格式：没有角色 tag，时间戳紧跟 memory-card-；以及旧的手动备份前缀。
+  return /^memory-card-\d{4}-\d{2}-\d{2}T/.test(base) || /^memory-card-(before-|corrupt-)/.test(base);
 }
 
 let chain = Promise.resolve();
@@ -206,9 +235,9 @@ export function memoryCardSnapshot(config = memoryCardConfig()) {
       };
     })(),
     records,
-    backups: listBackups(80).filter((item) => item.name.startsWith('memory-card-')
+    backups: listBackups(200).filter((item) => backupBelongsToCurrentCharacter(item.name)
       && !item.name.startsWith('memory-card-full')
-      && !item.name.startsWith('memory-card-prompt')),
+      && !item.name.startsWith('memory-card-prompt')).slice(0, 80),
   };
 }
 
@@ -278,19 +307,25 @@ export function runMemoryCardMaintenance({ forceDecay = false, config = memoryCa
     const before = loadMemoryCard(pathsNow());
     // P1-5：inbox 按字节水位增量读；水位在成功维护并落盘后才推进（坏卡时从头读，靠去重兜底）。
     const inbox = readInboxSinceCursor(before);
+    const warnings = [];
     // 坏卡不能静默覆盖：先留一份原始文件（load 失败时 before=null）。
     if (!before && fs.existsSync(pathsNow().json)) {
-      try { backupFile(pathsNow().json, 'memory-card-corrupt'); } catch {}
+      const corruptBackup = backupFile(pathsNow().json, memoryBackupLabel('memory-card-corrupt'));
+      if (corruptBackup.error) warnings.push(`坏卡备份失败：${corruptBackup.error}`);
     }
-    // 一天最多备份一次；每天整理前留一份可回滚的卡。
-    if (before && (forceDecay || before.lastDecayDate !== todayKey(now))) {
-      try { backupFile(pathsNow().json, 'memory-card'); } catch {}
+    // 每天最多备份一次（P2-7：旧实现拿 lastDecayDate 当闸门 → 00:00–04:00 每 10 分钟备份一份 350KB）。
+    let dailyBackedUp = false;
+    if (before && before.meta?.lastBackupDate !== todayKey(now)) {
+      const backup = backupFile(pathsNow().json, memoryBackupLabel('memory-card'));
+      if (backup.error) warnings.push(`记忆卡备份失败：${backup.error}`);
+      else dailyBackedUp = true;
     }
     // 全量卡是 append-only JSONL，不做整份备份；每天备份很小的 stats 文件即可。
     try {
       const stat = fs.statSync(pathsNow().fullStats);
       if (new Date(stat.mtimeMs).toLocaleDateString('sv-SE') !== todayKey(now)) {
-        backupFile(pathsNow().fullStats, 'memory-card-full-stats');
+        const statsBackup = backupFile(pathsNow().fullStats, 'memory-card-full-stats');
+        if (statsBackup.error) warnings.push(`全量 stats 备份失败：${statsBackup.error}`);
       }
     } catch {}
     const result = maintainMemoryCard({
@@ -305,6 +340,15 @@ export function runMemoryCardMaintenance({ forceDecay = false, config = memoryCa
       fullConfig: config,
     });
     promptCache = new Map();
+    // 备份成功才把「今天已备份」写回卡里（失败下一轮重试并继续告警）。
+    if (dailyBackedUp && result?.card) {
+      try {
+        result.card.meta.lastBackupDate = todayKey(now);
+        writeJsonAtomic(pathsNow().json, result.card);
+      } catch (error) {
+        warnings.push(`回写备份日期失败：${String(error?.message ?? error)}`);
+      }
+    }
     return {
       ok: true,
       changed: result.changed,
@@ -312,6 +356,7 @@ export function runMemoryCardMaintenance({ forceDecay = false, config = memoryCa
       addedQq: result.qq,
       addedPet: result.pet ?? 0,
       addedFull: result.full?.added ?? 0,
+      warnings,
       status: memoryCardStatusNow(config),
       fullStatus: result.full?.status ?? fullMemoryCardStatus(pathsNow(), config, now),
       card: result.card,
@@ -323,7 +368,7 @@ export function runMemoryCardMaintenance({ forceDecay = false, config = memoryCa
 export function compactMemoryCardNow({ targetRatio = 0.8, config = memoryCardConfig(), now = Date.now() } = {}) {
   return serialize(async () => {
     const card = readCardSafe();
-    try { backupFile(pathsNow().json, 'memory-card-before-compact'); } catch {}
+    try { backupFile(pathsNow().json, memoryBackupLabel('memory-card-before-compact')); } catch {}
     const archived = archiveDecayedToFull(pathsNow(), card, config, now);
     const steps = compactMemoryCard(card, config, { targetRatio, now });
     card.lastMaintenanceAt = new Date(now).toISOString();
@@ -410,17 +455,32 @@ export function restoreMemoryCardBackup(name, { config = memoryCardConfig(), now
     const base = path.basename(String(name ?? ''));
     if (!base.startsWith('memory-card-') || base !== String(name)) return { ok: false, error: '备份名非法' };
     if (base.startsWith('memory-card-full')) return { ok: false, error: '这是全量卡的备份，不能恢复到衰减卡' };
+    // P1-10：不许把别的角色的备份恢复到当前角色（隔离实验里旧实现直接 ok:true 覆盖整卡）。
+    if (!backupBelongsToCurrentCharacter(base)) return { ok: false, error: '这是别的角色的记忆备份，不能恢复到当前角色' };
     const source = path.join(BACKUP_DIR, base);
     const resolved = path.resolve(source);
     if (!fs.existsSync(resolved)) return { ok: false, error: '备份不存在' };
-    try { backupFile(pathsNow().json, 'memory-card-before-restore'); } catch {}
-    fs.copyFileSync(resolved, pathsNow().json);
+    // P1-10/P2-8：先 parse + 校验结构，坏备份不能把当前卡变成空卡（旧实现 copyFileSync 后 ok:true）。
+    let parsed;
+    try {
+      parsed = JSON.parse(fs.readFileSync(resolved, 'utf8'));
+    } catch {
+      return { ok: false, error: '备份文件不是合法 JSON，已拒绝恢复（当前记忆卡未改动）' };
+    }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed) || !Array.isArray(parsed.records)) {
+      return { ok: false, error: '备份结构不对（缺少 records 数组），已拒绝恢复（当前记忆卡未改动）' };
+    }
+    const warnings = [];
+    const preBackup = backupFile(pathsNow().json, memoryBackupLabel('memory-card-before-restore'));
+    if (preBackup.error) warnings.push(`恢复前备份失败：${preBackup.error}`);
+    // 原子写：tmp + rename，恢复中途崩溃不会留下半截 JSON。
+    writeJsonAtomic(pathsNow().json, parsed);
     const card = readCardSafe();
     archiveDecayedToFull(pathsNow(), card, config, now);
     saveMemoryCardOutputs(pathsNow(), card, config, now);
     saveFullMemoryCard(pathsNow(), config, now);
     promptCache = new Map();
-    return { ok: true, status: memoryCardStatusNow(config) };
+    return { ok: true, warnings, status: memoryCardStatusNow(config) };
   });
 }
 
@@ -485,6 +545,7 @@ export function startMemoryCardTimer({ log = () => {}, callBridge } = {}) {
     try {
       const result = await runMemoryCardMaintenance();
       if (result.disabled) return;
+      if (result.warnings?.length) log(`记忆卡整理提醒：${result.warnings.join('；')}`);
       if (result.changed) {
         log(`记忆卡已整理：新增 B站 ${result.addedBili ?? 0} 条 / QQ ${result.addedQq ?? 0} 条${result.addedPet ? ` / 桌宠 ${result.addedPet} 条` : ''}，当前 ${result.status.percent}%（${result.status.chars}/${result.status.maxChars} 字）`);
       }
