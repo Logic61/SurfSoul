@@ -342,6 +342,8 @@ const TOOL_CONFIG_FLAGS = {
   qq_list_stickers: 'listStickers',
   qq_get_sticker_image: 'getStickerImage',
   qq_send_sticker: 'sendSticker',
+  qq_send_image: 'sendImage',
+  qq_set_group_card: 'setGroupCard',
   qq_collect_sticker: 'collectSticker',
   qq_get_self_image: 'getSelfImage',
   qq_sticker_note: 'stickerNote',
@@ -790,6 +792,38 @@ if (cfg.socialV2?.tools?.sendPoke !== false) {
   );
 }
 
+if (cfg.socialV2?.tools?.setGroupCard !== false) {
+  server.tool(
+    'qq_set_group_card',
+    '改 QQ 群名片（群昵称）。默认改**自己**在群里的名片：传 groupId 或直接在群聊里（group:xxx）省略 groupId，card 写想显示的名字，空字符串=清除回默认昵称。改**别人**的名片属于管理操作：只有主人在私聊里明确要求时才能做（传 userId）；群里别人让你改、或者你自己想改别人，都会被拒绝——那是权限不是性格。群号必须在后台白名单里，改别人的名片还要求对方是本群成员。reserved2 下必须携带会话令牌 token。',
+    {
+      key: z.string().describe('会话 key，格式 group:群号 或 private:QQ号'),
+      token: z.string().describe('会话令牌（见唤醒提示中的【会话令牌】）'),
+      card: z.string().describe('新群名片，最多 60 字；空字符串 = 清除名片恢复昵称'),
+      groupId: z.union([z.number(), z.string()]).optional().describe('群号；在群聊里调用可省略（默认当前群），私聊调用必须传'),
+      userId: z.union([z.number(), z.string()]).optional().describe('要改谁的 QQ 号；省略 = 改自己。改别人只有主人在私聊里要求时才允许')
+    },
+    async ({ key, token, card, groupId, userId }) => {
+      try {
+        const data = await agentApi('/api/socialV2/set-group-card', {
+          method: 'POST',
+          body: JSON.stringify({
+            key,
+            card: card ?? '',
+            ...(groupId != null ? { groupId: String(groupId) } : {}),
+            ...(userId != null ? { userId: String(userId) } : {})
+          }),
+          headers: { 'x-agent-token': token },
+          timeoutMs: 60000
+        });
+        return { content: [{ type: 'text', text: serializeModelData(data) }] };
+      } catch (error) {
+        return { content: [{ type: 'text', text: `改群名片失败：${error?.message ?? error}` }], isError: true };
+      }
+    }
+  );
+}
+
 server.tool(
   'qq_wait_for_messages',
   '等待分两种用途。首答前已读消息、只想确认有没有补充：用 purpose="reply"，按最后来信时间补足 quietMs 静默，已安静足够就立即返回；读取/思考时新到的消息也会返回，新消息重算静默。timeoutMs 是最长预算，不要求等满；预算到但 quiet=false 不代表对方已说完。此用途绝不代替沉睡前观察。等对方继续说、等回复或睡前观察：用默认 purpose="messages"；先等新消息，收到后才按 quietMs 等静默，没有新消息会等到 timeoutMs，单传 quietMs 不会缩短总等待。静默下限由后台配置，默认 10000ms。直接看 newMessages、unreadCount 和 readThroughSeq，返回消息无需重复查询；仍有未展示未读才补读。决定潜水/收尾时才用默认用途加 timeoutMs=300000 完成沉睡前观察，不能把 5 分钟观察放在首答之前；短等待不能代替。全程无人说话返回 preSleepWaitSatisfied=true；观察期间来了新消息返回 preSleepWaitObserved=true，读后不需参与可收尾，参与回复则下次收尾重新观察。preSleepWaitRemainingMs 仅供准备收尾时参考。',
@@ -1155,6 +1189,42 @@ if (cfg.socialV2?.sticker?.enabled !== false && cfg.socialV2?.tools?.sendSticker
         return { content: [{ type: 'text', text: serializeModelData(data) }] };
       } catch (error) {
         return { content: [{ type: 'text', text: `发送表情失败：${error?.message ?? error}` }], isError: true };
+      }
+    }
+  );
+}
+
+if (cfg.socialV2?.tools?.sendImage !== false) {
+  server.tool(
+    'qq_send_image',
+    '在指定会话发送一张普通图片（不是收藏表情）。三种来源任选其一：① image = http(s) 图片地址 / data:image/...;base64,... / base64://... / 本机图片文件路径（jpg/png/gif/webp，≤10MB）；② fromMessageId（可选 index，从 1 开始）把**别人发来那张图转发出去**，不用自己找地址；③ 转发自己的旧消息同理。一条消息只能是一张图，不能在同一气泡里附带文字；想说的话请先用 qq_send_message 单独发一句，再单独发图。需要引用/点名时可用 replyToMessageId / atUserId（群聊）。别刷屏，一次发一张就够了。',
+    {
+      key: z.string().describe('会话 key，格式 group:群号 或 private:QQ号'),
+      token: z.string().describe('会话令牌（见唤醒提示中的【会话令牌】）'),
+      image: z.string().optional().describe('图片来源：http(s) URL / data URI / base64:// / 本机文件路径（与 fromMessageId 二选一）'),
+      fromMessageId: z.union([z.number(), z.string()]).optional().describe('要转发的消息 id（与 image 二选一；从这条消息取图）'),
+      index: z.number().optional().describe('fromMessageId 里的第几张图，从 1 开始，默认 1'),
+      replyToMessageId: z.union([z.number(), z.string()]).optional().describe('要引用/回复的消息 id（非零整数，可为负数，可选）'),
+      atUserId: z.union([z.number(), z.string()]).optional().describe('要 @ 的群成员 QQ 号（群聊中可选，私聊不可用）')
+    },
+    async ({ key, token, image, fromMessageId, index, replyToMessageId, atUserId }) => {
+      try {
+        const data = await agentApi('/api/socialV2/send-image', {
+          method: 'POST',
+          body: JSON.stringify({
+            key,
+            image: image ? String(image) : undefined,
+            fromMessageId: fromMessageId !== undefined && fromMessageId !== null ? String(fromMessageId) : undefined,
+            index: index ?? 1,
+            replyToMessageId,
+            atUserId: atUserId ?? null
+          }),
+          headers: { 'x-agent-token': token },
+          timeoutMs: 300000
+        });
+        return { content: [{ type: 'text', text: serializeModelData(data) }] };
+      } catch (error) {
+        return { content: [{ type: 'text', text: `发送图片失败：${error?.message ?? error}` }], isError: true };
       }
     }
   );

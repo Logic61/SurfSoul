@@ -426,8 +426,17 @@ export function apply(ctx) {
     }
   }
 
-  /** 切换角色前把桥接的会话映射挪走：新角色必须从空会话开始，不能带旧人格上下文。 */
-  function archiveBridgeRuntimeState() {    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  /**
+   * 切换角色前给桥接的运行时状态留档。
+   *
+   * 2026-10-29 修：原来是**先** stopAllBridgeSessions()（里面调 /api/socialV2/reset 把状态清空）
+   * **再**把 sessions.json / social-v2.json 挪进备份目录——挪走的是已经被清空的文件，
+   * 归档下来两份空壳。切一次角色，旧角色的 recentMessages、进行中的话题、想说没说的话、
+   * 群友印象全部不可恢复（当天就踩到了：切回甘棠后她连称呼都变回「管理员」）。
+   * 现在改成**在清空之前 copy**，原文件仍交给桥接自己处理，切角色至少还能从归档里捞旧状态。
+   */
+  function archiveBridgeRuntimeState() {
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
     const dir = path.join(BACKUP_DIR, `character-switch-${stamp}`);
     fs.mkdirSync(dir, { recursive: true });
     const files = ['sessions.json', 'social-v2.json'];
@@ -436,7 +445,7 @@ export function apply(ctx) {
       const src = path.join(QQ_STATE_DIR(), name);
       try {
         if (!fs.existsSync(src)) continue;
-        fs.renameSync(src, path.join(dir, name));
+        fs.copyFileSync(src, path.join(dir, name));
         moved.push(name);
       } catch (error) {
         pluginLog(`切换角色：归档 ${name} 失败：`, error?.message ?? error);
@@ -454,6 +463,8 @@ export function apply(ctx) {
     const wasRunning = skipPlatform ? false : (await bridgeStatus()).running;
     let schedulerWasRunning = !skipPlatform && Boolean(scheduler && schedulerStatus.running);
     try {
+      // 必须在 stopAllBridgeSessions()（里面会 /api/socialV2/reset 清空状态）**之前**留档。
+      const archived = archiveBridgeRuntimeState();
       if (schedulerWasRunning) {
         try { await scheduler?.retire?.(); } catch (error) { pluginLog('切换角色：停 B站 会话失败：', error?.message ?? error); }
         scheduler = null;
@@ -472,7 +483,7 @@ export function apply(ctx) {
       if (current) beforeSwitchSnapshot(current.id);
       const switched = switchToCharacter(id);
       writeCharacterRolePointer();
-      const archived = archiveBridgeRuntimeState();
+      // 归档在上面（清空状态之前）已经做过，这里不再重复。
       // 先把新角色的记忆卡 prompt 生成好，再启动桥接/调度器，避免开头几条提示词读不到记忆。
       await runMemoryCardMaintenance({}).catch((error) => pluginLog('切换角色后整理记忆卡失败：', error?.message ?? error));
       if (wasRunning) {
@@ -525,6 +536,13 @@ export function apply(ctx) {
   characterInitial.unref?.();
   characterTimer = setInterval(runCharacterAutoSave, 6 * 60 * 60 * 1000);
   characterTimer.unref?.();
+
+  // 记忆卡自动整理：机器本来就有（index.js 下面 `startMemoryCardTimer`，每 10 分钟一次，
+  // 由 plugins/surfcore/lib/memory-card.js 提供），2026-10-29 排查「一天之内说的都忘了」
+  // 时一度以为没有、准备在这里补一个，看到既有实现后撤回——不要出现两个定时器重复搬运。
+  // 真正的问题在别处：卡片里塞满了「哦 / 在 / 啥阴」这类低信息量碎句（已在
+  // src/memory-card.js 的 sectionize 里过滤），以及会话被 /api/session/reset 重建后
+  // DSH 侧的对话上下文整段丢失（那部分不是记忆卡能补的）。
 
   // QQ → B站 定时同步（默认关闭；开启后每 30 分钟一次，启动 20 秒后先跑一次）。
   const startSyncTimer = () => {

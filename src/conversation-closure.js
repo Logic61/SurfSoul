@@ -389,9 +389,24 @@ export function formatClosureRecord(record, now = Date.now()) {
  * 每次唤醒注入的判断块。只给「参数 + 建议」，不替模型做决定。
  * 有近期对话才注入；没有对话时返回空串，避免每轮白烧 token。
  */
-export function closurePromptBlock(assessment, { record = null, now = Date.now(), config = {} } = {}) {
+export function closurePromptBlock(assessment, { record = null, now = Date.now(), config = {}, platform = 'group' } = {}) {
   const cfg = normalizeClosureConfig(config);
   if (!cfg.enabled || !cfg.promptInWake) return '';
+  // 私聊不做「该不该收尾」的评分。一对一的对话里塞一张「我的继续意愿 / 对方的继续意愿 /
+  // 话题闭环 / 节奏疲劳」的表，等于让她每轮都在评估对面这个人值不值得再聊 —— 2026-10-29
+  // 羽反馈的「说话很疏离」主要就来自这里。私聊只保留「上次收在哪」这条连续性，加上一句
+  // 「不用每轮判断要不要收」。
+  if (platform === 'private') {
+    const lines = [];
+    if (record && record.at) {
+      const recent = record.reopenedAt && now - Number(record.reopenedAt) < 10 * 60 * 1000;
+      lines.push(recent
+        ? `上次这段刚收过尾，现在他又开口了：这是新的开始，别复读上次的结尾。${formatClosureRecord(record, now)}`
+        : `【上次收在哪】${formatClosureRecord(record, now)}`);
+    }
+    lines.push('聊到自然收住就不用再补一句，直接 qq_close_conversation 记一笔；不用每轮都判断要不要收。');
+    return lines.join('\n');
+  }
   if (!assessment || (!assessment.signals?.lastOtherKind && !assessment.signals?.lastSelfKind)) return '';
   const s = assessment.signals;
   const lastOther = s.lastOtherKind ? labelOf(s.lastOtherKind) : '暂无';

@@ -30,7 +30,10 @@ import YAML from 'js-yaml';
 import { resolveSafeAddresses, safeFetch } from './safe-fetch.js';
 
 const DEFAULT_BASE_URL = 'https://api.deepseek.com/anthropic/v1';
-const DEFAULT_MODEL = 'deepseek-v4-flash';
+// 2026-10-29：原来是 deepseek-v4-flash，DeepSeek 接口已经不认这个名字了，会直接 400
+// （"The supported API model names are deepseek-flash, deepseek-v4-pro"），
+// 于是 web_search 一直报「HTTP 400」。默认改成接口真正接受的那个快模型。
+const DEFAULT_MODEL = 'deepseek-flash';
 const DEFAULT_API_VERSION = '2023-06-01';
 const DEFAULT_API_KEY_ENV = 'DEEPSEEK_API_KEY';
 const DEFAULT_TIMEOUT_MS = 35000;

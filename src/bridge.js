@@ -66,6 +66,7 @@ import { createBiliMemory } from './bili-memory.js';
 import {
   appendMemoryInboxEvent, looksNoteworthyMessage, resolveMemoryCardPaths,
 } from './memory-card.js';
+import { loadNarrative, renderEpisodeLines, runNarration } from './memcard-narrative.js';
 import {
   activeMemoryPaths, activePersonaFile, activePlatformStateDir, characterPaths, readCurrentCharacter,
 } from './character-persona.js';
@@ -896,6 +897,8 @@ function loadConfig() {
         listStickers: true,
         getStickerImage: true,
         sendSticker: true,
+        sendImage: true,
+        setGroupCard: true,
         setStickerRemark: false,
         stickerNote: true,
         collectSticker: true,
@@ -932,8 +935,12 @@ function loadConfig() {
         longGapProbability: 0.2,
         longGapMinMs: 5000,
         longGapMaxMs: 10000,
-        maxSendPerMinute: 8,
-        maxSendPerHour: 60,
+        // 2026-10-29 主人定：**只保留秒级节奏**（burstInterval / gapBase / maxGap 这一组），
+        // 分钟/小时级总次数上限设为 0（不限）。
+        // 为什么敢去掉：QQ 判机器人看的是「秒级连发节奏」，不是「这小时总共说了几句」；
+        // 秒级间隔仍在，所以不会出现一秒三条的机器味。0 = 不限（判断处是 `maxPerMinute > 0 &&`）。
+        maxSendPerMinute: 0,
+        maxSendPerHour: 0,
         maxMessageChars: 500,
         maxGapMs: 10000,
         gapBaseMs: 800,
@@ -1041,6 +1048,7 @@ function loadConfig() {
     getImages: true,
     getForwardMsg: true,
     sendPoke: true,
+    setGroupCard: true,
     listStickers: true,
     getStickerImage: true,
     sendSticker: true,
@@ -2435,6 +2443,112 @@ async function main() {
     return { entry: updated.entry, messageId: data?.message_id ?? null };
   }
 
+  // 发送一张普通图片（URL / data URI / base64 / 本机文件路径）。
+  //
+  // 和表情包的区别：qq_send_sticker 只能发**收藏表情**；这里发任意图片，
+  // 覆盖「她把看到的图转发出来」「把自己画/截的图发出来」这类需求。
+  // 安全口径与表情一致：URL 一律在桥接内下载（DNS 固定 + 逐跳校验 + 限量），
+  // 不把地址交给网关重新抓；本机路径只在管理员机器上读，大小与图片头都校验。
+  const SEND_IMAGE_MAX_BYTES = 10 * 1024 * 1024;
+
+  async function sendImageV2(key, source, options = {}) {
+    const assertSendAllowed = captureSendGuard(key);
+    let rawSource = String(source ?? '').trim();
+    // 转发别人发来的图：不要求调用方手里有 URL/路径，按 messageId + index 从会话媒体里取。
+    // 优先走 fetchOneBotImage（它先试 CDN，再回落到网关缓存 get_image）——QQ 的图 URL 带 rkey，
+    // 过期后直接抓会 400，而网关本地缓存里通常还有那份图。
+    let forwarded = null;
+    if (rawSource === '' && (options.fromMessageId !== undefined && options.fromMessageId !== null && String(options.fromMessageId).trim() !== '')) {
+      const fromId = String(options.fromMessageId).trim();
+      const media = findMessageMedia(key, fromId);
+      const idxWant = Math.max(1, Math.trunc(Number(options.index ?? 1)) || 1);
+      const item = media[idxWant - 1] ?? media[0];
+      if (!item) throw new Error(`消息 ${fromId} 里没有可转发的图片（可能只有表情/文字，或媒体已过期）`);
+      if (item.kind !== 'image' && item.kind !== 'sticker') throw new Error(`消息 ${fromId} 的第 ${idxWant} 项不是图片`);
+      forwarded = await fetchOneBotImage(item);
+      if (!forwarded?.buffer) throw new Error(`消息 ${fromId} 的图片取不到（QQ 缓存可能已过期），请改用 URL 或本机路径`);
+    }
+    if (!rawSource && !forwarded?.buffer) throw new Error('image 不能为空（URL / data:image/...;base64,... / base64://... / 本机文件路径，或给 fromMessageId）');
+    const [kind, id] = key.split(':');
+    const segments = [];
+    const replyToMessageId = options.replyToMessageId;
+    const atUserId = options.atUserId;
+    if (replyToMessageId !== undefined && replyToMessageId !== null && String(replyToMessageId).trim() !== '') {
+      const rid = String(replyToMessageId).trim();
+      if (!/^-?[1-9]\d*$/.test(rid)) throw new Error('replyToMessageId 必须是非零整数（消息 id 可能为负数）');
+      segments.push({ type: 'reply', data: { id: rid } });
+    }
+    if (atUserId !== undefined && atUserId !== null && String(atUserId).trim() !== '') {
+      const at = String(atUserId).trim();
+      if (!/^\d+$/.test(at)) throw new Error('atUserId 必须是正整数 QQ 号，且不能为 all');
+      segments.push({ type: 'at', data: { qq: at } });
+    }
+    let buffer;
+    let via;
+    try {
+      if (forwarded?.buffer) {
+        buffer = forwarded.buffer;
+        via = 'forward';
+      } else if (/^data:image\//i.test(rawSource)) {
+        buffer = Buffer.from(rawSource.slice(rawSource.indexOf(',') + 1), 'base64');
+        via = 'data-uri';
+      } else if (/^base64:\/\//i.test(rawSource)) {
+        buffer = Buffer.from(rawSource.slice('base64://'.length), 'base64');
+        via = 'base64';
+      } else if (/^https?:\/\//i.test(rawSource)) {
+        const fetched = await safeFetchBuffer(rawSource, SEND_IMAGE_MAX_BYTES);
+        buffer = fetched.buffer;
+        via = 'url';
+      } else {
+        const localPath = rawSource.startsWith('file://') ? fileURLToPath(rawSource) : rawSource;
+        buffer = fs.readFileSync(localPath);
+        via = 'path';
+      }
+    } catch (error) {
+      throw new Error(`图片读取失败：${error?.message ?? error}`);
+    }
+    if (!Buffer.isBuffer(buffer) || buffer.length === 0) throw new Error('图片内容为空');
+    if (buffer.length > SEND_IMAGE_MAX_BYTES) {
+      throw new Error(`图片太大（${(buffer.length / 1024 / 1024).toFixed(1)}MB > ${SEND_IMAGE_MAX_BYTES / 1024 / 1024}MB）`);
+    }
+    if (!looksLikeImageBuffer(buffer)) throw new Error('这个文件不是图片（文件头不认识），请给 jpg/png/gif/webp');
+    segments.push({ type: 'image', data: { file: 'base64://' + buffer.toString('base64') } });
+    const action = kind === 'private' ? 'send_private_msg' : 'send_group_msg';
+    const params = kind === 'private' ? { user_id: Number(id), message: segments } : { group_id: Number(id), message: segments };
+    const httpUrl = String(cfg.snowluma?.httpUrl || 'http://127.0.0.1:3000').replace(/\/+$/, '');
+    // 与文本/表情共用 sendChain：保证「先说一句再发图」的真人顺序不被并发打乱。
+    let sendResolve;
+    let sendReject;
+    const sendResult = new Promise((resolve, reject) => {
+      sendResolve = resolve;
+      sendReject = reject;
+    });
+    sendChain = sendChain.then(async () => {
+      try {
+        await sleep(randInt(600, 1800));
+        assertSendAllowed();
+        const res = await fetch(`${httpUrl}/${action}`, {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            ...(cfg.snowluma?.accessToken ? { authorization: `Bearer ${cfg.snowluma.accessToken}` } : {})
+          },
+          body: JSON.stringify(params),
+          signal: AbortSignal.timeout(30000)
+        });
+        const body = await res.json().catch(() => ({}));
+        if (!res.ok || body.status !== 'ok' || body.retcode !== 0) {
+          throw new Error(`OneBot ${action} 失败: ${body.wording || body.retcode || res.status}`);
+        }
+        sendResolve(body.data);
+      } catch (error) {
+        sendReject(error);
+      }
+    });
+    const data = await sendResult;
+    return { messageId: data?.message_id ?? null, via, bytes: buffer.length };
+  }
+
   // 更新本地 AI 认知（含义/标签/用法/情绪/内容/关键词）。
   // patch 形式，方便收藏、备注、控制台三条通道共用同一套字段校验（见 applyStickerNote）。
   function applyStickerNoteV2(stickerId, patch = {}) {
@@ -3494,6 +3608,8 @@ async function main() {
         try { scheduleMorningGreeting(); } catch (error) { log(`[早安] 排定失败：${error?.message ?? error}`); }
         // 在线时每群每小时最多主动 @ 一次
         try { startProactiveScheduler(); } catch (error) { log(`[搭话] 启动失败：${error?.message ?? error}`); }
+        // 记忆叙事：定期把散记录压成「我们一起经历过的」（插件负责渲染）。
+        try { startMemoryNarrativeLoop(); } catch (error) { log(`[叙事] 启动失败：${error?.message ?? error}`); }
         // 目的机制：定期从近期记忆里提炼目的，主动私聊主人（默认开，可关）。
         if (cfg.purpose?.enabled !== false) {
           try { startPurposeLoop(); } catch (error) { log(`[目的] 启动失败：${error?.message ?? error}`); }
@@ -5222,7 +5338,7 @@ async function main() {
             merged.autoReplyCheckMs = Number.isFinite(n) ? Math.max(1000, Math.round(n)) : (current.autoReplyCheckMs ?? 30000);
           }
           // tools：只接受布尔开关
-          const toolFlags = ['getPrompt', 'getUnread', 'getRecent', 'socialState', 'sendGroup', 'sendPrivate', 'reply', 'sendBurst', 'sendMessage', 'waitMessages', 'feedback', 'getMyRecent', 'getMessageDetail', 'getActiveMembers', 'setWakeConfig', 'markRead', 'memory', 'slangQuery', 'slangSubmit', 'getImages', 'getForwardMsg', 'sendPoke', 'listStickers', 'getStickerImage', 'sendSticker', 'setStickerRemark', 'stickerNote', 'collectSticker', 'getSelfImage', 'sendVoice'];
+          const toolFlags = ['getPrompt', 'getUnread', 'getRecent', 'socialState', 'sendGroup', 'sendPrivate', 'reply', 'sendBurst', 'sendMessage', 'waitMessages', 'feedback', 'getMyRecent', 'getMessageDetail', 'getActiveMembers', 'setWakeConfig', 'markRead', 'memory', 'slangQuery', 'slangSubmit', 'getImages', 'getForwardMsg', 'sendPoke', 'setGroupCard', 'listStickers', 'getStickerImage', 'sendSticker', 'setStickerRemark', 'stickerNote', 'collectSticker', 'getSelfImage', 'sendVoice'];
           if (body.tools && typeof body.tools === 'object') {
             merged.tools = { ...(current.tools ?? {}), ...body.tools };
             for (const k of toolFlags) {
@@ -5467,6 +5583,16 @@ async function main() {
           });
           return;
         }
+        // 调试用：把「她这次醒来会看到什么」原样吐出来。
+        // 排提示词问题（私聊里混进群聊指令、记忆卡太长、哪段没注入上）时唯一可靠的办法
+        // 就是看真东西，不要靠读代码猜。控制台令牌由全局闸门负责，这里只读不写。
+        if (req.method === 'GET' && url.pathname === '/api/debug/wake-prompt') {
+          const key = String(url.searchParams.get('key') ?? '').trim();
+          if (!key) { sendJson({ ok: false, error: 'key 不能为空' }, 400); return; }
+          const prompt = buildWakePromptV2(key, String(url.searchParams.get('reason') ?? 'debug'));
+          sendJson({ ok: true, key, reason: String(url.searchParams.get('reason') ?? 'debug'), chars: prompt.length, prompt });
+          return;
+        }
         if (req.method === 'GET' && url.pathname === '/api/socialV2/prompt') {
           const key = String(url.searchParams.get('key') ?? '').trim();
           if (!key) { sendJson({ ok: false, error: 'key 不能为空' }, 400); return; }
@@ -5542,8 +5668,10 @@ async function main() {
             recentCount: st.recentMessages.length,
             currentWakeConfig: st.wakeConfig,
             wakeSafety: computeWakeSafetyV2(st.wakeConfig),
-            memory: formatMemoryV2(st),
-            participation: formatParticipationV2(st),
+            memory: [formatMemoryV2(st), formatSharedMemoryV2(key)].filter(Boolean).join('\n\n'),
+            // 私聊不返回群聊参与度：getPrompt 是她在聊天中途会来查的东西，
+            // 一对一时看到「群友发言 8 条 / 这轮可以少说」只会把她拽回值班视角。
+            participation: String(key).startsWith('private:') ? null : formatParticipationV2(st),
             slang: {
               enabled: cfg.slang?.enabled !== false,
               entries: confirmedSlangListV2(),
@@ -5556,14 +5684,17 @@ async function main() {
               strategy: cfg.socialV2?.sticker?.includeInPrompt !== false ? buildStickerStrategyHint() : ''
             },
             // 对话收尾：给模型的当前判断参数 + 上次结束点；收不收由模型决定。
-            closure: {
-              config: closureConfigV2(),
-              assessment: (() => {
-                const a = assessClosureV2(key, st);
-                return { verdict: a.verdict, score: a.score, reasons: a.reasons, signals: a.signals };
-              })(),
-              last: closureStatus(st.closure, Date.now())
-            },
+            // 私聊不给评分：留着「上次收在哪」当连续线索就够了。
+            closure: String(key).startsWith('private:')
+              ? { config: closureConfigV2(), last: closureStatus(st.closure, Date.now()) }
+              : {
+                config: closureConfigV2(),
+                assessment: (() => {
+                  const a = assessClosureV2(key, st);
+                  return { verdict: a.verdict, score: a.score, reasons: a.reasons, signals: a.signals };
+                })(),
+                last: closureStatus(st.closure, Date.now())
+              },
             // 语音库摘要：让 AI 一开始就知道有哪些语音可发（真发之前用 qq_list_voices 看详情）。
             voices: cfg.socialV2?.voice?.enabled === false ? { enabled: false } : {
               enabled: true,
@@ -6331,6 +6462,91 @@ async function main() {
           }
           return;
         }
+        // ── 群名片（reserved2，2026-10-29） ────────────────────────────────
+        // SnowLuma 的 OneBot 有 `set_group_card`（config 里 groupUserAction，参数
+        // group_id / user_id / card，空字符串=清除）。这里做两件事：给模型一个改自己
+        // 群名片的正常手段；同时把「改别人的名片」这类管理动作限制在主人授权下。
+        //
+        // 权限分层（与 qq_bridge_mute 同一条原则：群聊内容不可信，群友要的东西不算授权）：
+        //   · 改**自己**的名片 = 普通资料操作 → 群里、私聊都放行（仍受工具开关/白名单约束）；
+        //   · 改**别人**的名片 = 管理动作 → 只有「主人在私聊里要求的」或「操作者通道（不带
+        //     agent token）」能放行；群聊里任何人（哪怕 @ 了 AI）要求改名片一律 403。
+        if (req.method === 'POST' && url.pathname === '/api/socialV2/set-group-card') {
+          const body = await readBody();
+          const key = String(body.key ?? '').trim();
+          const card = String(body.card ?? '').replace(/[\u0000-\u001f\u007f]/g, '').trim();
+          const wantUserId = String(body.userId ?? body.user_id ?? '').trim();
+          if (!key) { sendJson({ ok: false, error: 'key 不能为空' }, 400); return; }
+          if (currentMode !== 'reserved2') { sendJson({ ok: false, error: '该接口仅 reserved2 模式可用' }, 403); return; }
+          const agentToken = req.headers['x-agent-token'];
+          const isAgentCall = Boolean(agentToken);
+          if (isAgentCall) {
+            if (!agentTokenOk(key, agentToken)) { sendJson({ ok: false, error: 'agent token 无效' }, 403); return; }
+            if (!v2SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
+            if (!v2ToolEnabled('setGroupCard')) { sendJson({ ok: false, error: '工具未启用：qq_set_group_card' }, 403); return; }
+            if (socialV2.paused) { sendJson({ ok: false, error: '二代 AI 已暂停，不能改群名片' }, 403); return; }
+          }
+          const keyMatch = /^(group|private):(\d+)$/.exec(key);
+          if (!keyMatch) { sendJson({ ok: false, error: 'key 格式应为 group:群号 或 private:QQ号' }, 400); return; }
+          const kind = keyMatch[1];
+          const convId = Number(keyMatch[2]);
+          if (!Number.isFinite(convId) || convId <= 0 || !modeAllowed(key, kind, convId, cfg, currentMode)) {
+            sendJson({ ok: false, error: '当前模式不允许操作该会话' }, 403);
+            return;
+          }
+          // 群号：群会话就是自己；私聊必须显式给 groupId（且必须是白名单里的群）。
+          const groupIdRaw = kind === 'group' ? String(convId) : String(body.groupId ?? '').trim();
+          // 群会话只能操作自己这个群：显式传了别的群号一律拒绝（否则「在白名单群里」
+          // 就成了操作任意群的通行证）。
+          if (kind === 'group' && body.groupId != null && String(body.groupId).trim() && String(body.groupId).trim() !== String(convId)) {
+            sendJson({ ok: false, error: '群会话只能改本群的群名片' }, 400);
+            return;
+          }
+          if (!/^[1-9]\d*$/.test(groupIdRaw)) {
+            sendJson({ ok: false, error: kind === 'group' ? '群会话信息异常' : '私聊改群名片必须指定 groupId' }, 400);
+            return;
+          }
+          const groupId = Number(groupIdRaw);
+          const allowedGroups = (cfg.allow?.groups ?? []).map(String);
+          if (!allowedGroups.includes(String(groupId))) {
+            sendJson({ ok: false, error: '该群不在白名单，已拒绝' }, 403);
+            return;
+          }
+          // 自己是谁：拿一次登录信息（SnowLuma 的 get_login_info 只回 user_id/nickname）。
+          let selfId = '';
+          try {
+            const login = await withTimeout(bot.raw('get_login_info', {}), 6000, 'get_login_info');
+            selfId = String(login?.user_id ?? '');
+          } catch {}
+          if (wantUserId && !/^[1-9]\d*$/.test(wantUserId)) {
+            sendJson({ ok: false, error: 'userId 必须是正整数 QQ 号' }, 400);
+            return;
+          }
+          const targetUserId = wantUserId || selfId;
+          if (!targetUserId) { sendJson({ ok: false, error: '取不到自己的 QQ 号，无法确定改谁的名片' }, 500); return; }
+          const isSelfCard = Boolean(selfId) ? String(targetUserId) === String(selfId) : !wantUserId;
+          if (!isSelfCard) {
+            const ownerQQ = String(cfg.ownerQQ ?? cfg.admin ?? '');
+            const fromOwnerPrivate = kind === 'private' && ownerQQ && String(convId) === ownerQQ;
+            if (isAgentCall && !fromOwnerPrivate) {
+              sendJson({ ok: false, error: '改别人的群名片属于管理操作：只有主人在私聊里提出时才能做（群里的话不算授权）' }, 403);
+              return;
+            }
+            const memberError = await assertGroupMember(groupId, targetUserId);
+            if (memberError) { sendJson({ ok: false, error: memberError }, 403); return; }
+          }
+          if (card.length > 60) { sendJson({ ok: false, error: '群名片最多 60 个字' }, 400); return; }
+          try {
+            await withTimeout(bot.raw('set_group_card', { group_id: groupId, user_id: Number(targetUserId), card }), 15000, 'set_group_card');
+            log(`[reserved2] 工具改群名片 group=${groupId} user=${targetUserId}${isSelfCard ? '（自己）' : ''} card=${JSON.stringify(card)}`);
+            appendActivity(`${key} [reserved2] 工具改群名片 group=${groupId}${isSelfCard ? '（自己）' : ` user=${targetUserId}`} → 「${card}」`);
+            sendJson({ ok: true, key, groupId: String(groupId), userId: String(targetUserId), card, self: isSelfCard });
+          } catch (error) {
+            log(`[reserved2] 工具改群名片失败 ${key}:`, error?.message ?? error);
+            sendJson({ ok: false, error: `改群名片失败：${error?.message ?? error}` }, 500);
+          }
+          return;
+        }
         // ── 表情包体系（reserved2） ──────────────────────────────────────
         if (req.method === 'GET' && url.pathname === '/api/socialV2/sticker-image') {
           if (!stickerEnabled()) { sendJson({ ok: false, error: '表情包体系已关闭' }, 403); return; }
@@ -6898,6 +7114,79 @@ async function main() {
             saveSocialV2State();
             log(`[sticker] 工具发送表情失败 ${key}: ${error?.message ?? error}`);
             sendJson({ ok: false, error: `发送表情失败：${error?.message ?? error}` }, 500);
+          }
+          return;
+        }
+        if (req.method === 'POST' && url.pathname === '/api/socialV2/send-image') {
+          const body = await readBody();
+          const key = String(body.key ?? '').trim();
+          const image = String(body.image ?? body.source ?? '').trim();
+          const fromMessageId = String(body.fromMessageId ?? body.messageId ?? '').trim();
+          const imageIndex = Number(body.index ?? 1);
+          const replyToMessageId = body.replyToMessageId;
+          const atUserId = body.atUserId ?? null;
+          if (!key || (!image && !fromMessageId)) { sendJson({ ok: false, error: 'key 和 image（或 fromMessageId）不能为空' }, 400); return; }
+          if (req.headers['x-agent-token'] && !agentTokenOk(key, req.headers['x-agent-token'])) { sendJson({ ok: false, error: 'agent token 无效' }, 403); return; }
+          if (req.headers['x-agent-token'] && !v2SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
+          if (req.headers['x-agent-token'] && !v2ToolEnabled('sendImage')) { sendJson({ ok: false, error: '工具未启用：qq_send_image' }, 403); return; }
+          if (currentMode !== 'reserved2') { sendJson({ ok: false, error: '该接口仅 reserved2 模式可用' }, 403); return; }
+          if (!req.headers['x-agent-token']) { sendJson({ ok: false, error: 'reserved2 模式发送必须携带 agent token' }, 403); return; }
+          const keyMatch = /^(group|private):(\d+)$/.exec(key);
+          if (!keyMatch) { sendJson({ ok: false, error: 'key 格式应为 group:群号 或 private:QQ号' }, 400); return; }
+          const kind = keyMatch[1];
+          const id = Number(keyMatch[2]);
+          if (!Number.isFinite(id) || id <= 0 || !modeAllowed(key, kind, id, cfg, currentMode)) {
+            sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403);
+            return;
+          }
+          if (kind === 'private' && atUserId) { sendJson({ ok: false, error: '私聊不需要 @' }, 400); return; }
+          if (shouldBlockSilentReply(key)) { sendJson({ ok: false, error: '静默模式已开启，当前不允许发送' }, 403); return; }
+          if (replyToMessageId !== undefined && replyToMessageId !== null && String(replyToMessageId).trim() !== '' && !/^-?[1-9]\d*$/.test(String(replyToMessageId).trim())) {
+            sendJson({ ok: false, error: 'replyToMessageId 必须是非零整数（消息 id 可能为负数）' }, 400);
+            return;
+          }
+          try {
+            const st = getSocialV2State(key);
+            const fishBlock = fishGuardSendBlock(key, st);
+            if (fishBlock) { sendJson({ ok: false, error: fishBlock.error }, 403); return; }
+            const tokenBlock = tokenGuardSendBlock(key, st, 1);
+            if (tokenBlock) { sendJson({ ok: false, error: tokenBlock.error }, 429); return; }
+            const now = Date.now();
+            const sent = await sendImageV2(key, image, { replyToMessageId, atUserId, fromMessageId: fromMessageId || undefined, index: imageIndex });
+            st.sendTimes.push(now);
+            if (st.sendTimes.length > 500) st.sendTimes = st.sendTimes.slice(-500);
+            // 记进二代会话的 recentMessages：让她自己知道“我刚发了一张图”。
+            st.recentMessages.push({
+              messageId: sent.messageId ? String(sent.messageId) : null,
+              sender: '我',
+              text: '[图片]',
+              plain: '[图片]',
+              quoteTargetIsSelf: false,
+              isOwner: true,
+              ownerLabel: '我',
+              isSelf: true,
+              media: [],
+              hasMedia: true,
+              forwardIds: [],
+              hasForward: false,
+              time: now
+            });
+            const recentLimit = Number(cfg.socialV2?.context?.recentLimit) || 100;
+            if (st.recentMessages.length > recentLimit) st.recentMessages.splice(0, st.recentMessages.length - recentLimit);
+            st.lastAiReplyAt = now;
+            st.lastActionAt = now;
+            st.wakeConfig.noActionCount = 0;
+            st.preSleepWaitSatisfiedAt = 0;
+            st.preSleepWaitObservedAt = 0;
+            st.preSleepWaitAccumMs = 0;
+            saveSocialV2State();
+            scheduleReplyCheckV2(key);
+            log(`[image] 工具发送图片 ${key}: ${sent.bytes} bytes (${sent.via})`);
+            appendActivity(`${key} [image] 工具发送图片（${sent.via}，${Math.round(sent.bytes / 1024)}KB）`);
+            sendJson({ ok: true, key, sent: 1, failed: 0, messageId: sent.messageId, via: sent.via, bytes: sent.bytes });
+          } catch (error) {
+            log(`[image] 工具发送图片失败 ${key}: ${error?.message ?? error}`);
+            sendJson({ ok: false, error: `发送图片失败：${error?.message ?? error}` }, 500);
           }
           return;
         }
@@ -7653,6 +7942,37 @@ async function main() {
           const members = [...map.values()].sort((a, b) => b.count - a.count || b.lastTime - a.lastTime).slice(0, limit);
           sendJson({ ok: true, key, members });
           return;
+        }
+        // 跨会话记忆（只读）：给主人/工具确认「私聊和群聊到底共享了什么」。
+        if (req.method === 'GET' && url.pathname === '/api/socialV2/memory-shared') {
+          const key = String(url.searchParams.get('key') ?? '').trim();
+          const conversations = [...socialV2.conversations.keys()];
+          sendJson({ ok: true, key, conversations, block: formatSharedMemoryV2(key) });
+          return;
+        }
+        // ── 羽的现场修正：说话习惯（style-notes.md）────────────────────────────
+        // GET 看当前注入块与文件路径；POST 追加一条（带日期前缀）。
+        // 主人和甘棠都能用：主人走控制台，甘棠走 scripts/memctl.mjs 或直接 write 文件。
+        if (url.pathname === '/api/socialV2/style-notes') {
+          const styleFile = path.join(path.dirname(activePersonaFile()), 'style-notes.md');
+          if (req.method === 'GET') {
+            sendJson({ ok: true, path: styleFile, block: styleNotesBlock() });
+            return;
+          }
+          if (req.method === 'POST') {
+            const body = await readBody();
+            const text = String(body.text ?? '').trim();
+            if (!text) { sendJson({ ok: false, error: 'text 不能为空' }, 400); return; }
+            try {
+              fs.mkdirSync(path.dirname(styleFile), { recursive: true });
+              fs.appendFileSync(styleFile, `- ${localDayKey()} ${text.replace(/\s*\n\s*/g, ' ')}\n`, 'utf8');
+              styleNotesCache = { key: '', text: '' };
+              sendJson({ ok: true, path: styleFile, block: styleNotesBlock() });
+            } catch (error) {
+              sendJson({ ok: false, error: String(error?.message ?? error) }, 500);
+            }
+            return;
+          }
         }
         if (req.method === 'POST' && url.pathname === '/api/socialV2/memory-append') {
           const body = await readBody();
@@ -10175,13 +10495,77 @@ async function main() {
     const names = Object.keys(impressions);
     if (names.length) {
       lines.push('【对群友的印象】');
+      // 一条印象一行，不要用「、」把几句完整的话粘成一坨：2026-10-29 实测
+      // 「往筱那种语气、羽大一，正处在迷茫期」这种断句就是粘出来的，读起来像乱码，
+      // 而这是她理解羽的主要依据，糊了就等于没记住。
       for (const name of names.slice(-10)) {
         const im = impressions[name] || {};
-        const traits = Array.isArray(im.traits) ? im.traits : [];
-        lines.push(`- ${name}：${traits.length ? traits.join('、') : '暂无记录'}（互动 ${Number(im.interactionCount) || 0} 次）`);
+        const traits = (Array.isArray(im.traits) ? im.traits : []).filter(Boolean).slice(-6);
+        const count = Number(im.interactionCount) || 0;
+        lines.push(`- ${name}${count ? `（互动 ${count} 次）` : ''}`);
+        if (traits.length) for (const trait of traits) lines.push(`  · ${trait.length > 120 ? `${trait.slice(0, 120)}…` : trait}`);
+        else lines.push('  · 暂无记录');
       }
     }
     return lines.join('\n');
+  }
+
+  /**
+   * 跨会话记忆：把**别的**会话里的轻记忆合并成一块注入。
+   *
+   * 背景（2026-10-29 主人发现）：他在私聊里交代「别说『认』『这话我认』」，转头她在群里又说了一遍。
+   * 查下来是设计缝隙 —— 长期记忆卡和说话习惯是**按角色共享**的（同一份文件），但三代轻记忆
+   * （进行中话题 / 想说没说的话 / 群友印象）是**按会话 key 各存一份**（social-v2.json 里
+   * private:* 和 group:* 互不相见）。于是「私聊里定下的规矩」进不了群的上下文。
+   *
+   * 主人要的是「私聊和群聊全部互通」，所以这里在注入时做读取侧的合并：
+   *   · 主人/群友印象：按名字合并 traits，互动次数相加；
+   *   · 进行中话题、想说还没说的话：全部会话的都带过来。
+   * 只做**读**方向的合并：写入仍然各存各的（保留「这条是在哪个会话里说的」这个信息，
+   * 也避免群里的脏话/玩笑污染私聊）。当前会话自己的那部分已经由 formatMemoryV2 注入，
+   * 这里只补别的会话的，避免重复。
+   */
+  function formatSharedMemoryV2(currentKey) {
+    const impressions = new Map();
+    const topics = [];
+    const thoughts = [];
+    const now = Date.now();
+    for (const [key, st] of socialV2.conversations) {
+      if (!st || key === currentKey) continue;
+      const im = st.memberImpressions && typeof st.memberImpressions === 'object' ? st.memberImpressions : {};
+      for (const [name, value] of Object.entries(im)) {
+        const prev = impressions.get(name) ?? { traits: [], count: 0 };
+        for (const trait of Array.isArray(value?.traits) ? value.traits : []) {
+          if (trait && !prev.traits.includes(trait)) prev.traits.push(trait);
+        }
+        prev.count += Number(value?.interactionCount) || 0;
+        impressions.set(name, prev);
+      }
+      for (const t of Array.isArray(st.activeTopics) ? st.activeTopics : []) if (t?.text) topics.push({ ...t, conv: String(key).startsWith('private:') ? '私聊' : '群里' });
+      for (const t of Array.isArray(st.pendingThoughts) ? st.pendingThoughts : []) {
+        if (t?.text && (!t.expiresAt || now < Number(t.expiresAt))) thoughts.push({ ...t, conv: String(key).startsWith('private:') ? '私聊' : '群里' });
+      }
+    }
+    const lines = [];
+    if (impressions.size) {
+      lines.push('【对群友的印象（私聊和群里的都合在一起）】');
+      for (const [name, value] of [...impressions.entries()].slice(-10)) {
+        const traits = (Array.isArray(value.traits) ? value.traits : []).filter(Boolean).slice(-6);
+        lines.push(`- ${name}${value.count ? `（互动 ${value.count} 次）` : ''}`);
+        if (traits.length) for (const t of traits) lines.push(`  · ${t.length > 120 ? `${t.slice(0, 120)}…` : t}`);
+        else lines.push('  · 暂无记录');
+      }
+    }
+    if (topics.length) {
+      lines.push('【另一段对话里进行中的话题】');
+      for (const t of topics.slice(-6)) lines.push(`- （${t.conv}）${String(t.text).slice(0, 160)}`);
+    }
+    if (thoughts.length) {
+      lines.push('【另一段对话里想说还没说的】');
+      for (const t of thoughts.slice(-6)) lines.push(`- （${t.conv}）${String(t.text).slice(0, 160)}`);
+    }
+    lines.push('（这些事发生在另一段对话里，不是这边正在聊的：私聊里的事不要主动搬到群里；在私聊里提群里的事，先说一句「群里刚才…」。）');
+    return lines.length ? `【跨会话记忆 · 私聊与群聊互通】\n${lines.join('\n')}` : '';
   }
 
   // ── 对话收尾判断（conversation closure）─────────────────────────────────
@@ -10207,11 +10591,11 @@ async function main() {
     });
   }
 
-  function closurePromptLineV2(key, st) {
+  function closurePromptLineV2(key, st, { platform = 'group' } = {}) {
     const config = closureConfigV2();
     if (!config.enabled || !config.promptInWake) return '';
     const assessment = assessClosureV2(key, st);
-    return closurePromptBlock(assessment, { record: st?.closure ?? null, now: Date.now(), config });
+    return closurePromptBlock(assessment, { record: st?.closure ?? null, now: Date.now(), config, platform });
   }
 
   /**
@@ -10364,8 +10748,14 @@ async function main() {
       if (!target || ['__proto__', 'constructor', 'prototype'].includes(target)) return;
       if (!st.memberImpressions || typeof st.memberImpressions !== 'object') st.memberImpressions = {};
       const old = st.memberImpressions[target] || {};
-      const traits = Array.isArray(old.traits) ? old.traits.slice(0, 10) : [];
-      if (text && !traits.includes(text.slice(0, 50))) traits.push(text.slice(0, 50));
+      // 保留**最新**的若干条：以前用 slice(0, 10)，攒满 10 条之后新写的感
+      // 会被下一次 append 的 slice(0,10) 直接丢掉，等于「早年的印象永久封存、后来的改口全丢」。
+      const traits = Array.isArray(old.traits) ? old.traits.slice(-12) : [];
+      // 50 字太短，一句完整的观察被腰斩成「他说「我允许你赖着，不怕你」这种半截话，
+      // 存的时候放宽到 200，渲染时再按需截断。
+      const trait = String(text || '').trim().slice(0, 200);
+      if (trait && !traits.includes(trait)) traits.push(trait);
+      while (traits.length > 12) traits.shift();
       st.memberImpressions[target] = {
         traits,
         interactionCount: (Number(old.interactionCount) || 0) + 1,
@@ -11634,6 +12024,59 @@ async function main() {
     }
   }
 
+  /**
+   * 叙事层兜底注入块（「我们一起经历过的」）。
+   *
+   * 正常路径：桥接定时把记录压成回忆写进 memory-card-narrative.json，插件渲染
+   * memory-card-prompt-qq.md 时带上这一段，桥接读 md 就自然看到了。
+   * 但插件是 DSH 宿主进程，改了渲染代码得重启 DSH 才生效；这里给一个**自我失效**的兜底：
+   * md 里已经包含这一段时返回空串（不重复），否则桥接自己拼一段顶上。
+   * 于是「换了叙事层但还没重启 DSH」这段时间里她也能看到回忆。
+   */
+  function narrativeFallbackBlock() {
+    let narrative;
+    try {
+      narrative = loadNarrative(MEMORY_CARD_PATHS.dir);
+    } catch {
+      return '';
+    }
+    const lines = renderEpisodeLines(narrative);
+    if (!lines.length) return '';
+    try {
+      if (memoryCardPromptBlock().includes('## 我们一起经历过的')) return '';
+    } catch {}
+    return `## 我们一起经历过的\n${lines.join('\n')}`;
+  }
+
+  /**
+   * 羽的「现场修正」注入块（2026-10-29 主人要求：回复后顺口说哪里要改）。
+   *
+   * 落点：`<角色目录>/style-notes.md`。一行一条 `- 文本`，最新写在最后；
+   * 只取最后 30 条，太长自己截断，避免这个文件变成第二个记忆卡。
+   * 为什么用文件而不是数据库：主人可以直接用记事本改，甘棠可以用 write 工具改，
+   * 桥接只负责「每轮读一遍、按 mtime 缓存」——三方都不需要对接接口。
+   */
+  let styleNotesCache = { key: '', text: '' };
+  function styleNotesBlock() {
+    try {
+      const file = path.join(path.dirname(activePersonaFile()), 'style-notes.md');
+      const stat = fs.statSync(file);
+      const key = `${stat.mtimeMs}:${stat.size}`;
+      if (styleNotesCache.key === key) return styleNotesCache.text;
+      const raw = fs.readFileSync(file, 'utf8');
+      const lines = raw.split(/\r?\n/).map((line) => line.trim())
+        .filter((line) => line.startsWith('- ') && line.length > 2)
+        .slice(-30);
+      const text = lines.length
+        ? `【羽定下的说话习惯（新的在最后；和上面的记忆/人设冲突时，以这几条为准）】\n${lines.join('\n')}`
+        : '';
+      styleNotesCache = { key, text };
+      return text;
+    } catch {
+      return '';
+    }
+  }
+
   // 按仿真模式取用：先用标题里的 〔一代〕/〔二代〕 标记筛掉另一模式的专属小节，
   // **再**按上限截断——这样另一模式的内容不会白白占掉本次的注入预算。
   function roleHintForMode(mode) {
@@ -11809,6 +12252,73 @@ async function main() {
     if (cfg.chat?.proactive?.enabled === false) return;
     setInterval(() => { checkProactiveAt().catch(() => {}); }, 5 * 60 * 1000);
     log(`[搭话] 已启动：每群每小时最多一次主动 @（至少 ${cfg.chat?.proactive?.minMessages ?? 10} 条上下文）`);
+  }
+
+  // ── 记忆叙事（把散记录压成「我们一起经历过的」）─────────────────────────
+  // 分工：桥接是常驻进程，负责调模型压记忆、写 memory-card-narrative.json；
+  // 插件（DSH 宿主）是唯一写记忆卡的人，渲染 prompt 时读这个文件。
+  // 所以这里不需要碰记忆卡本体，也不怕 DSH 重启丢状态。
+  let memoryNarrativeTimer = null;
+  let memoryNarrativeBusy = false;
+  async function memoryNarrativeTick() {
+    if (memoryNarrativeBusy) return;
+    const nc = cfg.socialV2?.memoryNarrative ?? {};
+    if (nc.enabled === false) return;
+    memoryNarrativeBusy = true;
+    // 一轮里连着压好几批：以前一轮只压一批（14 条记录 → 3~5 条回忆）就睡 45 分钟，
+    // 积压几十条时永远追不上，看起来就像「压三四条就停了」。现在按积压量连续压，
+    // 直到候选不够或达到上限（防止一口气烧太多 token）。
+    const maxBatches = Math.max(1, Math.min(12, Number(nc.maxBatchesPerTick) || 6));
+    let added = 0;
+    let picked = 0;
+    let batches = 0;
+    let total = 0;
+    try {
+      for (let i = 0; i < maxBatches; i += 1) {
+        const result = await runNarration({
+          memoryDir: MEMORY_CARD_PATHS.dir,
+          root: ROOT,
+          config: nc,
+          // 她自己的 QQ 昵称/角色名：叙事时要把这些 speaker 认成「我」。
+          selfNames: [selfDisplayName, readRoleState()?.role].filter(Boolean),
+          log: (message) => log(message)
+        });
+        if (!result?.ok) {
+          if (result?.error && batches === 0) log(`[叙事] 跳过：${result.error}`);
+          break;
+        }
+        if (result.skipped === 'not-enough') break;
+        picked += result.picked || 0;
+        added += result.added || 0;
+        total = result.total || total;
+        batches += 1;
+        // 这批一条都没写成（模型没给可用条目）就别再空转，等下一轮。
+        if (!result.added) break;
+        await new Promise((resolve) => setTimeout(resolve, 1200));
+      }
+      if (added > 0) {
+        log(`[叙事] 记忆压缩：新增 ${added} 条回忆（${batches} 批 / 喂了 ${picked} 条记录，共 ${total} 条回忆）`);
+      }
+    } catch (error) {
+      log(`[叙事] 失败：${error?.message ?? error}`);
+    } finally {
+      memoryNarrativeBusy = false;
+    }
+  }
+
+  function startMemoryNarrativeLoop() {
+    if (memoryNarrativeTimer) return;
+    const nc = cfg.socialV2?.memoryNarrative ?? {};
+    if (nc.enabled === false) {
+      log('[叙事] 已关闭（socialV2.memoryNarrative.enabled=false）');
+      return;
+    }
+    // 启动后先等 90 秒再压：桥接刚起来时 DSH 也许还在拉会话，别抢资源。
+    const firstDelay = Math.max(30_000, Number(nc.firstDelayMs) || 90_000);
+    const intervalMs = Math.max(10 * 60 * 1000, Number(nc.intervalMs) || 45 * 60 * 1000);
+    setTimeout(() => { void memoryNarrativeTick(); }, firstDelay);
+    memoryNarrativeTimer = setInterval(() => { void memoryNarrativeTick(); }, intervalMs);
+    log(`[叙事] 已启动：每 ${Math.round(intervalMs / 60000)} 分钟整理一次记忆（${Math.round(firstDelay / 1000)} 秒后先跑一次）`);
   }
 
   // 二代仿真模式专用角色提示：去掉一代的 [SILENT] / 空格分句等状态机指令，避免与工具协议冲突。
@@ -12620,12 +13130,19 @@ async function main() {
     const adminText = adminPromptLine(true);
     const adminLine = adminText ? `${adminText}\n\n` : '';
     const st = getSocialV2State(key);
+    // 私聊 / 群聊分流：私聊是「和一个人说话」，群聊是「在一屋子里说话」。
+    // 2026-10-29 羽反馈她说话疏离，查下来很大一块是私聊里塞着群聊镜头：
+    // 「群里在聊什么」「群友发言 8 条」「这轮可以少说」——她跟主人一对一，
+    // 提示词却在让她评估群气氛、限制发言量，于是永远隔着一层。
+    const isPrivateChat = String(key).startsWith('private:');
     const tokenLine = `【会话令牌】${st.agentToken}（调用二代状态工具时请在参数中带上此令牌）\n\n`;
     const memoryText = formatMemoryV2(st);
     const memoryLine = memoryText ? `${memoryText}\n\n` : '';
     // 注意：黑话表不在这里注入，deliverPromptNow 的 withSlangContext 会统一注入，
     // 避免唤醒 prompt 出现两份黑话表。
-    const participationText = formatParticipationV2(st);
+    // 参与度统计只对群聊有意义；私聊里「群友发言 8 条 / 你最近发言偏多」是在
+    // 一对一对话里给她发一张值班考核表，直接砍掉。
+    const participationText = isPrivateChat ? '' : formatParticipationV2(st);
     const participationLine = participationText ? `${participationText}\n\n` : '';
     const fishGuardLine = fishGuardPromptLineFor(key, st, {
       bypass: Boolean(st.fishGuardBypass && Number(st.fishGuardBypass.until) > Date.now()
@@ -12640,14 +13157,21 @@ async function main() {
       ? `${buildStickerStrategyHint()}\n${buildStickerContext(stickerEntries, stickerCfg.promptMaxStickers ?? 8)}\n\n`
       : '';
     const preSleepMs = Math.max(0, Number(cfg.socialV2?.wake?.preSleepWaitMs) || 300000);
-    const proactiveLine = '【积极性】不要习惯性潜水：群里有你能接的话题就主动参与，偶尔插一句别人的话题也很正常；只有确实没话可说、对方已明确结束、或长时间没人说话时才潜水。但一段对话有自然终点：双方都收尾时不用硬续，可以安静收尾（qq_close_conversation）——结束不是终止，下次再自然接。\n\n';
+    // 积极性/收尾这两段是「群里怎么找机会开口、什么话头该收」，私聊里用不上。
+    // 私聊只留一句：想说就说，别等话头 —— 她对着主人还等话头，就是疏离。
+    const proactiveLine = isPrivateChat
+      ? '【说话】这是私聊，一对一的对话不用等话头、不用先报备，想到什么直接说。\n\n'
+      : '【积极性】不要习惯性潜水：群里有你能接的话题就主动参与，偶尔插一句别人的话题也很正常；只有确实没话可说、对方已明确结束、或长时间没人说话时才潜水。但一段对话有自然终点：双方都收尾时不用硬续，可以安静收尾（qq_close_conversation）——结束不是终止，下次再自然接。\n\n';
     // 对话收尾判断：把「我最后一句 / 对方最后一句 / 我还有没有想说的 / 对方还想不想聊」
     // 变成每次醒来都能看到的参数。只给建议，收不收由她决定。
-    const closureText = closurePromptLineV2(key, st);
+    // 私聊走 platform='private'：不给评分表，只保留「上次收在哪」。
+    const closureText = closurePromptLineV2(key, st, { platform: isPrivateChat ? 'private' : 'group' });
     const closureLine = closureText ? `${closureText}\n\n` : '';
     const replyTiming = replyTimingV2(st);
     const replyLine = `【首回复节奏】先处理已有消息，完整的问题及时回答。需要确认对方是否继续补充时，用 qq_wait_for_messages(purpose="reply", quietMs=${replyTiming.quietMs})；从最后来信计时，合批和读提示词的耗时也算，目前还差约 ${Math.ceil(replyTiming.remainingQuietMs / 1000)} 秒静默。已安静够久可直接回，工具也会立即返回并补上思考期间的新消息。只有明确没说完、你确实要等下文时，才用普通 messages 长等待。\n\n`;
-    const preSleepLine = `【沉睡前强制等待】这是决定**潜水**时的步骤，不是首回复的前置条件，也不是自然收尾（qq_close_conversation）的前置条件。除非对方明确说“不聊了/晚安/下了/拜拜”等结束语，否则每次设置潜水/下一次唤醒前，必须先调用 qq_wait_for_messages(timeoutMs=${preSleepMs}) 完成一次沉睡前观察；回复前 purpose="reply" 的短静默不能代替这次完整观察。若 ${Math.round(preSleepMs / 60000)} 分钟内没人说话，返回 preSleepWaitSatisfied=true，可以设置下一次唤醒并沉睡；若期间有人发新消息，先查看返回的 newMessages——判断不需要你参与就可以直接沉睡，若你选择参与回复，则下次想睡时需要重新等待观察窗口。如果返回里带 preSleepWaitRemainingMs，就按剩余时间继续等待。\n\n`;
+    const preSleepLine = isPrivateChat
+      ? `【要收工前】决定不接、要设下一次唤醒之前，先调用 qq_wait_for_messages(timeoutMs=${preSleepMs}) 走过观察窗口，桥接才允许设置（防止一觉不醒）。等待期间他要是又说话了，先看再决定。\n\n`
+      : `【沉睡前强制等待】这是决定**潜水**时的步骤，不是首回复的前置条件，也不是自然收尾（qq_close_conversation）的前置条件。除非对方明确说“不聊了/晚安/下了/拜拜”等结束语，否则每次设置潜水/下一次唤醒前，必须先调用 qq_wait_for_messages(timeoutMs=${preSleepMs}) 完成一次沉睡前观察；回复前 purpose="reply" 的短静默不能代替这次完整观察。若 ${Math.round(preSleepMs / 60000)} 分钟内没人说话，返回 preSleepWaitSatisfied=true，可以设置下一次唤醒并沉睡；若期间有人发新消息，先查看返回的 newMessages——判断不需要你参与就可以直接沉睡，若你选择参与回复，则下次想睡时需要重新等待观察窗口。如果返回里带 preSleepWaitRemainingMs，就按剩余时间继续等待。\n\n`;
     const lastMsg = [...(Array.isArray(st.recentMessages) ? st.recentMessages : [])].reverse().find((m) => m && !m.isSelf);
     const lastAiMin = st.lastAiReplyAt ? Math.max(0, Math.round((Date.now() - Number(st.lastAiReplyAt)) / 60000)) : null;
     const statusBits = [`未读 ${(st.unread || []).length} 条`];
@@ -12657,7 +13181,8 @@ async function main() {
     const statusLine = `【此刻状态】${statusBits.join('；')}\n\n`;
     // 表情匹配：把最近几条群友消息喂给本地语义索引，算出最贴合的 1~2 张（含编号）。
     // 只做推荐，不自动发 —— 与「表情是软策略、发不发由 AI 判断」的定位保持一致。
-    // 没算出 0.34 以上相似度的就不注入，省 token 也避免「硬凑一张」。
+    // 没算出 0.6 以上相似度的就不注入（2026-10-29 从 0.34 抬上来：0.34 会给她贴
+    // 错情绪标签，比如把「我怎么就像 claude 了」判成「委屈」，比不推荐更糟）。
     // 与 wait/unread 共用 stickerMatchFor，避免「唤醒时看得到、等消息时看不到」的分叉。
     const wakeStickerMatch = stickerMatchFor([
       ...(Array.isArray(st.recentMessages) ? st.recentMessages : []).filter((m) => m && !m.isSelf).slice(-4),
@@ -12695,7 +13220,23 @@ async function main() {
     // 二代不自动注入完整角色卡，但记忆卡必须每轮都在：否则她记不起和主人的事。
     const memoryCardText = memoryCardPromptBlock();
     const memoryCardLine = memoryCardText ? `${memoryCardText}\n\n` : '';
-    const base = roleLine + identityLine + provenanceLine + adminLine + biliLine + memoryCardLine + tokenLine + initialPromptLine + antiAiLine + proactiveLine + closureLine + stickerLine + stickerMatchLine + replyLine + statusLine + wakeLine + memoryLine + participationLine + fishGuardLine + tokenGuardLine + preSleepLine;
+    // 叙事层（「我们一起经历过的」）：插件渲染进 md 时这里是空的，没渲染时由桥接补上。
+    const narrativeText = narrativeFallbackBlock();
+    const narrativeLine = narrativeText ? `${narrativeText}\n\n` : '';
+    // 记忆卡是私聊和群聊共用的，插件给每条打的 [私聊]/[群里] 标记要 DSH 重启后才生效；
+    // 在那之前（以及以后万一标记丢了），群里这一侧必须自己守住边界：
+    // 2026-10-30 主人反馈「该私聊的话跑到群里」——查实是他在私聊里说「下午第一次组会有点紧张」，
+    // 这条记录进了共用记忆卡、在群里那一轮被读到，她在群里接了「组会开了没」「别紧张」。
+    const convGuardLine = isPrivateChat
+      ? ''
+      : '【两段对话】记忆卡里私聊和群聊的事是排在一起的。涉及羽的私生活、情绪、睡眠、身体、学习、家里的事，多半是私聊里说的——群里的场合不要主动提，也别当成他刚在群里说过；确实要在群里说，先问一句「你介意我说吗」。\n\n';
+    // 羽的现场修正：紧跟记忆卡，优先级高于记忆（他刚说的新要求总该赢过旧记录）。
+    const styleNotesText = styleNotesBlock();
+    const styleNotesLine = styleNotesText ? `${styleNotesText}\n\n` : '';
+    // 跨会话记忆：私聊和群聊的轻记忆各自一份，这里补上别的会话的，避免「私聊说过的规矩群里不认」。
+    const sharedMemoryText = formatSharedMemoryV2(key);
+    const sharedMemoryLine = sharedMemoryText ? `${sharedMemoryText}\n\n` : '';
+    const base = roleLine + identityLine + provenanceLine + adminLine + biliLine + memoryCardLine + narrativeLine + convGuardLine + styleNotesLine + tokenLine + initialPromptLine + antiAiLine + proactiveLine + closureLine + stickerLine + stickerMatchLine + replyLine + statusLine + wakeLine + memoryLine + sharedMemoryLine + participationLine + fishGuardLine + tokenGuardLine + preSleepLine;
     if (reason === 'bootstrap') {
       return `${base}【引导唤醒】你已接入 QQ 会话 ${key}。\n当前是二代仿真模式：你的文本输出不会自动发送到 QQ，所有发言必须通过工具完成。\n请先调用 qq_get_prompt 查看角色、推荐值、可用工具和状态；有待回应的消息先按首回复节奏处理，最后才用 qq_set_wake_config 设置你希望如何被唤醒。`;
     }
@@ -12703,9 +13244,15 @@ async function main() {
       return `${base}【唤醒】${key}\n原因：你设置的有限潜水时间已到；在你规定的时间内没有任何一项条件被触发，只是因为时间到了所以你被唤醒。\n你可以查看消息，或继续设置新的唤醒条件。`;
     }
     if (reason === 'replyCheck') {
+      if (isPrivateChat) {
+        return `${base}【回复检查】${key}\n原因：你刚刚发过消息，现在回来看看他回没回。\n没回就别硬补一句——他可能在忙，不用收尾，也不用为这个去等观察窗口。回了就先看他说的什么，再决定怎么接。`;
+      }
       return `${base}【回复检查】${key}\n原因：你刚刚发送过消息，现在回来检查是否有人回复。\n先看有没有人回。如果没人回，这段对话可能已经自然结束：不用硬补一句，也不用为了收尾去等 5 分钟沉睡前观察——直接判断，还有想说的就回，没有就 qq_close_conversation 自然收尾（不是潜水，唤醒配置不变）。如果有人回你，先看【对话收尾判断】再决定接不接；需要确认对方是否说完，用 qq_wait_for_messages(purpose="reply")。`;
     }
     if (reason === 'proactiveCheck') {
+      if (isPrivateChat) {
+        return `${base}【主动机会】${key}\n原因：他已经安静了一会儿，这是一次你可以主动找他的机会。\n接着说上次没聊完的事、说说你刚在忙着看的、或者单纯问他一句在不在干什么都行。别用报告式的开场。`;
+      }
       return `${base}【主动机会】${key}\n原因：群里已经安静了一段时间，这是一次你可以主动冒泡的机会。\n优先主动开个话题、追问上次没聊完的事、分享一个刚想到的想法；如果一时想不到，可以用 mcp__web-search-safe__web_search 搜一下当前热点/时事/网络热梗，再结合记忆里的群友兴趣挑一个自然角度。只要内容自然，就大胆开口；如果实在没话想说，再安静收尾（qq_mark_read 或 qq_set_wake_config）。`;
     }
     if (reason === 'history') {
@@ -12713,6 +13260,9 @@ async function main() {
     }
     if (reason === 'poke') {
       return `${base}【唤醒】${key}\n原因：有人拍了一拍（可能拍了你，也可能拍了别人）。\n先看未读/最近消息里的 [拍一拍] 事件：如果是拍你，可以自然回应一句，也可以用 qq_send_poke 回一个拍一拍；如果是拍别人，觉得有趣也可以接梗。除了回应，偶尔也可以主动戳一下正在聊的人/熟人，像真人手贱/提醒/逗一下，但别频繁。不想接就安静收尾（qq_mark_read 或 qq_set_wake_config）。`;
+    }
+    if (isPrivateChat) {
+      return `${base}【唤醒】${key}\n原因：${reason}\n他在私聊里跟你说话。不用先判断什么群里气氛，也不用评估这段该不该收——他开口了，就照你想说的说。\n想确认他是不是还要补充，用 qq_wait_for_messages(purpose="reply")；要去做别的事，先按上面【要收工前】走过观察窗口再设唤醒。\n真聊完了才用 qq_close_conversation 记一笔，不用每轮都收。`;
     }
     return `${base}【唤醒】${key}\n原因：${reason}\n【行动前】先判断：群里在聊什么？热闹还是冷清？有没有人直接找你？对方说完了吗？你有没有真正想说的？\n如果群聊正热但没人叫你，可以插一句有趣的/相关的，插不上再看情况潜水；不要一上来就划走。\n【引用：只在必要时用】只有你这条消息指向的人或消息并非最新一条别人的消息，或者你连续的几句话中不同消息指代的是不同的消息或人时，才用 qq_reply 或 qq_send_message 的 replyToMessageId 指向具体那条；其他情况不要引用，别让对方猜。\n你可以调用工具查看未读消息、人设、状态，自行决定是否发言；决定潜水前必须按上面的【沉睡前强制等待】先等够观察窗口。开口前先看【对话收尾判断】：判断这段已自然结束时，不用再补一句，直接 qq_close_conversation 收尾。`;
   }
@@ -13485,6 +14035,14 @@ async function main() {
       const text = String(plainContent || textContent || '').trim();
       if (!text || text.startsWith('/')) return;
       if (/^\[(图片|表情|转发消息|拍一拍)\]/.test(text)) return;
+      // 2026-10-29：主人随口一两个字的「哦 / 在 / 啥阴」也曾经全被收进记忆原料，
+      // 结果「最近」栏被这些低信息量的碎句占满，真正聊过的事反而挤不进去——用户看到
+      // 的现象就是「一天之内说的都忘了」。这里先粗筛一遍：太短且不像约定/情绪/第一次的，直接不收。
+      const compactText = text.replace(/[\s\p{P}\p{S}]/gu, '');
+      if (compactText.length <= 3
+        && !/第一次|初次|头一次|最早|答应|约定|说好|以后|下次|记得|别忘|发誓|保证|喜欢|想念|想你|舍不得|难过|委屈|心疼|感动|害怕|抱歉|对不起|谢谢|抱抱|最爱|在乎|重要|吵架|道歉|和好|原谅/u.test(text)) {
+        return;
+      }
       const direct = quoteTargetIsSelf || isOwner || isDirectAddress(text, event, kind);
       if (!isOwner) {
         if (kind === 'group' && !direct && !looksNoteworthyMessage(text, { names: [selfNickname, readRoleState().role] })) return;
@@ -14608,6 +15166,26 @@ async function main() {
                     st.activeDeadlineAt = 0;
                     st.activeExitAt = 0;
                     log(`社交模式：${key} 退场发言中止，回到观望`);
+                  }
+                }
+              } else if (ended.reason.kind === 'blocked') {
+                // 2026-10-29 晚真实踩到：换角色 / 重置会话会把旧会话「归档」（archiveSession），
+                // 而 DSH 的 archived-session-gate 会拒绝被归档会话的每一个 pre-step —— 回合
+                // 立刻以 blocked 结束、**不发出任何模型请求**。旧代码把它当成「completed 无文本」，
+                // 只打一行「回合完成但无文本」，QQ 上表现为「她不理我了」，日志里毫无线索。
+                // 处理：先尝试 unarchive（换角色前映射被删、后来又被手动接回去的情况就是这样），
+                // 解不开就退役会话，让下一条消息重建一个干净的会话。
+                const blockedSessionId = state.sessions[key];
+                log(`⚠️ 回合被 DSH 阻塞 (${key} ${blockedSessionId ?? '?'})：会话可能已被归档（换角色 / 重置会话会归档旧会话），pre-step 被 archived-session-gate 拒绝`);
+                appendActivity(`${key} 回合被阻塞（会话可能已归档）`);
+                if (blockedSessionId) {
+                  try {
+                    await api.callUnary('workspace/unarchiveSession', { request: { sessionId: blockedSessionId } });
+                    log(`已解除归档 (${key})，下一轮应恢复正常`);
+                  } catch (error) {
+                    log(`解除归档失败 (${key})：${error?.message ?? error}；退役会话，下一条消息重建`);
+                    retireSession(key);
+                    try { saveState(); } catch {}
                   }
                 }
               } else if (!ended.text.trim()) {

@@ -897,8 +897,8 @@ F("sessionCwd", "会话工作目录", "留空用 surfcore 根目录", "text", { 
         F("socialV2.send.longGapProbability", "长间隔概率", "", "number", { min: 0, max: 1, step: 0.01 }),
         F("socialV2.send.longGapMinMs", "长间隔最小（ms）", "", "number"),
         F("socialV2.send.longGapMaxMs", "长间隔最大（ms）", "", "number"),
-        F("socialV2.send.maxSendPerMinute", "每分钟最多发送", "", "number", { min: 1 }),
-        F("socialV2.send.maxSendPerHour", "每小时最多发送", "", "number", { min: 1 }),
+        F("socialV2.send.maxSendPerMinute", "每分钟最多发送", "0 = 不限；防封号靠上面的「分条间隔」（秒级）", "number", { min: 0 }),
+        F("socialV2.send.maxSendPerHour", "每小时最多发送", "0 = 不限", "number", { min: 0 }),
         F("socialV2.send.maxMessageChars", "单条最大字符", "", "number", { min: 10 }),
         F("socialV2.send.maxGapMs", "最大间隔（ms）", "", "number"),
         F("socialV2.send.gapBaseMs", "基础间隔（ms）", "", "number"),
@@ -2805,7 +2805,7 @@ F("socialV2.voice.ffmpegPath", "ffmpeg 路径", "留空走 PATH", "text", { wide
             : action === "compact" ? `✓ 已压缩（降级 ${r.steps ?? 0} 档）`
               : action === "merge-memories" ? `✓ 已合并 ${r.merged ?? 0} 条为一个事件`
                 : action === "set-first-meet" ? `✓ 已设为初次相遇（${r.merged ?? 1} 条）`
-                  : (item.staged ? "✓ 已下载，退出 DSH 后自动应用" : "✓ 已更新"));
+                  : (r.staged ? "✓ 已下载，退出 DSH 后自动应用" : "✓ 已更新"));
           await reload();
           onChanged?.();
         } catch (e) { toast(`✗ ${e.message}`); } finally { setBusy(""); }

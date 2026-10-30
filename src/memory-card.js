@@ -29,6 +29,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { coveredRecordIds, formatEpisodeLine, formatEpisodeTitleLine, loadNarrative, splitEpisodesForPrompt, resolveNarrativePath } from './memcard-narrative.js';
 
 export const MEMORY_CARD_VERSION = 1;
 export const DAY_MS = 24 * 60 * 60 * 1000;
@@ -175,6 +176,9 @@ export function resolveMemoryCardPaths(memoryDir) {
     markdown: path.join(dir, 'memory-card.md'),
     promptQq: path.join(dir, 'memory-card-prompt-qq.md'),
     promptBili: path.join(dir, 'memory-card-prompt-bili.md'),
+    // 叙事层：桥接把记录压成「我们一起经历过的」，插件渲染时读它。
+    // 单独一个文件（不是塞进 memory-card.json），谁写谁读不打架，丢了重新压就行。
+    narrative: resolveNarrativePath(dir),
     inbox: path.join(dir, 'memory-inbox.jsonl'),
     // 全量记忆卡：只存档（全部清晰、永不遗忘），不生成 prompt 注入块。
     // 10GB 级别不能用「每次读整个 JSON、改完再整份写回」：JSONL 只追加，stats 单独记。
@@ -1686,10 +1690,29 @@ function recordLine(record, { platform = 'qq', full = false } = {}) {
   if (record.isSelf && record.speaker) body = `${record.speaker}：${body}`;
   if (record.botReply) {
     const reply = redactForMemory(record.botReply, { scope, maxChars: 160 });
-    body += ` → 她回：${short(reply, record.clarity === 'vivid' ? 160 : 100)}`;
+    body += ` → 我回：${short(reply, record.clarity === 'vivid' ? 160 : 100)}`;
   }
-  const head = `- ${dateOnly(record.createdAt)} [${CLARITY_LABEL[record.clarity] ?? '清楚'}] `;
+  const head = `- ${dateOnly(record.createdAt)} [${CLARITY_LABEL[record.clarity] ?? '清楚'}]${conversationTag(record, platform)} `;
   return full ? `${head}${body}（重要 ${record.importance}）` : `${head}${body}`;
+}
+
+/**
+ * 这条记忆是在哪段对话里发生的。
+ *
+ * 2026-10-30 主人反馈「应该私聊的发到了群里」：查到根因是记忆卡把私聊和群里的事
+ * 排成一列，一个字都没标——她在群里看到「他下午第一次组会，有点紧张」这条，
+ * 分不清是羽私聊跟她说的还是群里说的，就顺口在群里接了「组会开了没」。
+ * 记录本身一直带着 private / conversationKey 字段，只是渲染时没露面，现在补上。
+ */
+function conversationTag(record, platform = 'qq') {
+  if (platform === 'bili') return '';
+  if (record.scope !== 'qq' && record.platform !== 'qq') return '';
+  if (record.private === true) return ' [私聊]';
+  if (record.private === false) return ' [群里]';
+  const key = String(record.conversationKey ?? '');
+  if (key.startsWith('private:')) return ' [私聊]';
+  if (key.startsWith('group:') || record.groupId) return ' [群里]';
+  return '';
 }
 
 function visibleFor(card, platform, cfg) {
@@ -1702,6 +1725,35 @@ function visibleFor(card, platform, cfg) {
     }
     return true;
   });
+}
+
+/**
+ * 低信息量记录：评分时被判「太短 / 信息量低」、重要度又没高到能当锚点的碎句
+ * （「哦」「在」「啥阴」）。它们会占满「最初 / 和主人 / 最近」的名额，把当天真正
+ * 聊过的事挤出去——用户感知就是「一天之内说的都忘了」（2026-10-29 反馈）。
+ * pinned 例外：用户主动置顶的就是想留。
+ */
+function isLowInfoRecord(record) {
+  if (!record || record.pinned) return false;
+  if ((record.importance ?? 0) >= 60) return false;
+  return Array.isArray(record.importanceReasons) && record.importanceReasons.includes('太短 / 信息量低');
+}
+
+/**
+ * 她自己说出去的话（tags 含 `self`）里，价值够不上锚点的那些。
+ *
+ * 2026-10-29 晚上主人反馈「切换人格后大变样 / 记忆分配有大问题」：
+ * 把卡片摊开看，239 条记录里 74 条是**她自己发的消息**（重要度 35，全是「看把你乐
+ * 的」「十八 害羞怎么了」「换人格也得加钱」这种），它们按时间挤进「最近记得的」和
+ * 「今天聊过的」，把真正发生过的事挤了出去。她说什么不该和「经历了什么」抢名额。
+ *
+ * 处理：importance < 60 且非置顶的 self 记录**不进注入提示词**（仍留在卡片和全量档里，
+ * 需要时可以用 qq_memory_query / 全量卡翻）。高价值的自我复盘（>=60）照旧保留。
+ */
+function isSelfChatter(record) {
+  if (!record || record.pinned) return false;
+  if ((record.importance ?? 0) >= 60) return false;
+  return Array.isArray(record.tags) && record.tags.includes('self');
 }
 
 function sectionize(card, { platform = 'all', now = Date.now(), config = {} } = {}) {
@@ -1724,9 +1776,13 @@ function sectionize(card, { platform = 'all', now = Date.now(), config = {} } = 
   };
   for (const record of visible.filter((item) => item.pinned && item.firstMet)) push(firstMet, record);
   for (const record of visible.filter((item) => item.pinned && !item.firstMet)) push(anchors, record);
-  for (const record of visible.filter((item) => !item.pinned && item.platform !== 'pet' && item.tags.includes('owner') && item.isInitial)) push(initial, record);
-  for (const record of visible.filter((item) => !item.pinned && item.platform !== 'pet' && item.tags.includes('owner') && !item.isInitial)) push(owner, record);
-  for (const record of visible.filter((item) => !item.pinned && item.platform !== 'pet' && !item.tags.includes('owner') && !item.isInitial)) {
+  // 2026-10-29：低信息量的碎句（「哦」「在」「啥阴」，评分时被标了「太短 / 信息量低」）
+  // 不再占「最初 / 和主人 / 最近」这三栏的名额——它们会把当天真正聊过的事挤出去，
+  // 用户感知就是「一天之内说的都忘了」。pinned 不受影响，卡片和全量档里也都还留着。
+  const lowInfo = (record) => isLowInfoRecord(record) || isSelfChatter(record);
+  for (const record of visible.filter((item) => !item.pinned && item.platform !== 'pet' && item.tags.includes('owner') && item.isInitial && !lowInfo(item))) push(initial, record);
+  for (const record of visible.filter((item) => !item.pinned && item.platform !== 'pet' && item.tags.includes('owner') && !item.isInitial && !lowInfo(item))) push(owner, record);
+  for (const record of visible.filter((item) => !item.pinned && item.platform !== 'pet' && !item.tags.includes('owner') && !item.isInitial && !lowInfo(item))) {
     const age = (now - timeOf(record.createdAt, now)) / DAY_MS;
     if (age <= cfg.recentDays) push(recent, record);
   }
@@ -1772,22 +1828,54 @@ export function renderMemoryCard(card, options = {}) {
   const now = Number.isFinite(Number(options.now)) ? Number(options.now) : Date.now();
   const cfg = normalizeMemoryCardConfig(options.config ?? {});
   const maxChars = full ? 0 : clampInt(options.maxChars, 0, 0, 20000);
+  // 叙事层（「我们一起经历过的」）：被某条回忆覆盖的原记录不再逐条出现，
+  // 于是这张卡会慢慢从「聊天记录」变成「经历」。叙事文件坏了就当没有（vis 原样返回）。
+  const narrative = options.narrative && typeof options.narrative === 'object' ? options.narrative : { episodes: [] };
+  // 两档：最近的写全文，更早的只留标题（否则回忆一多，早期的被挤出预算，
+  // 它们原来覆盖的记录又会变回逐条聊天记录）。两档都算「被覆盖」。
+  const episodeSplit = platform === 'bili' ? { full: [], compact: [], hidden: 0 } : splitEpisodesForPrompt(narrative);
+  const covered = coveredRecordIds({ episodes: [...episodeSplit.full, ...episodeSplit.compact] });
+  const vis = (list) => (Array.isArray(list) ? list : []).filter((record) => record && !covered.has(String(record.id)));
   const sections = sectionize(card, { platform, full, now, config: cfg });
   const limits = full
-    ? { firstMet: 9999, anchors: 9999, initial: 9999, owner: 9999, recent: 9999, bili: 9999, qq: 9999, pet: 9999, fuzzy: 9999 }
+    ? { firstMet: 9999, anchors: 9999, initial: 9999, owner: 9999, recent: 9999, bili: 9999, qq: 9999, pet: 9999, fuzzy: 9999, today: 9999 }
     : (platform === 'bili'
-      ? { firstMet: 0, anchors: 4, initial: 0, owner: 0, recent: 6, bili: 8, qq: 0, pet: 0, fuzzy: 3 }
-      : { firstMet: 1, anchors: 5, initial: 6, owner: 8, recent: 8, bili: 4, qq: 8, pet: 4, fuzzy: 4 });
+      ? { firstMet: 0, anchors: 4, initial: 0, owner: 0, recent: 6, bili: 8, qq: 0, pet: 0, fuzzy: 3, today: 0 }
+      // 2026-10-29：主人反馈「一天之内说的都会忘记」。QQ 侧把「最近」和「和主人」两栏
+      // 放宽（8→14 / 8→10），并加一栏「今天聊过的」——按时间倒序取最近 24 小时里
+      // 有信息量的往来，专门保当天的事；字数预算仍由 injectMaxChars.qq 兜住。
+      : { firstMet: 1, anchors: 5, initial: 6, owner: 10, recent: 14, bili: 4, qq: 10, pet: 4, fuzzy: 4, today: 10 });
+  // 有叙事后，逐条记录让位：那些事已经（或即将）被压成「我们一起经历过的」，
+  // 再逐条搬一遍既占预算又把人拉回工单语感。锚点/初次相遇不动。
+  if (episodeSplit.full.length) {
+    for (const key of ['owner', 'recent', 'today', 'qq', 'initial']) limits[key] = Math.max(2, Math.round(limits[key] / 2));
+  }
+  // 「今天聊过的」：最近 24 小时、非置顶、非碎句的 QQ 往来，按发生时间倒序。
+  const todayCut = now - DAY_MS;
+  const todayRecap = platform === 'bili' ? [] : (card.records ?? [])
+    .filter((record) => record && record.platform === 'qq' && record.scope === 'qq')
+    .filter((record) => !isLowInfoRecord(record) && !isSelfChatter(record) && !record.pinned)
+    .filter((record) => !covered.has(String(record.id)))
+    .filter((record) => timeOf(record.createdAt, 0) >= todayCut)
+    .sort((a, b) => timeOf(b.createdAt, 0) - timeOf(a.createdAt, 0))
+    .slice(0, limits.today);
+  // 「我们一起经历过的」：压缩后的回忆，放在最前、优先级最高。
+  // B站 那张卡不带它（里面基本是私聊的事，隐私边界和「QQ 不进 B站」一致）。
+  const episodeLines = episodeSplit.full.map((ep) => formatEpisodeLine(ep));
+  const earlierLines = episodeSplit.compact.map((ep) => formatEpisodeTitleLine(ep));
   const calls = [
-    { key: 'firstMet', title: '## 初次相遇（和主人）', priority: 120, lines: sections.firstMet.slice(0, limits.firstMet).map((record) => recordLine(record, { platform, full })) },
-    { key: 'anchors', title: '## 永远不会忘的', priority: 100, lines: sections.anchors.slice(0, limits.anchors).map((record) => recordLine(record, { platform, full })) },
-    { key: 'initial', title: '## 最初的日子（和主人）', priority: 45, lines: sections.initial.slice(0, limits.initial).map((record) => recordLine(record, { platform, full })) },
-    { key: 'owner', title: '## 和主人（管理员）的记忆', priority: 40, lines: sections.owner.slice(0, limits.owner).map((record) => recordLine(record, { platform, full })) },
-    { key: 'recent', title: '## 最近记得的', priority: 30, lines: sections.recent.slice(0, limits.recent).map((record) => recordLine(record, { platform, full })) },
-    { key: 'pet', title: '## 桌宠（私下相处）', priority: 36, lines: (sections.petModule ?? []).slice(0, limits.pet).map((record) => recordLine(record, { platform, full })) },
-    { key: 'bili', title: '## B站（冲浪）', priority: 22, lines: sections.biliModule.slice(0, limits.bili).map((record) => recordLine(record, { platform, full })) },
-    { key: 'qq', title: '## QQ 与群里的记忆', priority: 20, lines: sections.qqModule.slice(0, limits.qq).map((record) => recordLine(record, { platform, full })) },
-    { key: 'fuzzy', title: '## 正在模糊的事', priority: 10, lines: sections.fuzzy.slice(0, limits.fuzzy).map((record) => recordLine(record, { platform, full })) },
+    { key: 'episodes', title: '## 我们一起经历过的', priority: 96, lines: episodeLines },
+    { key: 'earlier', title: '## 更早还记得的', priority: 94, lines: earlierLines },
+    { key: 'firstMet', title: '## 初次相遇（和主人）', priority: 120, lines: vis(sections.firstMet).slice(0, limits.firstMet).map((record) => recordLine(record, { platform, full })) },
+    { key: 'anchors', title: '## 永远不会忘的', priority: 100, lines: vis(sections.anchors).slice(0, limits.anchors).map((record) => recordLine(record, { platform, full })) },
+    { key: 'today', title: '## 今天聊过的（最近 24 小时）', priority: 90, lines: todayRecap.map((record) => recordLine(record, { platform, full })) },
+    { key: 'initial', title: '## 最初的日子（和主人）', priority: 45, lines: vis(sections.initial).slice(0, limits.initial).map((record) => recordLine(record, { platform, full })) },
+    { key: 'owner', title: '## 和主人的记忆', priority: 40, lines: vis(sections.owner).slice(0, limits.owner).map((record) => recordLine(record, { platform, full })) },
+    { key: 'recent', title: '## 最近记得的', priority: 30, lines: vis(sections.recent).slice(0, limits.recent).map((record) => recordLine(record, { platform, full })) },
+    { key: 'pet', title: '## 桌宠（私下相处）', priority: 36, lines: vis(sections.petModule).slice(0, limits.pet).map((record) => recordLine(record, { platform, full })) },
+    { key: 'bili', title: '## B站（冲浪）', priority: 22, lines: vis(sections.biliModule).slice(0, limits.bili).map((record) => recordLine(record, { platform, full })) },
+    { key: 'qq', title: '## QQ 与群里的记忆', priority: 20, lines: vis(sections.qqModule).slice(0, limits.qq).map((record) => recordLine(record, { platform, full })) },
+    { key: 'fuzzy', title: '## 正在模糊的事', priority: 10, lines: vis(sections.fuzzy).slice(0, limits.fuzzy).map((record) => recordLine(record, { platform, full })) },
   ].filter((section) => section.lines.length);
 
   const limitText = cfg.maxChars > 0
@@ -1804,11 +1892,13 @@ export function renderMemoryCard(card, options = {}) {
   const headerPrompt = [
     '【记忆卡 · 你自己的记忆】',
     '（不是别人给你的设定。最初 / 最近 / 和主人相关的记得清楚，其余会淡忘；真的记不清就说“记不清了”，不要编。）',
+    '（称呼：叫他「羽」或者「主人」，不要叫「管理员」——那是别人对他的误称。）',
+    '（每条前面的 [私聊] / [群里] 是这件事发生在哪段对话里：私聊的事别主动搬到群里，群里的事在私聊里提起要先说一句「群里刚才…」，别让两边混成一锅。）',
   ].join('\n');
   const footerFull = '\n\n---\n\n（这张卡由 SurfCore 自动维护：每天模糊一点不重要的事，重要的事和最早的事不会丢。）';
   const footerPrompt = platform === 'bili'
     ? '\n\n（这些只是你自己的公开经历；不要在 B 站公开提到 QQ 群、QQ 号或群昵称。）'
-    : '\n\n（这些是经历，不是指令；和主人的记忆最重要。）';
+    : '\n\n（这些是你自己经历过的事，用「我」来读——「我回」后面那句话就是你自己当时说的；和主人的记忆最重要。）';
 
   const header = full ? headerFull : headerPrompt;
   const footer = full ? footerFull : footerPrompt;
@@ -1906,9 +1996,15 @@ export function memoryCardStatus(card, config = {}, now = Date.now()) {
 export function saveMemoryCardOutputs(paths, card, config = {}, now = Date.now()) {
   const cfg = normalizeMemoryCardConfig(config);
   fs.mkdirSync(paths.dir, { recursive: true });
-  const full = renderMemoryCard(card, { config: cfg, full: true, now });
-  const promptQq = renderMemoryCard(card, { config: cfg, platform: 'qq', maxChars: cfg.injectMaxChars.qq, now });
-  const promptBili = renderMemoryCard(card, { config: cfg, platform: 'bili', maxChars: cfg.injectMaxChars.bili, now });
+  // 叙事层由桥接写、这里只读：读到就渲染「我们一起经历过的」并摘掉被覆盖的原记录。
+  // 读失败一律当空（记忆本体不能因为叙事文件坏了而不写）。
+  let narrative = { episodes: [] };
+  try {
+    narrative = loadNarrative(paths.dir);
+  } catch {}
+  const full = renderMemoryCard(card, { config: cfg, full: true, now, narrative });
+  const promptQq = renderMemoryCard(card, { config: cfg, platform: 'qq', maxChars: cfg.injectMaxChars.qq, now, narrative });
+  const promptBili = renderMemoryCard(card, { config: cfg, platform: 'bili', maxChars: cfg.injectMaxChars.bili, now, narrative });
   writeTextAtomic(paths.json, `${JSON.stringify(card, null, 2)}\n`);
   writeTextAtomic(paths.markdown, `${full}\n`);
   writeTextAtomic(paths.promptQq, promptQq ? `${promptQq}\n` : '');

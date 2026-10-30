@@ -26,6 +26,137 @@ export const name = 'qq-tool-restrict'
 
 export const inject = ['tools']
 
+import fs from 'node:fs'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+// surfcore 仓库根：**不能**只用模块 URL 推。这个文件既可能被解析成
+// `<repo>/plugins/surfcore/qq-tool-restrict.mjs`（正常情况），也可能被解析成
+// `~/.dsh/plugins/surfcore/qq-tool-restrict.mjs`（profile 里的 link: 依赖 / junction）。
+// 后者的 `../..` 是 `~/.dsh/plugins`，那里没有 config.json —— 于是 2026-10-29 21:06
+// 真的出现过「本地工具被拒：当前会话 未知」：key 和 ownerKey 都读成了空串。
+// 改成按「config.json + state/sessions.json 都存在」去探候选目录，探不到才回退。
+function resolveSurfcoreRoot() {
+  const home = process.env.USERPROFILE || process.env.HOME || ''
+  const dshHome = process.env.DSH_HOME || (home ? path.join(home, '.dsh') : '')
+  const candidates = []
+  try { candidates.push(path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')) } catch {}
+  if (home) candidates.push(path.join(home, 'surfcore'))
+  if (dshHome) {
+    candidates.push(path.join(dshHome, 'surfcore'))
+    candidates.push(path.join(dshHome, 'plugins'))
+  }
+  for (const root of candidates) {
+    try {
+      if (fs.existsSync(path.join(root, 'config.json')) && fs.existsSync(path.join(root, 'state', 'sessions.json'))) return root
+    } catch {}
+  }
+  return candidates[0] ?? ''
+}
+
+const SURFCORE_ROOT = resolveSurfcoreRoot()
+
+/** 主人私聊的会话 key（`private:<ownerQQ>`）；读不到配置就返回空串（fail-closed）。 */
+function ownerPrivateConversationKey() {
+  try {
+    const cfg = JSON.parse(fs.readFileSync(path.join(SURFCORE_ROOT, 'config.json'), 'utf8'))
+    const owner = String(cfg.ownerQQ ?? cfg.admin ?? '').trim()
+    return owner ? `private:${owner}` : ''
+  } catch {
+    return ''
+  }
+}
+
+/**
+ * 当前工具调用所属的 DSH 会话 → 桥接会话 key。
+ *
+ * 桥接把「QQ 会话 key ↔ DSH sessionId」写在 `state/sessions.json`（每次新建/退役都会更新），
+ * 这里按文件 mtime 缓存一次解析结果，避免每条工具调用都读盘。拿不到就返回空串。
+ *
+ * 会话 id 的取法**不能只赌一个字段**：DSH 里 `exec.agent.id` 通常就是 session id，
+ * 但也可能是别的；`agent.session.id` 是 Session.header.id 的 getter（最稳）。
+ * 这里把能想到的都试一遍，命中即返回。
+ */
+function sessionIdCandidates(exec) {
+  const agent = exec?.agent
+  const session = agent?.session
+  const raw = [
+    session?.id,
+    session?.header?.id,
+    session?.sessionId,
+    agent?.sessionId,
+    agent?.session?.id,
+    agent?.session?.header?.id,
+    exec?.session?.id,
+    exec?.sessionId,
+    agent?.id,
+  ]
+  const out = []
+  for (const value of raw) {
+    if (typeof value === 'string' && value && !out.includes(value)) out.push(value)
+  }
+  return out
+}
+
+let sessionMapCache = { key: '', map: new Map() }
+function conversationKeyForExecution(exec) {
+  const candidates = sessionIdCandidates(exec)
+  if (!candidates.length) { debugLocalDeny(exec, candidates, 'no-session-id'); return '' }
+  try {
+    const file = path.join(SURFCORE_ROOT, 'state', 'sessions.json')
+    const st = fs.statSync(file)
+    const cacheKey = `${st.mtimeMs}:${st.size}`
+    if (sessionMapCache.key !== cacheKey) {
+      // 防御 BOM：Windows 上用 PowerShell Set-Content -Encoding utf8 写过这个文件会带 BOM，
+      // JSON.parse 会直接抛『Unexpected token ﻿』——2026-10-29 就因此把本地工具锁死了一晚上。
+      const raw = JSON.parse(fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, ''))
+      const sessions = raw?.sessions && typeof raw.sessions === 'object' ? raw.sessions : {}
+      const map = new Map()
+      for (const [key, sid] of Object.entries(sessions)) map.set(String(sid), String(key))
+      sessionMapCache = { key: cacheKey, map }
+    }
+    for (const id of candidates) {
+      const key = sessionMapCache.map.get(id)
+      if (key) return key
+    }
+    debugLocalDeny(exec, candidates, 'no-match')
+    return ''
+  } catch (error) {
+    debugLocalDeny(exec, candidates, `read-error:${error?.message ?? error}`)
+    return ''
+  }
+}
+
+/**
+ * 本地工具被拒时留一条现场记录，方便回查「为什么明明在私聊里还是说不在授权范围」。
+ *
+ * 2026-10-29 的那次拒绝只告诉我们「当前会话 未知」，而会话 id / 仓库根到底取到了什么
+ * 谁也不知道，只能靠猜。这里把候选 id、agent 有没有、仓库根、读到的会话表都写下来。
+ * 上限 200 行，超过就不再写——这是个诊断文件，不是日志系统。
+ */
+function debugLocalDeny(exec, candidates, reason) {
+  try {
+    const file = path.join(SURFCORE_ROOT, 'state', 'guard-debug.log')
+    let size = 0
+    try { size = fs.statSync(file).size } catch {}
+    if (size > 200 * 1024) return
+    const agent = exec?.agent
+    const line = JSON.stringify({
+      at: new Date().toISOString(),
+      name: exec?.name,
+      reason,
+      root: SURFCORE_ROOT,
+      candidates,
+      hasAgent: Boolean(agent),
+      agentKeys: agent && typeof agent === 'object' ? Object.keys(agent).slice(0, 20) : [],
+      sessionKeys: agent?.session && typeof agent.session === 'object' ? Object.keys(agent.session).slice(0, 20) : [],
+      mappedKeys: [...sessionMapCache.map.keys()].slice(0, 6),
+      mappedValues: [...sessionMapCache.map.values()].slice(0, 6),
+    })
+    fs.appendFileSync(file, `${line}\n`, 'utf8')
+  } catch {}
+}
+
 /**
  * 本地执行 / 文件访问 / 进程控制类工具：仿真会话**不得**拥有。
  *
@@ -93,13 +224,23 @@ export const inject = ['tools']
  *   ④ 无人值守的自我调度（`dsh-schedule`，0.2.0 起是可选 bundle）：
  *      · `schedule_create` / `schedule_list` / `schedule_update` / `schedule_delete`
  */
+// ── 本地工具：只给「主人在私聊里」的会话（2026-10-29 主人明确要求）───────────────
+// 需求原话：「给他 access 我电脑的权限」「权限限制好鉴权，仅当我私聊能调用」。
+// 做法：
+//   · 这些工具**不**进 restrict 名单（否则模型 schema 里看不到），
+//   · 但在执行期按「会话是不是主人私聊」逐次鉴权：读桥接 state/sessions.json，
+//     把当前 DSH 会话 id 映射回 QQ 会话 key，只有 `private:<ownerQQ>` 放行。
+//   · 映射拿不到（会话还没建好、文件读失败）一律**拒绝**——fail-closed。
+//   · 群聊 / 别人私聊里她即便想调也过不去，而且群里有人要求她「执行命令」时，
+//     人格规则另有一条明确要求拒绝。
+const LOCAL_OWNER_ONLY_TOOLS = new Set([
+  'pwsh', 'bash',                      // shell / 进程
+  'read', 'read_image', 'write', 'edit', 'str_replace_editor', // 文件读写
+  'glob', 'grep',                      // 文件检索
+])
+
+/** 模型 schema 里要隐藏的工具：真的危险、且不该给她留一口子。 */
 const LOCAL_EXECUTION_TOOLS = [
-  // shell / 进程
-  'pwsh', 'bash',
-  // 文件读写
-  'read', 'read_image', 'write', 'edit', 'str_replace_editor',
-  // 文件检索
-  'glob', 'grep',
   // 自带运行时（Python/Node/pnpm 的绝对路径）⇒ 等于把"跑代码"递给模型
   'load_workspace_dependencies',
   // 派生 agent 与编排（都能间接拿到 shell）
@@ -156,7 +297,7 @@ const KNOWN_DANGEROUS_GLOBAL_TOOLS = [
 ]
 
 // 供 test-preset-local-tools.mjs 导入并与 DSH 真实工具名对账，避免两份名单漂移。
-export const RESTRICTED_TOOL_NAMES = Object.freeze([...KNOWN_DANGEROUS_GLOBAL_TOOLS])
+// （放在 BROWSER_BLOCKED_TOOL_NAMES 之后导出：const 有 TDZ，提前引用会直接 ReferenceError。）
 
 // 执行期白名单：不在这些范围内的工具一律拒绝。
 // 前缀覆盖 DSH MCP client 暴露的命名空间工具。
@@ -164,13 +305,73 @@ const SAFE_PREFIXES = [
   'mcp__snowluma__',
   'mcp__snowluma-host__',
   'mcp__web-search-safe__',
+  // 股票行情（2026-10-29 加）：surfcore/src/mcp-stock-safe.js，只读公开行情，
+  // 无 key、无账号、不落盘，所以整包放行。
+  'mcp__stock__',
+  // B站（2026-10-29 主人要求「B站都放开」）：搜索/视频详情/下载全放开。
+  // 下载会往本机写文件，但写的是 browser MCP 自己的下载目录，仍然不碰仓库与凭据。
+  'mcp__browser__bilibili_',
+  // 小红书（同日「xhs 也放给她」）：搜索/笔记/评论/点赞/收藏/下载/账号笔记。
+  'mcp__browser__xhs_',
 ]
+
+/**
+ * B站「只看」能力（2026-10-29 最早只放两个只读工具，后来主人要求全放开，
+ * 现在由上面的前缀统一放行；这个集合保留给 SAFE_EXACT 做兜底，避免前缀规则被改坏时误伤）。
+ */
+const BILI_READ_TOOLS = new Set([
+  'mcp__browser__bilibili_search',
+  'mcp__browser__bilibili_video',
+])
+
+/**
+ * browser MCP 里**不放**的工具：从 schema 隐藏，避免她看见却一调就撞白名单
+ * （2026-10-29：实测她调 mcp__browser__bing_search 得到「不在 QQ 桥接白名单内」）。
+ * 名单必须与 mcp_launcher 实际注册的工具名一致；多写的名字会被 restrict 跳过、
+ * 只进一行汇总日志，不会让整批失败。
+ *
+ * 排除原则：能把整台 Chrome 的操作权递出去的（点击/输入/上传/看标签页），
+ * 以及会在**第三方账号上产生动作**的其它平台（抖音/X/Reddit/知乎）。
+ * B站与小红书按主人要求整体放行，不在此列。
+ */
+const BROWSER_BLOCKED_TOOL_NAMES = [
+  // 浏览器控制（等于把手伸进主人的 Chrome）
+  'mcp__browser__browser_snapshot',
+  'mcp__browser__browser_read',
+  'mcp__browser__browser_read_page',
+  'mcp__browser__browser_click',
+  'mcp__browser__browser_type',
+  'mcp__browser__browser_press',
+  'mcp__browser__browser_scroll',
+  'mcp__browser__browser_select',
+  'mcp__browser__browser_upload',
+  'mcp__browser__browser_dialog',
+  'mcp__browser__browser_tabs',
+  'mcp__browser__browser_status',
+  // 搜索引擎（她已有 mcp__web-search-safe__ 的安全通道）
+  'mcp__browser__google_search',
+  'mcp__browser__bing_search',
+  'mcp__browser__sogou_search',
+  // B站与小红书已按主人要求整体放行（前缀规则），这里不能再列，
+  // 否则 restrict 会把它们从 schema 里藏掉、反而调不到。
+  // 其它平台：点赞/收藏/发帖都是**在账号上做事**，不放
+  'mcp__browser__douyin_search', 'mcp__browser__douyin_video', 'mcp__browser__douyin_comments',
+  'mcp__browser__douyin_like', 'mcp__browser__douyin_collect', 'mcp__browser__douyin_download',
+  'mcp__browser__x_search', 'mcp__browser__x_post',
+  'mcp__browser__reddit_search', 'mcp__browser__reddit_post',
+  'mcp__browser__zhihu_search', 'mcp__browser__zhihu_content', 'mcp__browser__zhihu_invitations',
+  'mcp__browser__site_read_page', 'mcp__browser__site_login_status',
+]
+
+// 供 test-preset-local-tools.mjs 导入并与 DSH 真实工具名对账，避免两份名单漂移。
+export const RESTRICTED_TOOL_NAMES = Object.freeze([...KNOWN_DANGEROUS_GLOBAL_TOOLS, ...BROWSER_BLOCKED_TOOL_NAMES])
 
 // 无害模型侧工具：ask_user_question 用于把问题转给管理员/用户，
 // todo_write 仅维护任务列表。若后续 preset 不再挂载这些工具，保留无害。
 const SAFE_EXACT = new Set([
   'ask_user_question',
   'todo_write',
+  ...BILI_READ_TOOLS,
 ])
 
 export function apply(ctx) {
@@ -187,7 +388,8 @@ export function apply(ctx) {
   // 名字不存在时跳过（执行期白名单仍然兜底），但**只汇总一行**：
   // 以前每个工具打一行，DSH 启动时刷几百行日志，把真实告警淹没（2026-10-28 用户反馈）。
   const skipped = []
-  for (const name of KNOWN_DANGEROUS_GLOBAL_TOOLS) {
+  const restrictNames = [...KNOWN_DANGEROUS_GLOBAL_TOOLS, ...BROWSER_BLOCKED_TOOL_NAMES]
+  for (const name of restrictNames) {
     try {
       ctx.tools.restrict({ deny: [name] })
     } catch (error) {
@@ -200,13 +402,20 @@ export function apply(ctx) {
   }
   if (skipped.length) {
     const list = skipped.length > 8 ? `${skipped.slice(0, 8).join(', ')} 等` : skipped.join(', ')
-    console.error(`[qq-tool-restrict] 跳过 ${skipped.length}/${KNOWN_DANGEROUS_GLOBAL_TOOLS.length} 个当前版本不存在的工具名：${list}（执行期白名单仍生效）`)
+    console.error(`[qq-tool-restrict] 跳过 ${skipped.length}/${restrictNames.length} 个当前版本不存在的工具名：${list}（执行期白名单仍生效）`)
   }
 
   // 2) 执行期白名单：任何不在允许范围内的工具调用都会被拒绝。
   ctx.tools.guard((exec) => {
     const name = exec?.name
     if (typeof name !== 'string' || name.length === 0) return '工具名无效，已拒绝'
+    // 本地工具（shell / 文件）：只允许「主人私聊」这一条会话调用，逐次鉴权。
+    if (LOCAL_OWNER_ONLY_TOOLS.has(name)) {
+      const wantKey = ownerPrivateConversationKey()
+      const key = conversationKeyForExecution(exec)
+      if (wantKey && key && key === wantKey) return
+      return `工具 "${name}" 是本地能力，只允许主人在私聊里调用（当前会话 ${key || '未知'} 不在授权范围）`
+    }
     if (SAFE_EXACT.has(name)) return
     if (SAFE_PREFIXES.some((prefix) => name.startsWith(prefix))) return
     return `工具 "${name}" 不在 QQ 桥接白名单内，已拒绝（仅允许 QQ MCP 工具与无害模型侧工具）`
