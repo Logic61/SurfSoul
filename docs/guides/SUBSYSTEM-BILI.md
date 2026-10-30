@@ -246,8 +246,8 @@
 
 ### 3.0 命令总表：17 个"会写"的命令
 
-> `tools/commands/` 共 **34** 个文件：**17 个会写**（下表）、**16 个只读**（§4.0）、**1 个是生物钟**（`whale-night`，见 §2）。
-> 另有 `tools/verify/` 7 个、`tools/diagnostics/` 2 个映射，加上 3 个**悬空入口**（§11.2），`tools/bili.mjs:9-59` 共 46 个入口。
+> `tools/commands/` 共 **35** 个文件：**17 个会写**（下表）、**17 个只读**（§4.0）、**1 个是生物钟**（`whale-night`，见 §2）。
+> 另有 `tools/verify/` 7 个、`tools/diagnostics/` 2 个映射，加上 3 个**悬空入口**（§11.2），`tools/bili.mjs:9-59` 共 47 个入口。
 > "闸门"列只写**代码强制**的那几道；⚠️ = 已知缺口，见 §11。
 
 | 命令 | 作用 | 关键参数 | 对外副作用 | 额度/闸门 | 代码 |
@@ -399,7 +399,7 @@
 
 ## 4. 内容消费（只读）
 
-### 4.0 命令总表：16 个只读命令
+### 4.0 命令总表：17 个只读命令
 
 > 全部"不产生对外副作用"。标注 **写盘** 的只是本地状态（缓存/历史/备忘），不影响 B站。
 
@@ -413,6 +413,7 @@
 | `video`（`video-content`） | 不点开视频还原它讲什么（简介/标签/字幕/弹幕） | `<BV>` | ❌ | `tools/commands/video-content.mjs:30-83` |
 | `debrief` | 看懂一条视频：封面+简介+字幕+弹幕热区+热评+抽帧 | `<BV> [--bucket 30] [--top 5] [--grid 3x3] [--no-frames] [--substrip] [--comments 8] [--score] [--no-history]` | `watch-history.jsonl` + 截图 | `tools/commands/debrief.mjs:89-303` |
 | `watch-video`（`bili-watch`） | 真"看"视频：直链 → 下载 → 抽帧九宫格 / 字幕条 | `<BV> [3x3\|4x4] [outDir] [--uniform]` | 原片 + 图 + 历史 | `tools/commands/bili-watch.mjs:29-149` |
+| `watch-storyboard` | 可引用分镜：官方字幕对齐 + 编号格 + 音频条 + cell 清单（插件缺失自动退回九宫格） | `<BV> [--cells 1-16] [--from S] [--to S] [--detail low\|med\|high] [--lan] [--no-subs] [--out] [--subs-out] [--no-history]` | 原片 + 分镜图 + 清单 + 历史 | `tools/commands/watch-storyboard.mjs`、`tools/lib/watch-storyboard.mjs` |
 | `watch-history` | 她看过什么 + 之后做过什么 | `list [--limit --q --days --json]` | ❌ | `tools/commands/watch-history.mjs:26-66` |
 | `likes` | 「收到的赞」通知流（谁赞了她，含 mid/昵称） | `[--hours 24] [--owner] [--json]` | ❌ | `tools/commands/likes.mjs:34-74` |
 | `comment-digest` | 今天谁找过她（回复+@ 两个收件箱，正文回读核实） | `[--hours 24] [--pages 2] [--only-unread] [--max-resolve] [--raw]` | ❌ | `tools/commands/comment-digest.mjs:25-86` |
@@ -446,7 +447,7 @@
 - 排除"看过"（6 个来源）+ "最近 3 天推过"；按 `播放 + 收藏×20 + 弹幕×5` 排序（`:107-149`）。
 - 它只做**召回 + 粗排，不拍板**；质量由 `debrief` 与 `daily` 的硬门槛决定（文件头注释 `:8-9`）。
 
-### 4.3 看懂视频（`debrief` / `watch-video` / `subtitles`）
+### 4.3 看懂视频（`debrief` / `watch-video` / `watch-storyboard` / `subtitles`）
 
 `debrief` 六路互补（`tools/commands/debrief.mjs:6-13`）：元信息 → 封面 → 官方字幕 → 弹幕热区 → 热评 → 画面抽帧。
 
@@ -470,6 +471,19 @@
 - **等间隔当骨架保证覆盖 + 每帧吸附到 ±半格内最近的变化点**（scene 阈值 0.3→0.15→0.08 逐级放宽）（`:73-95`）。
 - 同一批帧同时产 `SHEET`（九宫格）与 `SUBS`（底部 17% 字幕带）（`:99-125`）。
 - 没官方字幕时它是最省的路径；**有字幕先跑 `subtitles`**（`:128-129`）。
+
+`watch-storyboard` 是"能引用"的读法（2026-10-30 加，C-1 混合路线：`tools/commands/watch-storyboard.mjs`）：
+
+- **取流/字幕仍走 surfcore 自己的链路**（playurl 720p + WBI 官方字幕），画面分镜交给已安装的
+  [`dsh-video-storyboard`](https://github.com/SAOS-3624/dsh-video-storyboard)（MIT，装在 `~/.dsh/plugins/`）：
+  出 9 格**编号**图 + 每格 `起止时间 / frame@ / 台词` 的**可寻址清单** + 底部**音频包络条**；
+  官方字幕 JSON（`{body:[{from,to,content}]}`）直接当 `transcriptFile`，**不需要 ASR / yt-dlp / cookies.txt**。
+- 产出 `STORYBOARD:` / `MANIFEST:` / `INDEX:` 三个 marker。看图后**引用画面说「第 N 格」**；
+  要读小字/界面细节用 `--from/--to --cells 4` 重出，**别重抽全片**（两段式：392 token 看结构 → 392 token 看细节）。
+- **插件不是硬依赖**：没装时自动退回 `watch-video` 九宫格并打印原因（`tools/lib/watch-storyboard.mjs` 的 `resolveStoryboardCli`）；
+  ffmpeg 可从 `$FFMPEG / PATH / <repo>/bin / ~/.dsh/tools/ffmpeg/bin / ~/.dsh/surfcore/bili/bin` 任一处解析。
+- 图片成本（2026-10-30 实测）：旧深读 3 张 2160×1215 ≈ 2.4–2.8k token；分镜 1 张 1009×620 ≈ 392 + 清单 250–400。
+- 观看历史记 `mode:frames / source:watch-storyboard`（`--no-history` 可关；父进程调用时按 `SURFCORE_WATCH_PARENT` 防重复）。
 
 `subtitles` 的三个硬知识（`tools/commands/subtitles.mjs:6-11`）：必须走 WBI 的 `/x/player/wbi/v2`、
 `subtitle_url` 里的 `auth_key` 是**分钟级**有效且**不能截断**、匿名拿不到 AI 字幕（必须带 cookie）。

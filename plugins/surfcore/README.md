@@ -389,7 +389,7 @@ compact 版，B站 每次醒来 / 评论区监听 / 私信 / 直播间都会带�
 
 ## 观看历史（设置页「观看历史」）
 
-- **谁写**：`debrief`（浅看 `--no-frames` / 深看都记）和直接调用的 `watch-video`（抽帧）。同一条视频 30 分钟内同一种读法只记一次；浅看→深看会合并成一条“深看”。
+- **谁写**：`debrief`（浅看 `--no-frames` / 深看都记）、直接调用的 `watch-video`（抽帧）和 `watch-storyboard`（分镜，记 `source:watch-storyboard`）。同一条视频 30 分钟内同一种读法只记一次；浅看→深看会合并成一条“深看”。
 - **存哪**：当前角色包里的 `bili/watch-history.jsonl`（append-only，超 2MB 自动轮转成 `watch-history.1.jsonl`；换角色/回档会跟着角色包走）。
 - **旧数据**：JSONL 里没有的视频，读取时会从 `bili-memory.json` 的 `video` 条目补出来，并标记为「旧记忆」；评分从 `scores.json` 合并。
 - **可以看到**：今天 / 最近 7 天 / 深看条数 / 不同视频数；标题可点回 B站；UP、时长、读法（浅看 / 深看 / 抽帧 / 旧记忆）、评分；支持按标题 / UP / BV 搜索。

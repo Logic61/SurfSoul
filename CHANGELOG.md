@@ -6,6 +6,15 @@
 
 ## [未发布] - 2026-10-30（P0 + P1 修复，未发版）
 
+### 新增
+
+- **B站 可引用分镜 `watch-storyboard`**（C-1：surfcore 取流/字幕 + 已装的 dsh-video-storyboard 出图）：
+  720p 直链 + WBI 官方字幕 → 9 格**编号**图 + 每格 `起止时间/frame@/台词` 清单 + 音频包络条；
+  看图后按「第 N 格」引用，细节用 `--from/--to --cells 4` 重出（1 张 392 token，替代旧深读 3 张 ≈968/张）。
+  插件缺失时自动退回 `watch-video` 九宫格，**不新增硬依赖**。唤醒 prompt 改为
+  「`debrief --no-frames` 文字五路 + `watch-storyboard` 分镜」两段式。
+  新测试 `scripts/test-watch-storyboard.mjs` 进 `npm test` 链。
+
 ### 修复（P0，会卡死宿主）
 
 - **隐私闸对私钥文本死循环**：`plugins/surfcore/lib/privacy.js` 的 `private-key` 正则漏 `g`，

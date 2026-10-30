@@ -5,6 +5,54 @@
 
 ---
 
+## 快照：2026-10-30 19:20–20:15（把 dsh-video-storyboard 的分镜方法接进 B站「刷视频」→ C-1 落地）
+
+### 用户原话
+
+> 「装上这个插件，看看能不能将其方法运用到 surfcore 插件刷 b 站的板块」→ 看到方案后选「①落 C-1」
+
+### 做到了什么
+
+**前置（会话侧，不入库）**：本机原来没有 ffmpeg → 装 9.0.2 到 `~/.dsh/tools/ffmpeg/bin`，并硬链接到
+`~/.dsh/surfcore/bili/bin`（surfcore `tools/lib/ffmpeg.mjs` 的查找链覆盖这里，`ffmpegInfo()` 已 ok）。
+`dsh-video-storyboard` 0.5.0 装进 `~/.dsh/plugins/` + desktop profile（改前备份 `profiles/desktop/package.json.bak-2026-10-30T11-03-00-458Z-preinstall`）。
+
+**C-1 代码（本次提交）**：
+
+| 改动 | 内容 |
+| --- | --- |
+| 新命令 | `tools/commands/watch-storyboard.mjs`：取 720p 直链 → 下载 → WBI 官方字幕 JSON → 调已装分镜 CLI 出「编号格 + 可寻址清单 + 音频条」；插件缺失自动退回 `bili-watch` 九宫格，**不新增硬依赖** |
+| 纯逻辑 | `tools/lib/watch-storyboard.mjs`：`parseArgs` / `resolveStoryboardCli` / `buildStoryboardArgs` / `storyboardPaths` / `pickSubtitleJson` / `parseStoryboardStdout` / `summaryLines`（全部可离线单测） |
+| 注册 | `tools/bili.mjs` 命令表加 `watch-storyboard`（只读区） |
+| 唤醒 prompt | `lib/scheduler.js` step 4：深读改两段式 —— `debrief --no-frames` 文字五路 + `watch-storyboard` 分镜；引用画面说「第 N 格」，细节 `--from/--to --cells 4` 重出 |
+| 记账 | `watch-history` 记 `mode:frames / source:watch-storyboard`（`--no-history` 可关；`SURFCORE_WATCH_PARENT` 防重复） |
+| 测试 | `scripts/test-watch-storyboard.mjs`（8 组断言）已进 `plugins/surfcore/package.json` 的 `test` 链 |
+
+### 已验证（Lead 跑的最终门禁）
+
+- 真机 E2E：`node tools/bili.mjs watch-storyboard BV1w7HM6JEGa --cells 9 --detail low --out <tmp> --no-history`
+  → 90s「鱼灾」梗指南；720P 下载 5.51MB；官方字幕 29 段对齐（`transcript=file`）；9 格图 1009×620；
+  清单 9 行（cell 1 = 00:00.00–00:10.47 …）；`STORYBOARD/MANIFEST/INDEX` 三 marker 正常；exit 0。
+- `node scripts/test-watch-storyboard.mjs` → 全绿；`node --check` 5 个改动文件通过。
+- `cd plugins/surfcore && npm test` → **exit 0**（42 个脚本，含新测试、`test-scheduler-session`）。
+- 全量 `npm run test:audit` → **73/83**，与 2026-10-30 17:45 快照的基线一致（10 项已知红，其中
+  `test-version.mjs` 是 README 顶部版本 0.6.20 ≠ package 0.6.22 的**既有漂移**，非本轮引入）。
+- 仓库 `git status` 只含本轮 9 个文件；未 push（`origin` 存在，发布按规矩另说）。
+
+### 回滚
+
+`git revert <本轮 commit>` 即可：两条新文件 + `bili.mjs` 一行 + scheduler prompt 一组 + package.json 一行 + 三处文档。
+`watch-video` / `debrief` 一行未动。
+
+### 没做 / 下一步
+
+1. **路线 A**（B站 会话直接调 `video_storyboard` 原生工具）：工具面已实测无闸（B站 preset=standard/146 工具），
+   但要加 `qq-tool-restrict` 的 `KNOWN_DANGEROUS_GLOBAL_TOOLS` 名单 + 用户需另装插件 → 二期再评估。
+2. 插件侧两个 P0（窗口 `winStart` 加两次、zoom 覆盖格表）属上游仓库，本轮未改；建议提 issue/PR。
+3. 长片（>30 分钟）扫描可能撞 `bili.mjs` 的 600s 子进程预算 → 用 `--from/--to` 分段；后续可在命令里自动分段。
+
+---
+
 ## 快照：2026-10-30 17:45–18:40（记忆系统评估 → 批次 A 止血 + 批次 B 收口）
 
 ### 用户原话
