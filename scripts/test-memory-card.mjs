@@ -850,6 +850,53 @@ test('注入预算分层：叙事 ≤40%，今天/桌宠的原始事实保底（
   assert.doesNotMatch(out, /老记录 3：/);
 });
 
+test('维护幂等：没有新输入时不重写输出（P2-19）', () => {
+  const dir = tempDir();
+  const paths = resolveMemoryCardPaths(dir);
+  const cfg = normalizeMemoryCardConfig({ maxChars: 0, warnChars: 60000 });
+  const now = Date.parse('2026-10-30T12:00:00+08:00');
+  appendMemoryInboxEvent(paths, { at: now - 60_000, kind: 'group', sender: '群友', senderId: '1', text: '幂等测试消息：这条只应被写入一次。' });
+  const inbox1 = readInboxSince(paths, null);
+  const first = maintainMemoryCard({ paths, config: cfg, now, inboxLines: inbox1.lines, inboxCursor: inbox1.nextCursor, fullPaths: paths, fullConfig: cfg });
+  assert.equal(first.changed, true);
+  const mtime1 = fs.statSync(paths.markdown).mtimeMs;
+
+  const second = maintainMemoryCard({ paths, config: cfg, now: now + 10 * 60_000, inboxLines: [], inboxCursor: null, fullPaths: paths, fullConfig: cfg });
+  assert.equal(second.changed, false);
+  assert.equal(second.noop, true);
+  assert.equal(fs.statSync(paths.markdown).mtimeMs, mtime1, '无变化不应重写 memory-card.md');
+
+  // 新消息进来必须恢复写入。
+  appendMemoryInboxEvent(paths, { at: now, kind: 'group', sender: '群友', senderId: '2', text: '幂等测试的新消息：这条必须触发一次写出。' });
+  const inbox2 = readInboxSince(paths, second.card.meta.inboxCursor);
+  const third = maintainMemoryCard({ paths, config: cfg, now: now + 20 * 60_000, inboxLines: inbox2.lines, inboxCursor: inbox2.nextCursor, fullPaths: paths, fullConfig: cfg });
+  assert.equal(third.changed, true);
+  assert.ok(third.qq >= 1);
+});
+
+test('压缩性能：600 条卡不再按「渲染×档位」跑（P2-18）', () => {
+  const card = createEmptyCard(NOW);
+  const bigCfg = normalizeMemoryCardConfig({ maxChars: 30000, warnChars: 60000, maxRecords: 2000, autoCompact: false });
+  for (let i = 0; i < 600; i += 1) {
+    addMemoryRecord(card, {
+      source: 'qq-group',
+      text: `压缩性能记录 ${i}：这是一条长度适中的普通群聊记忆，用来把卡撑到需要压缩的规模。`,
+      createdAt: NOW - (i % 60) * DAY_MS,
+      lastSeenAt: NOW - (i % 60) * DAY_MS,
+    }, bigCfg, NOW);
+  }
+  const before = renderMemoryCard(card, { config: bigCfg, full: true, now: NOW }).length;
+  assert.ok(before > 30000, `测试前提：压缩前 ${before} > 30000`);
+  const started = performance.now();
+  const steps = compactMemoryCard(card, bigCfg, { targetRatio: 0.8, now: NOW });
+  const elapsed = performance.now() - started;
+  const after = renderMemoryCard(card, { config: bigCfg, full: true, now: NOW }).length;
+  assert.ok(steps > 0, '应该有压缩动作');
+  assert.ok(after <= Math.floor(30000 * 0.8) + 100, `压缩后 ${after} 应回到 80% 附近`);
+  assert.ok(elapsed < 1500, `600 条压缩耗时 ${elapsed.toFixed(0)}ms（旧实现 7.9s；>1.5s 视为回归）`);
+});
+
+
 
 
 

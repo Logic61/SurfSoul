@@ -1722,36 +1722,53 @@ function stepDown(record) {
 export function compactMemoryCard(card, config = {}, { targetRatio = 0.85, now = Date.now(), narrative = null } = {}) {
   const cfg = normalizeMemoryCardConfig(config);
   const nar = narrative && typeof narrative === 'object' ? narrative : { episodes: [] };
-  const currentChars = renderMemoryCard(card, { config: cfg, full: true, now, narrative: nar }).length;
-  const baseChars = cfg.maxChars > 0 ? cfg.maxChars : (cfg.warnChars > 0 ? cfg.warnChars : currentChars);
+  // P2-18（2026-10-30）：旧实现每一步都整卡 render + 过滤排序（600 条实测 7.9s / 1368 步）。
+  // 现在：候选只排序一次、每步只算一条记录的行长变化、删除延后到循环结束一次性过滤；
+  // 估算只会偏高（删行可能连分区标题一起消失），最后用一次真实渲染确认。
+  const covered = coveredRecordIds(nar);
+  const measure = () => renderMemoryCard(card, { config: cfg, full: true, now, narrative: nar }).length;
+  let chars = measure();
+  const baseChars = cfg.maxChars > 0 ? cfg.maxChars : (cfg.warnChars > 0 ? cfg.warnChars : chars);
   const targetChars = Math.max(400, Math.floor(baseChars * clamp(targetRatio, 0.3, 0.95)));
-  let guard = 0;
+  const removable = (record) => !record.pinned
+    && !record.isInitial
+    && !(record.tags.includes('owner') && record.importance >= cfg.minOwnerImportance)
+    // 被叙事覆盖的记录不在可见渲染里，压缩它们只会白白降档/删数据。
+    && !covered.has(String(record.id));
+  const candidates = card.records.filter(removable).sort((a, b) => {
+    const importance = (Number(a.importance) || 0) - (Number(b.importance) || 0);
+    if (importance) return importance;
+    const age = timeOf(a.createdAt, 0) - timeOf(b.createdAt, 0);
+    if (age) return age;
+    return CLARITY_ORDER.indexOf(a.clarity) - CLARITY_ORDER.indexOf(b.clarity);
+  });
+  const traceIndex = CLARITY_ORDER.indexOf('trace');
+  const deleted = new Set();
   let steps = 0;
-  while (guard++ < 5000) {
-    const chars = renderMemoryCard(card, { config: cfg, full: true, now, narrative: nar }).length;
-    if (chars <= targetChars) break;
-    const candidates = card.records.filter((record) => !record.pinned
-      && !record.isInitial
-      && !(record.tags.includes('owner') && record.importance >= cfg.minOwnerImportance));
-    if (!candidates.length) break;
-    candidates.sort((a, b) => {
-      const importance = (Number(a.importance) || 0) - (Number(b.importance) || 0);
-      if (importance) return importance;
-      const age = timeOf(a.createdAt, 0) - timeOf(b.createdAt, 0);
-      if (age) return age;
-      return CLARITY_ORDER.indexOf(a.clarity) - CLARITY_ORDER.indexOf(b.clarity);
-    });
-    const victim = candidates[0];
-    if (victim.clarity === 'trace') {
-      card.records = card.records.filter((record) => record.id !== victim.id);
-      card.stats.forgotten = (Number(card.stats.forgotten) || 0) + 1;
+  let lineLen = 0;
+  for (const victim of candidates) {
+    if (chars <= targetChars || steps >= 5000) break;
+    lineLen = recordLine(victim, { platform: 'all', full: true }).length;
+    while (chars > targetChars && steps < 5000 && CLARITY_ORDER.indexOf(victim.clarity) < traceIndex) {
+      if (!stepDown(victim)) break;
+      const nextLen = recordLine(victim, { platform: 'all', full: true }).length;
+      chars += nextLen - lineLen;
+      lineLen = nextLen;
       steps += 1;
-      continue;
     }
-    if (!stepDown(victim)) break;
-    steps += 1;
+    if (chars > targetChars && CLARITY_ORDER.indexOf(victim.clarity) >= traceIndex) {
+      deleted.add(victim.id);
+      chars -= lineLen;
+      steps += 1;
+    }
+  }
+  if (deleted.size) {
+    card.records = card.records.filter((record) => !deleted.has(record.id));
+    card.stats.forgotten = (Number(card.stats.forgotten) || 0) + deleted.size;
   }
   if (steps) {
+    // 估算只会偏高；用真实渲染确认一次，把 final 值留在局部即可（调用方按 steps 判断）。
+    measure();
     card.stats.compacted = (Number(card.stats.compacted) || 0) + 1;
     card.stats.lastCompactionAt = iso(now);
     card.updatedAt = iso(now);
@@ -2190,8 +2207,11 @@ export function maintainMemoryCard({
   const narrative = readMemoryNarrative(paths.dir);
   const bili = ingestBiliEntries(card, biliEntries, cfg, now);
   if (bili.added) changed = true;
+  const cursorBefore = card.meta?.inboxCursor?.offset ?? null;
   const qq = ingestInboxLines(card, inboxLines, cfg, now, { inboxCursor });
   if (qq.added) changed = true;
+  // 水位推进本身要落盘，否则下一轮会重复读同一段（即使这批全是重复、0 条新增）。
+  if (inboxCursor && cursorBefore !== (card.meta?.inboxCursor?.offset ?? null)) changed = true;
   // **先归档再衰减**：刚进来的旧记忆/冷门记忆也可能在同一次补跑里被忘掉。
   // 全量卡是 JSONL：这里只 append 新行，不读整个档案、也不重写。
   const fullAdded = fullPaths ? archiveDecayedToFull(fullPaths, card, fullCfg, now) : 0;
@@ -2202,10 +2222,13 @@ export function maintainMemoryCard({
     trimmed = trimMemoryCard(card, cfg, now);
     if (trimmed) changed = true;
   }
+  const decayBefore = card.lastDecayDate;
   if (forceDecay || needsDailyDecay(card, cfg, now)) {
     // 插件/DSH 关了一周再开：按「错过几天」补跑，而不是只降一档。
     const steps = forceDecay ? 1 : decayDaysBetween(card.lastDecayDate, now);
-    if (applyDailyDecay(card, cfg, now, { force: forceDecay, steps })) changed = true;
+    const decayChanged = applyDailyDecay(card, cfg, now, { force: forceDecay, steps });
+    // applyDailyDecay 即使没降档也会写 lastDecayDate；这个日期必须落盘，否则每 10 分钟重跑衰减。
+    if (decayChanged || card.lastDecayDate !== decayBefore) changed = true;
   }
   let status = memoryCardStatus(card, cfg, now, { narrative });
   // 先记住压缩前的档位：100% 自动压缩到 90% 后，用户仍然应该看到「刚满过」的提醒。
@@ -2228,6 +2251,29 @@ export function maintainMemoryCard({
     card.alerts.acknowledgedLevel = 0;
     card.alerts.at = null;
     changed = true;
+  }
+  // P2-19（2026-10-30）：没有变化时不重写 6 次渲染 + 5 个文件；只在输出缺失时强制写一次。
+  const outputsMissing = (() => {
+    try {
+      return !fs.existsSync(paths.json) || !fs.existsSync(paths.markdown) || !fs.existsSync(paths.promptQq);
+    } catch {
+      return true;
+    }
+  })();
+  if (!changed && !outputsMissing) {
+    return {
+      card,
+      changed: false,
+      noop: true,
+      bili: bili.added,
+      qq: Math.max(0, (qq.added || 0) - (qq.addedPet || 0)),
+      pet: qq.addedPet || 0,
+      trimmed,
+      status,
+      full: fullPaths
+        ? { added: fullAdded, status: fullMemoryCardStatus(fullPaths, fullCfg, now), markdown: '' }
+        : null,
+    };
   }
   card.lastMaintenanceAt = iso(now);
   card.updatedAt = iso(now);
