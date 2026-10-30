@@ -31,4 +31,28 @@ for (const line of lines) {
 // 4) 主要文字使用成对的 label token（而不是写死 #fff）
 assert.match(css, /\.qbw-app\{[^}]*color:var\(--dsw-alias-label-primary\)/, '.qbw-app 的文字颜色应跟随主题 label-primary');
 
+// 5) inline 样式不许写死浅色底 / 浅色边框（深色主题下就是"白底浅字"）。
+//    2026-10-30 audit F3：目的页 stepBox/seg/载体卡曾写死 #fafbff / #fff / #e3e6ee，
+//    深色主题下「素材→观察→目标假设→候选→今天」整条链路发白看不清。
+//    白名单只有一处：B站 登录二维码必须纯白底（否则手机扫不出来）。
+const INLINE_LIGHT = [
+  { what: '浅色背景 background: "#f…"', re: /background\s*:\s*"#f[0-9a-f]{3,5}"/i },
+  { what: '白色背景 background: "#fff"', re: /background\s*:\s*"#fff(?:fff)?"/i },
+  { what: '浅色边框 border: "1px solid #e…"', re: /border\s*:\s*"1px solid #e[0-9a-f]{5}"/i },
+  { what: '浅色分隔线 border*: "1px dashed #e…"', re: /border(?:Top|Bottom|Left|Right)?\s*:\s*"1px dashed #e[0-9a-f]{5}"/i },
+];
+const INLINE_LIGHT_ALLOW = [
+  /qbw-contrast-allow/, // 显式白名单标记：目前只有 B站 登录二维码的纯白底（扫码识别，任何主题都保留）
+];
+for (const [index, line] of css.split('\n').entries()) {
+  if (INLINE_LIGHT_ALLOW.some((re) => re.test(line))) continue;
+  for (const { what, re } of INLINE_LIGHT) {
+    assert.ok(!re.test(line), `第 ${index + 1} 行出现 inline ${what}（深色主题会白底浅字）：${line.trim().slice(0, 80)}`);
+  }
+}
+// 三元 / 模板字面量里的浅色对比常量上一条正则扫不到（引号前是表达式），按字面量钉死。
+for (const literal of ['#fafbff', '#e3e6ee', '#e1e6f0', '#e9edf5', '#6d6a78']) {
+  assert.ok(!css.includes(`"${literal}"`), `inline 浅色常量 ${literal} 不许再出现（应换主题 token 或 .qbw-card）`);
+}
+
 console.log('✅ 界面可见性检查通过');

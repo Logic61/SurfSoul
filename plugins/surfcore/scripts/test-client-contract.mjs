@@ -358,4 +358,58 @@ assert.ok(/只同步这些群[\s\S]{0,400}h\(IdListEditor/.test(source), '「只
 assert.ok(!source.includes('(qqToBili.includeGroups ?? []).join("，")'), '「只同步这些群」还在用 split/join 绑输入框（逗号会被吞）');
 assert.ok(source.includes('onChange: (list) => setQqToBili("includeGroups", list)'), '「只同步这些群」没有接线到 includeGroups');
 
+// ── 2026-10-30 设置页 P1 修复回归（audit/ui-client 报告 F2/F1/F4/F3）─────────
+// 这四条都是"同一份状态两份写法"的经典形状，断言刻意钉结构/单一入口，不钉文案措辞。
+
+// F2（P1-6）：语音页目录必须走全局草稿，不许后门 POST /config。
+// 后门写盘后根草稿还是旧值，下一次底部保存会把刚写的目录覆盖回去（静默丢配置）。
+{
+  const postConfigCount = (source.match(/api\("\/config", \{ method: "POST"/g) ?? []).length;
+  assert.equal(postConfigCount, 1, `POST /config 只允许根「保存」一处，实际 ${postConfigCount} 处（语音页后门会覆盖草稿）`);
+  assert.ok(/function VoiceTab\(\{ toast, qq, setQqPath \}\)/.test(source), 'VoiceTab 必须接收 qq / setQqPath（目录改走全局草稿）');
+  assert.ok(source.includes('h(VoiceTab, { toast: notify, qq, setQqPath })'), 'renderTab 没有把 qq / setQqPath 传给 VoiceTab');
+  const voiceSource = source.slice(source.indexOf('function VoiceTab'), source.indexOf('function MemoryTab'));
+  assert.ok(voiceSource.includes('setQqPath(["voicePacks", "dir"]'), '语音页目录写入必须走 setQqPath(["voicePacks", "dir"])');
+  assert.ok(!voiceSource.includes('api("/config"'), '语音页不许再直接 POST /config');
+  // 既有归一化（反斜杠 → 正斜杠）必须保留：三个写入点的落点变了，归一化语义没变。
+  assert.ok(voiceSource.includes('parent.split("\\\\").join("/")'), '「把安装目录设为这里」的反斜杠归一化丢了');
+  assert.ok(voiceSource.includes('next.split(String.fromCharCode(92)).join("/")'), '「存到草稿」的反斜杠归一化丢了');
+  assert.ok(voiceSource.includes('base.split("\\\\").join("/")'), '「用这个目录」的反斜杠归一化丢了');
+  assert.ok(source.includes('改完点底部保存生效'), '语音目录提示必须写清「改完点底部保存生效」');
+  assert.ok(source.includes('存到草稿'), '语音目录按钮文案应说明先「存到草稿」');
+}
+
+// F1（P1-7）：切角色后人格卡必须重新读取，否则旧角色的卡会被「保存人格卡」写进新角色。
+{
+  const personaSource = source.slice(source.indexOf('function PersonaEditor'), source.indexOf('function MemoryCardPanel'));
+  assert.ok(/function PersonaEditor\(\{[^}]*reloadKey/.test(personaSource), 'PersonaEditor 必须接收 reloadKey');
+  assert.ok(/\[reloadKey, load, toast\]/.test(personaSource), '人格卡重读 effect 必须依赖 reloadKey');
+  assert.ok(/void load\(\)\.then\(\(ok\) => \{[\s\S]{0,200}?已切换角色，人格卡已重新读取/.test(personaSource),
+    'reloadKey 变化时必须重新 GET /persona 并 toast「已切换角色，人格卡已重新读取」');
+  assert.ok(personaSource.includes('请点「重新读取」'), '人格卡重读失败时必须提示手动重新读取（不能谎报已重读）');
+  assert.ok(source.includes('reloadKey: overview?.character?.epoch ?? current?.epoch ?? null'),
+    'reloadKey 必须来自当前角色 epoch（/overview 或 /characters，真正随切角色变化，不能用静态值）');
+  assert.ok(source.includes('await reload?.()'), '切角色动作后必须刷新 overview（epoch 才会更新）');
+  // epoch 来源核对：切换角色 = epoch +1，所以 reloadKey 一定变化（src/character-persona.js）。
+  const characterPersonaSource = fs.readFileSync(path.join(import.meta.dirname, '..', '..', '..', 'src', 'character-persona.js'), 'utf8');
+  assert.ok(/const epoch = Math\.max\([\s\S]{0,160}?\+ 1;/.test(characterPersonaSource), '切换角色没有让 epoch +1：reloadKey 会不变');
+}
+
+// F4（P1-12）：服务端 warnings 是「提示」不是错误，必须走独立 warn 通道 + .qbw-warnbox。
+assert.ok(!source.includes('setErr(r.warnings'), '服务端 warnings 不许再塞进红色 err 通道');
+assert.ok(/const \[warn, setWarn\] = useState\(""\)/.test(source), '根组件缺少独立 warn state');
+assert.ok(/if \(r\.warnings\?\.length\) setWarn\(r\.warnings\.join\(" "\)\)/.test(source), '保存返回的 warnings 必须写 warn');
+assert.ok(/warn \? h\("div", \{ className: "qbw-warnbox"/.test(source), 'warnings 必须用已有的 .qbw-warnbox 渲染');
+assert.ok((source.match(/setWarn\(""\)/g) ?? []).length >= 2, '新保存 / 重新读取时必须清空 warn');
+
+// F3（P1-13）：目的页 inline 浅色底 / 边框必须换成主题 token 或 .qbw-card；
+// 全量扫描在 test-ui-contrast.mjs（白名单只有二维码白底），这里钉本页的具体落点。
+for (const literal of ['"#fafbff"', '"#e3e6ee"', '"#e1e6f0"', '"#e9edf5"', '"#6d6a78"']) {
+  assert.ok(!source.includes(literal), `inline 浅色常量 ${literal} 必须换成主题 token / .qbw-card`);
+}
+assert.ok(/const stepBox =[\s\S]{0,220}?className: "qbw-card"/.test(source), '目的页 stepBox 应复用 .qbw-card（主题底/边框）');
+assert.ok(/const cardStyle =[\s\S]{0,360}?var\(--dsw-alias-border-l2\)/.test(source), '目的载体卡边框必须用主题 token');
+assert.ok(source.includes('const seg = (options, value, onChange) => h("div", { style: { display: "inline-flex", gap: "4px", padding: "2px", borderRadius: "999px", background: "rgba(127,127,127,.06)", border: "1px solid var(--dsw-alias-border-l2)" } }'),
+  '目的页分段选择器仍写死浅色底/边框');
+
 console.log('client contract tests OK');

@@ -1564,9 +1564,12 @@ F("toolsPath", "bili.mjs 路径", "留空 = 用合体插件自带的 tools/", "t
           className: "qbw-input", value: pv(key, fallback), placeholder,
           onChange: (e) => setP(key, e.target.value),
         }));
+      // 卡片底/边框一律走主题 token（复用 .qbw-card 的边框/圆角/底色），
+      // 不能再 inline 写死 #fafbff/#e3e6ee：深色主题下会变成白底浅字（audit F3）。
       const stepBox = (label, value, hint) => h("div", {
         key: label,
-        style: { flex: "1 1 92px", minWidth: "92px", padding: "7px 9px", border: "1px solid #e3e6ee", borderRadius: "8px", background: "#fafbff" },
+        className: "qbw-card",
+        style: { flex: "1 1 92px", minWidth: "92px", padding: "7px 9px" },
       },
         h("div", { style: { fontSize: "11px", opacity: 0.65 } }, label),
         h("div", { style: { fontWeight: 600, fontSize: "15px", lineHeight: 1.4 } }, value),
@@ -1580,7 +1583,7 @@ F("toolsPath", "bili.mjs 路径", "留空 = 用合体插件自带的 tools/", "t
           const pct = Math.max(0, Math.min(100, Math.round(Number(value) * 100) || 0));
           return h("div", { key: need, style: { display: "flex", alignItems: "center", gap: "6px", marginTop: "4px" } },
             h("span", { style: { width: "34px", fontSize: "12px", opacity: 0.75 } }, needLabel[need] ?? need),
-            h("div", { style: { flex: 1, height: "7px", borderRadius: "4px", background: "#e9edf5", overflow: "hidden" } },
+            h("div", { style: { flex: 1, height: "7px", borderRadius: "4px", background: "rgba(127,127,127,.12)", overflow: "hidden" } },
               h("div", { style: { width: `${pct}%`, height: "100%", borderRadius: "4px", background: "#6aa9ff" } })),
             h("span", { style: { width: "34px", textAlign: "right", fontSize: "12px", opacity: 0.7 } }, `${pct}%`));
         });
@@ -1616,7 +1619,7 @@ F("toolsPath", "bili.mjs 路径", "留空 = 用合体插件自带的 tools/", "t
           st.lastSkip?.reason ? h("div", null, `最近一次没出发：${st.lastSkip.reason}${st.lastSkip.at ? `（${at(st.lastSkip.at)}）` : ""}`) : null,
           st.pending?.length ? h("div", null, `心里还惦记着：${st.pending.slice(-3).map((p) => p.text).join("；")}`) : null) : h("div", { className: "qbw-hint" }, status?.ok === false ? "这个载体暂时读不到状态" : "读取中…"),
 
-        h("details", { open: true, style: { marginTop: "10px", borderTop: "1px dashed #e1e6f0", paddingTop: "8px" } },
+        h("details", { open: true, style: { marginTop: "10px", borderTop: "1px dashed var(--dsw-alias-border-l2)", paddingTop: "8px" } },
           h("summary", { style: { cursor: "pointer", fontWeight: 600 } }, "它是怎么想的 · 当前链路"),
           h("div", { className: "qbw-hint", style: { marginTop: "6px" } },
             "素材 → 事件理解（谁的目标）→ 评价/驱力 → 目标假设（置信度/风险）→ 选择 → 发送 → 回执/反馈。每一步都在下面可调。"),
@@ -1699,7 +1702,9 @@ F("toolsPath", "bili.mjs 路径", "留空 = 用合体插件自带的 tools/", "t
         set(["purpose", "carrier"], value);
         toast(`✓ 载体改为「${value === "pet" ? "桌宠" : "QQ"}」，记得点底部保存`);
       };
-      const seg = (options, value, onChange) => h("div", { style: { display: "inline-flex", gap: "4px", padding: "2px", borderRadius: "999px", background: "#fff", border: "1px solid #e3e6ee" } },
+      // 分段选择器：胶囊底/边框走中性半透明 + 主题边框，未选中文字用主题 label，
+      // 深色主题下才不会出现"白底深字"的孤岛（audit F3）。
+      const seg = (options, value, onChange) => h("div", { style: { display: "inline-flex", gap: "4px", padding: "2px", borderRadius: "999px", background: "rgba(127,127,127,.06)", border: "1px solid var(--dsw-alias-border-l2)" } },
         options.map(([val, label]) => h("button", {
           key: val,
           type: "button",
@@ -1712,7 +1717,7 @@ F("toolsPath", "bili.mjs 路径", "留空 = 用合体插件自带的 tools/", "t
             lineHeight: 1.7,
             cursor: "pointer",
             background: value === val ? "linear-gradient(180deg,#8ab8ff,#5f97f0)" : "transparent",
-            color: value === val ? "#fff" : "#6d6a78",
+            color: value === val ? "#fff" : "var(--dsw-alias-label-secondary)",
           },
         }, label)));
       const cardStyle = (active) => ({
@@ -1720,8 +1725,8 @@ F("toolsPath", "bili.mjs 路径", "留空 = 用合体插件自带的 tools/", "t
         minWidth: "220px",
         padding: "10px 12px",
         borderRadius: "10px",
-        border: `1px solid ${active ? "#6aa9ff" : "#e3e6ee"}`,
-        background: active ? "rgba(106,169,255,.08)" : "#fafbff",
+        border: `1px solid ${active ? "var(--dsw-alias-brand-primary)" : "var(--dsw-alias-border-l2)"}`,
+        background: active ? "rgba(106,169,255,.12)" : "rgba(127,127,127,.03)",
         cursor: "pointer",
         boxShadow: active ? "0 0 0 2px rgba(106,169,255,.14)" : "none",
       });
@@ -1863,7 +1868,7 @@ F("toolsPath", "bili.mjs 路径", "留空 = 用合体插件自带的 tools/", "t
           Array.isArray(latest.reasons) && latest.reasons.length
             ? h("div", null, `依据：${latest.reasons.slice(0, 4).join("；")}`) : null)
           : h("div", { className: "qbw-hint", style: { marginTop: "6px" } }, "还没有收过尾；下次她判断这段聊完了，这里会出现收尾记录。"),
-        h("details", { open: true, style: { marginTop: "10px", borderTop: "1px dashed #e1e6f0", paddingTop: "8px" } },
+        h("details", { open: true, style: { marginTop: "10px", borderTop: "1px dashed var(--dsw-alias-border-l2)", paddingTop: "8px" } },
           h("summary", { style: { cursor: "pointer", fontWeight: 600 } }, "收尾规则"),
           h(Row, { label: "启用对话收尾判断", hint: "关掉后不会注入判断参数，也不能用 qq_close_conversation" },
             h("input", { className: "qbw-switch", type: "checkbox", checked: cv("enabled", true) !== false, onChange: (e) => setC("enabled", e.target.checked) })),
@@ -2393,7 +2398,9 @@ F("socialV2.voice.ffmpegPath", "ffmpeg 路径", "留空走 PATH", "text", { wide
           live ? h("div", null,
             h("img", {
               src: state.image, alt: "B站登录二维码",
-              style: { width: "220px", height: "220px", imageRendering: "pixelated", display: "block", margin: "12px auto", background: "#fff", padding: "10px", borderRadius: "10px" },
+              // 二维码必须纯白底（否则手机扫不出来），深色主题也不改；test-ui-contrast 用下面的
+              // qbw-contrast-allow 标记把它放进白名单，其余 inline 浅色一律失败。
+              style: { width: "220px", height: "220px", imageRendering: "pixelated", display: "block", margin: "12px auto", background: "#fff" /* qbw-contrast-allow: 二维码纯白底 */, padding: "10px", borderRadius: "10px" },
             }),
             h("p", { className: "qbw-hint", style: { textAlign: "center" } },
               state.phase === "scanned" ? "已扫码，请在手机上确认登录" : "打开 B站 App → 扫一扫 → 确认登录"),
@@ -2723,15 +2730,37 @@ F("socialV2.voice.ffmpegPath", "ffmpeg 路径", "留空走 PATH", "text", { wide
     // ── 人格卡编辑器（嵌在「角色」页里，不再单开「人设」标签）──────────────
     // 用户反馈「人设 / 角色」两个栏目重复：角色包和人格卡本来就是同一件事的两面。
     // 现在只有一个「角色」页：上面切角色，下面直接编辑当前角色的人格卡。
-    function PersonaEditor({ busy, setBusy, toast, unified, setUnified }) {
+    // reloadKey = 当前角色 epoch（/overview.character.epoch；切换/回档角色时 +1）。
+    // 编辑器不会随角色切换卸载，文本是独立本地草稿：不跟着重读的话，点「保存人格卡」
+    // 会把上一个角色的卡写进新角色（audit F1）。
+    function PersonaEditor({ busy, setBusy, toast, unified, setUnified, reloadKey }) {
       const [data, setData] = useState(null);
       const [text, setText] = useState("");
       const [err, setErr] = useState("");
       const load = useCallback(async () => {
-        try { const r = await api("/persona"); setData(r); setText(r.text ?? ""); setErr(""); }
-        catch (e) { setErr(e.message); }
+        try { const r = await api("/persona"); setData(r); setText(r.text ?? ""); setErr(""); return true; }
+        catch (e) { setErr(e.message); return false; }
       }, []);
       useEffect(() => { load(); }, [load]);
+      // 角色切换后重新读 /persona，避免旧草稿被写进新角色。
+      const personaKeyRef = useRef(reloadKey);
+      const personaKeyReadyRef = useRef(false);
+      useEffect(() => {
+        // 首次拿到角色数据只记基线：挂载时上面的 effect 已经读过当前角色，
+        // 不能把「从 null 到第一个 epoch」误当成切换而弹提示。
+        if (!personaKeyReadyRef.current) {
+          if (reloadKey == null) return;
+          personaKeyReadyRef.current = true;
+          personaKeyRef.current = reloadKey;
+          return;
+        }
+        if (personaKeyRef.current === reloadKey) return;
+        personaKeyRef.current = reloadKey;
+        // 读失败时不报"已重新读取"：编辑器里会显示 err，提示用户手动「重新读取」。
+        void load().then((ok) => {
+          toast?.(ok ? "✓ 已切换角色，人格卡已重新读取" : "✗ 切角色后读人格卡失败，请点「重新读取」");
+        });
+      }, [reloadKey, load, toast]);
       const save = async () => {
         setBusy("persona-save");
         try {
@@ -3174,7 +3203,10 @@ F("socialV2.voice.ffmpegPath", "ffmpeg 路径", "留空走 PATH", "text", { wide
           "密钥只写在本机包内的 config.toml，不上传任何服务器。"));
     }
 
-    function VoiceTab({ toast }) {
+    // 语音包目录也属于 qq 配置树，必须走根组件的全局草稿（setQqPath → 底部「保存」），
+    // 不能在这里直接 POST /config：根组件草稿仍是旧值，之后任何一次底部保存都会把
+    // 刚写入的目录覆盖回去（audit F2）。qq/setQqPath 由 renderTab 传入。
+    function VoiceTab({ toast, qq, setQqPath }) {
       const [packs, setPacks] = useState([]);
       const [packsDir, setPacksDir] = useState("");
       const [dirInput, setDirInput] = useState("");
@@ -3199,7 +3231,14 @@ F("socialV2.voice.ffmpegPath", "ffmpeg 路径", "留空走 PATH", "text", { wide
           if (run) setPick(run.id);
         } catch (e) { setErr(e.message); }
       }, []);
-      useEffect(() => { load(); }, [load]);
+      // qq 对象被替换有三种情况：改草稿 / 底部保存响应 / 重新读取。都重新读一次服务端目录，
+      // 保证保存成功后「当前已保存」不停在旧值（草稿编辑时多一次只读请求，无副作用）。
+      useEffect(() => { load(); }, [load, qq]);
+
+      // 服务端已保存的目录 vs 全局草稿里的目录：两者不一致时提示「点底部保存生效」。
+      const savedDir = String(packsDir || "");
+      const draftDir = typeof qq?.voicePacks?.dir === "string" ? qq.voicePacks.dir : "";
+      const dirDirty = Boolean(qq) && draftDir !== savedDir;
 
       const poll = useCallback(async (id, tries = 240) => {
         for (let i = 0; i < tries; i += 1) {
@@ -3314,13 +3353,12 @@ F("socialV2.voice.ffmpegPath", "ffmpeg 路径", "留空走 PATH", "text", { wide
           !p.installed ? h(Btn, { disabled: busyId === p.id, onClick: () => act(p.id, "install") }, "安装（" + fmt(p.sizeBytes) + "）") : null,
           p.external ? h("span", { style: { fontSize: "12px", opacity: 0.7 } }, p.dir ? `已在别处安装：${p.dir}` : "已在别处安装（端口在跑）") : null,
           p.external && p.dir
-            ? h(Btn, { kind: "qbw-btn2", onClick: async () => {
+            ? h(Btn, { kind: "qbw-btn2", onClick: () => {
               const parent = String(p.dir).replace(/[\/][^\/]+$/, "");
-              try {
-                await api("/config", { method: "POST", body: { qq: { voicePacks: { dir: parent.split("\\").join("/") } } } });
-                if (toast) toast(`✓ 安装目录已指向 ${parent}`);
-                await load();
-              } catch (e) { if (toast) toast(`✗ ${e.message}`); }
+              // 反斜杠转正斜杠的既有归一化不变，只是落点从「直接写盘」改成全局草稿。
+              const next = parent.split("\\").join("/");
+              setQqPath(["voicePacks", "dir"], next);
+              if (toast) toast(`✓ 安装目录已记到草稿：${next}（改完点底部保存生效）`);
             } }, "把安装目录设为这里")
             : null,
           p.installed ? h(Btn, { kind: "qbw-btn2", disabled: busyId === p.id, onClick: () => act(p.id, "remove") }, "卸载") : null,
@@ -3377,21 +3415,20 @@ F("socialV2.voice.ffmpegPath", "ffmpeg 路径", "留空走 PATH", "text", { wide
         h("div", { style: { marginTop: "10px", padding: "10px 12px", border: "1px solid var(--dsw-alias-border-l2)", borderRadius: "10px" } },
           h("div", { style: { fontSize: "13px", fontWeight: 600 } }, "安装目录"),
           h("div", { style: { fontSize: "12px", opacity: 0.75, marginTop: "2px" } },
-            "默认在 ~/.dsh/surfcore/state/voice-packs；磁盘紧张或用户目录只读时改到这里。改完要重启桥接，已装的包请手动移动过去。安装依赖默认走清华源（可用 SURFCORE_PIP_INDEX 覆盖）。"),
+            "默认在 ~/.dsh/surfcore/state/voice-packs；磁盘紧张或用户目录只读时改到这里。改完点底部保存生效；已装的包请手动移动过去。安装依赖默认走清华源（可用 SURFCORE_PIP_INDEX 覆盖）。"),
           h("div", { style: { display: "flex", gap: "8px", marginTop: "8px", flexWrap: "wrap" } },
             h("input", { className: "qbw-input", value: dirInput, placeholder: packsDir || "D:/voice-packs", style: { flex: "1 1 320px" }, onChange: (e) => setDirInput(e.target.value) }),
             h(Browse, { mode: "dir", title: "选择语音包安装目录", onPick: (v) => setDirInput(v) }),
-            h(Btn, { kind: "qbw-btn2", onClick: async () => {
+            h(Btn, { kind: "qbw-btn2", onClick: () => {
               const next = String(dirInput || "").trim();
               if (!next) { toast("✗ 目录不能为空"); return; }
               if (!/^[A-Za-z]:/.test(next) && !next.startsWith("/")) { toast("✗ 请填绝对路径，例如 D:/voice-packs"); return; }
-              try {
-                await api("/config", { method: "POST", body: { qq: { voicePacks: { dir: next.split(String.fromCharCode(92)).join("/") } } } });
-                toast("✓ 已保存；重启桥接后生效（已装的包请先移动到新目录）");
-                await load();
-              } catch (e) { toast(`✗ ${e.message}`); }
-            } }, "保存路径")),
-          h("div", { style: { fontSize: "12px", opacity: 0.65, marginTop: "6px" } }, "当前生效：", h("code", null, packsDir || "（读不到）"))),
+              // 既有归一化保留（反斜杠 → 正斜杠），落点改成全局草稿。
+              setQqPath(["voicePacks", "dir"], next.split(String.fromCharCode(92)).join("/"));
+              toast("✓ 已记到草稿；改完点底部保存生效（已装的包请先移动到新目录）");
+            } }, "存到草稿")),
+          h("div", { style: { fontSize: "12px", opacity: 0.65, marginTop: "6px" } }, "当前已保存：", h("code", null, savedDir || "（读不到）"),
+            dirDirty ? h("span", { style: { marginLeft: "8px", color: "var(--dsw-alias-brand-primary)" } }, `草稿：${draftDir || "（空）"} · 改完点底部保存生效`) : null)),
         h("div", { className: "qbw-hint", style: { marginTop: "10px" } },
           "⚠️ 改完语音总开关 / TTS / 发语音工具后，需要重启 DSH：工具列表在 MCP 进程启动时就固定了，不重启她还会说“没有语音入口”。"),
         h("div", { style: { marginTop: "10px", padding: "10px 12px", border: "1px solid var(--dsw-alias-border-l2)", borderRadius: "10px" } },
@@ -3401,17 +3438,15 @@ F("socialV2.voice.ffmpegPath", "ffmpeg 路径", "留空走 PATH", "text", { wide
           h("div", { style: { display: "flex", gap: "8px", marginTop: "8px", flexWrap: "wrap" } },
             h("input", { className: "qbw-input", value: adoptInput, placeholder: "D:/surfcore/state/voice-packs/voice-local", style: { flex: "1 1 320px" }, onChange: (e) => setAdoptInput(e.target.value) }),
             h(Browse, { mode: "dir", title: "选择已安装的语音包目录", onPick: (v) => setAdoptInput(v) }),
-            h(Btn, { kind: "qbw-btn2", onClick: async () => {
+            h(Btn, { kind: "qbw-btn2", onClick: () => {
               const raw = String(adoptInput || "").trim();
               if (!raw) { if (toast) toast("✗ 先选一个目录"); return; }
               // 选到 .../voice-local 时，base 取上一级；选到 base 就原样用。
               const norm = raw.split(String.fromCharCode(92)).join("/");
               const base = /(voice-local|voice-cloud)$/i.test(norm) ? norm.replace(/[^/]+$/, "") : norm;
-              try {
-                await api("/config", { method: "POST", body: { qq: { voicePacks: { dir: base.split("\\").join("/") } } } });
-                if (toast) toast(`✓ 已指向 ${base}，识别中…`);
-                await load();
-              } catch (e) { if (toast) toast(`✗ ${e.message}`); }
+              // 反斜杠归一化保持不变；只写全局草稿，由底部「保存」落盘。
+              setQqPath(["voicePacks", "dir"], base.split("\\").join("/"));
+              if (toast) toast(`✓ 已记到草稿：${base}；改完点底部保存生效`);
             } }, "用这个目录"))),
 
 
@@ -4055,7 +4090,10 @@ F("socialV2.voice.ffmpegPath", "ffmpeg 路径", "留空走 PATH", "text", { wide
             current ? h(Btn, { kind: "qbw-btn2", onClick: () => goTab?.("memory") }, "管理记忆卡") : null,
             h(Btn, { onClick: () => setShowCreate((v) => !v) }, showCreate ? "收起新建" : "新建角色"))),
         err ? h("div", { className: "qbw-err" }, err) : null,
-        h(PersonaEditor, { busy, setBusy, toast, unified, setUnified }),
+        // reloadKey 用当前角色 epoch：/overview 的 character.epoch 由 act 里的 reload?.() 刷新；
+        // 万一 overview 读失败还有 /characters 的 current.epoch 兜底。epoch 由
+        // switchCharacter/bumpEpoch 保证每次切换 +1（src/character-persona.js）。
+        h(PersonaEditor, { busy, setBusy, toast, unified, setUnified, reloadKey: overview?.character?.epoch ?? current?.epoch ?? null }),
         showCreate ? h("div", { className: "qbw-card", style: { marginTop: "10px" } },
           h("h4", null, "新建角色"),
           h("div", { className: "qbw-hint" }, "可以只填名字（空人格卡/空记忆卡），也可以把你自己预设的人格卡、记忆卡 JSON 一起导入。"),
@@ -4602,6 +4640,9 @@ F("socialV2.voice.ffmpegPath", "ffmpeg 路径", "留空走 PATH", "text", { wide
       const [busy, setBusy] = useState("");
       const [toast, setToast] = useState("");
       const [err, setErr] = useState("");
+      // 服务端 warnings 是「提示」（如需要重启桥接才生效），不是错误。单独一个通道，
+      // 用 .qbw-warnbox 渲染；以前塞进 err 红色通道，每次保存都在页顶看到误导性红字（audit F4）。
+      const [warn, setWarn] = useState("");
       // 记忆卡容量弹窗：80/90/100% 三档；页面开着时每分钟查一次（用户不一定停在「记忆」页）。
       const [memoryAlert, setMemoryAlert] = useState(null);
       const memorySnoozeRef = useRef(0);
@@ -4640,6 +4681,7 @@ F("socialV2.voice.ffmpegPath", "ffmpeg 路径", "留空走 PATH", "text", { wide
       }, []);
       const loadConfig = useCallback(async () => {
         setErr("");
+        setWarn("");
         try {
           const r = await api("/config");
           setQq(r.qq ?? {});
@@ -4706,7 +4748,7 @@ F("socialV2.voice.ffmpegPath", "ffmpeg 路径", "留空走 PATH", "text", { wide
       }, [unified]);
 
       const save = async (restartBridge = false) => {
-        setBusy("save"); setErr("");
+        setBusy("save"); setErr(""); setWarn("");
         try {
           if (budgetDirty && limitDraft) {
             const b = await api("/token-budget", { method: "POST", body: { limits: limitDraft } });
@@ -4720,7 +4762,8 @@ F("socialV2.voice.ffmpegPath", "ffmpeg 路径", "留空走 PATH", "text", { wide
           const nextSaved = JSON.stringify({ qq: r.qq ?? normalizedQq, bili: r.bili ?? bili, unified: r.unified ?? normalizedUnified });
           setSaved(nextSaved);
           notify(`✓ 已保存${budgetDirty ? "（token 额度即时生效）" : ""}${r.bridge ? (r.bridge.ok ? "，桥接已重启" : "，桥接重启失败") : ""}${r.warnings?.length ? "（有提示）" : ""}`);
-          if (r.warnings?.length) setErr(r.warnings.join(" "));
+          // warnings 是服务端提示（需要重启桥接等），走 warn 通道；err 只留给异常。
+          if (r.warnings?.length) setWarn(r.warnings.join(" "));
           await loadOverview();
         } catch (e) { setErr(`保存失败：${e.message}`); } finally { setBusy(""); }
       };
@@ -4775,7 +4818,7 @@ F("socialV2.voice.ffmpegPath", "ffmpeg 路径", "留空走 PATH", "text", { wide
         if (tab === "bili") return h(BiliTab, { cfg: bili, set: setBiliPath, qq: normalizedQq, setQqPath, admin: unified?.admin ?? {}, setAdmin, unified, setUnified: setUnifiedPath, qqPrivate: normalizedQq?.allow?.private ?? [], qqAllowAll: normalizedQq?.allowAllWhenEmpty === true, overview, busy, setBusy, toast: notify, reload });
         if (tab === "tokens") return h(TokenTab, { budget, limits: limitDraft, onChange: setLimitDraft, disabled: !!busy, alertedToday: tokenAlerted, onSave: () => save(false), busy, toast: notify });
         if (tab === "watch") return h(WatchTab, { busy, setBusy, toast: notify, goTab: setTab });
-        if (tab === "voice") return h(VoiceTab, { toast });
+        if (tab === "voice") return h(VoiceTab, { toast: notify, qq, setQqPath });
         if (tab === "pet") return h(PetTab, { toast: notify, unified, setUnified: setUnifiedPath });
         if (tab === "memory") return h(MemoryTab, { qq: normalizedQq, unified, setUnified: setUnifiedPath, overview, busy, setBusy, toast: notify, reload });
         if (tab === "align") return h(AlignTab, { busy, setBusy, toast: notify, reload });
@@ -4800,6 +4843,7 @@ F("socialV2.voice.ffmpegPath", "ffmpeg 路径", "留空走 PATH", "text", { wide
         }, label))),
         h("div", { className: "qbw-body" },
           err ? h("div", { className: "qbw-err", style: { marginBottom: "8px" } }, err) : null,
+          warn ? h("div", { className: "qbw-warnbox", style: { marginBottom: "8px" } }, warn) : null,
           renderTab()),
         h("div", { className: "qbw-foot" },
           h(Btn, { onClick: () => save(false), disabled: !!busy || !dirty }, busy === "save" ? "保存中…" : "保存"),
