@@ -173,8 +173,26 @@ test('正常备份可以恢复：先校验再原子写，恢复前自动留底�
   assert.ok(preRestore.length >= 2, '恢复前应自动备份当前卡');
 });
 
-test('stats 丢失时流式重建（P2-9）', () => {
-  const dir = tempDir();
+test('维护器锁：另一个实例正在维护时跳过；陈旧锁可回收（P2-10）', async () => {
+  ensureCharacter();
+  const paths = writeCard([record(1)]);
+  const lockFile = path.join(paths.dir, '.memory-maintain.lock');
+  fs.writeFileSync(lockFile, JSON.stringify({ pid: 1, at: Date.now() }));
+  const skipped = await memoryLib.runMemoryCardMaintenance({ now: Date.now() });
+  assert.equal(skipped.skipped, 'locked');
+  assert.equal(fs.existsSync(lockFile), true, '别人的锁不能被删');
+
+  fs.rmSync(lockFile);
+  const stale = new Date(Date.now() - 2 * 60 * 60 * 1000);
+  fs.writeFileSync(lockFile, '{}');
+  fs.utimesSync(lockFile, stale, stale);
+  const run = await memoryLib.runMemoryCardMaintenance({ now: Date.now() });
+  assert.equal(run.ok, true);
+  assert.notEqual(run.skipped, 'locked');
+  assert.equal(fs.existsSync(lockFile), false, '维护结束应释放锁');
+});
+
+test('stats 丢失时流式重建（P2-9）', () => {  const dir = tempDir();
   const paths = engine.resolveMemoryCardPaths(dir);
   fs.mkdirSync(dir, { recursive: true });
   const lines = [];

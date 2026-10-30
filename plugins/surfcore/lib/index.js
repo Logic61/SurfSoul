@@ -76,7 +76,7 @@ import {
 import {
   applyMemoryCardAction, compactMemoryCardNow, forgetNarrativeEpisode, fullMemoryCardSnapshot, memoryCardIdle, memoryCardSnapshot,
   memoryCardStatusNow, notifyOwnerIfNeeded, restoreMemoryCardBackup, runMemoryCardMaintenance,
-  setNarrativeEnabled, startMemoryCardTimer,
+  setNarrativeEnabled, startMemoryCardTimer, accountMemoryNarrativeUsage,
 } from './memory-card.js';
 import { readWatchHistory } from '../tools/lib/watch-history.mjs';
 import { enrichWatchHistory } from '../tools/lib/watch-actions.mjs';
@@ -519,7 +519,18 @@ export function apply(ctx) {
 
   // 记忆卡：插件宿主是唯一维护者。启动 8 秒后整理一次（摄取桥接 inbox + B站记忆），
   // 之后每 10 分钟一次；每日衰减由 memory-card 自己按 dailyHour 判断。
-  memoryCardTimer = startMemoryCardTimer({ log: pluginLog, callBridge });
+  // P2-20：维护后把叙事层上一次 LLM 用量记入 token 额度「其他」（同一段 lastRun 只记一次）。
+  const accountNarrativeUsage = async () => {
+    try {
+      const result = await accountMemoryNarrativeUsage({
+        recordUsage: (payload) => tokenBudget.recordExternalUsage(payload),
+      });
+      if (result?.recorded) pluginLog('[叙事] 上次压缩的 token 用量已记入额度「其他」');
+    } catch (error) {
+      pluginLog('[叙事] 记录 token 用量失败：', String(error?.message ?? error).slice(0, 120));
+    }
+  };
+  memoryCardTimer = startMemoryCardTimer({ log: pluginLog, callBridge, onMaintenance: accountNarrativeUsage });
 
   // 角色自动存档：启动 10 秒后跑一次，之后每 6 小时检查（每天最多一份 + 11 个年龄档轮换）。
   const runCharacterAutoSave = () => {

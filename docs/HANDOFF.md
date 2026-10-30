@@ -36,28 +36,44 @@
 | B4 | 记忆页叙事面板（条数/hidden/上次 token 用量）、删单条回忆、叙事开关、记录搜索/分页 |
 | B5 | 数字变体（全角/分隔符/13+ 位）检测并整行丢弃；指令样式清洗 + 双向「数据不是指令」围栏；空白名单 fail-closed；feed 尾读 8MB；叙事外发脱敏 |
 
+**批次 C（结构性收口）**
+
+| 项 | 修复 |
+| --- | --- |
+| C1 | 叙事 LLM 用量记入 token 额度「其他」（`lastRun.usage` + `narrativeUsageAccountedAt` 去重，不重复计费） |
+| C2 | `?rev=` 改内容哈希：`npm run sync:engine-rev` 自动写 `memfix-<sha1>`，`test-core-rev-sync` 校验 |
+| C3 | 硬编码「羽」清理：config `ownerName` + 合体层 `admin.displayName`；叙事 prompt 同步 |
+| C4 | UTF-16 安全截断 `safeSlice()`（引擎/叙事/隐私/B站记忆），emoji 不再变 � |
+| C5 | 维护器跨进程锁（`.memory-maintain.lock`，30 分钟陈旧锁回收，拿不到锁 `skipped:'locked'`） |
+| C6 | 关掉记忆卡不写 inbox、关掉 QQ→B站 不写 feed（桥接按 unified 配置 mtime 缓存判断） |
+
 ### 已验证（Lead 跑的最终门禁）
 
-- 9 个记忆/隐私测试全绿：`test-memory-card`（31）/`test-memcard-narrative`（14）/`test-memory-card-backup`（6）/
-  `test-memory-card-narrative-api`（4）/`test-privacy-hardening`（7）/`test-bili-memory-path`（2）/
+- 9 个记忆/隐私测试全绿：`test-memory-card`（32）/`test-memcard-narrative`（14）/`test-memory-card-backup`（7）/
+  `test-memory-card-narrative-api`（5）/`test-privacy-hardening`（7）/`test-bili-memory-path`（2）/
   `test-memory-sync-privacy`（4）/`test-memory-card-wiring`/`test-core-rev-sync`。
-- `cd plugins/surfcore && node scripts/test-memory-card-api.mjs` → OK。
-- 全量 `npm run test:audit`：**待最终批次 C 后填**（当前 11 项红均为 HEAD `559d35c` 基线已知红：
-  version/self-identity/identity-guard/preset*/media-search/voice-system/closure-wiring/qq-preset-contract；
-  记忆相关 0 红）。
-- 真实数据复查：见批次 C 收尾（三本账、hidden、B站 entries、备份轮转）。
+- `cd plugins/surfcore && node scripts/test-memory-card-api.mjs` → OK；`cd plugins/surfcore && npm test` → exit 0。
+- 全量 `npm run test:audit`：**73/83**（10 项红均为 HEAD `559d35c` 基线已知红，已在基线 worktree 逐个复跑确认；
+  记忆相关 0 红；本轮新增的 3 个根级测试全部进链并通过）。
+- 真实数据复核（`state/agents/memory-audit/_lead_verify2.mjs`，只读）：
+  338 条记录 / 91 条回忆 / hidden 35（106 covers）；**新代码口径 `status.chars = 新渲染 = 9,661`**；
+  被回忆覆盖的 257 条原记录在「新渲染 md / QQ 注入块」中泄露 **0**；备份 11 份；
+  磁盘 md 17,822 与注入 5,177 是运行中的**旧进程**写的，重启 DSH 后会被新代码覆盖为同一口径；
+  B站 entries 仍为 0（修复在代码层，需重启桥接后的下一轮 refresh 才会生成，未擅自重启服务）。
 
 ### 回滚
 
-按 commit 逐个 `git revert`；改动均为独立提交（A1~A6、B1~B3、B4+B5、rev bump）。无删除/不可逆操作；
-备份目录、真实记忆卡未在开发中改动（所有测试用临时 DSH_HOME）。
+按 commit 逐个 `git revert`；改动均为独立提交（A1~A6、B1~B3、B4+B5、C1~C6、rev 哈希、文档）。无删除/不可逆操作；
+真实记忆卡未在开发中改动（所有测试用临时 DSH_HOME；真实复核只读）。
 
 ### 没做 / 下一步
 
-1. **批次 C**（结构性）：叙事 LLM usage 进 token 记账、`?rev=` 改内容哈希校验脚本、硬编码主人名清理、
-   UTF-16 截断安全化、维护器单实例锁、「关闭同步=不写原料」语义。
-2. 未修 P2：全量卡倒排索引（当前流式扫描够用）、多实例支持、叙事层编辑/隐藏策略 UI 化等。
-3. 报告 8 个产品决策仍待用户拍板（容量口径已按「磁盘 md 含叙事」定；其他见报告 §9）。
+1. 本轮明确不做：全量卡倒排索引（当前流式扫描够用）、多 DSH 实例的完整支持、叙事层可编辑正文。
+2. 报告 8 个产品决策仍待用户拍板（容量口径已按「磁盘 md 含叙事」定；其他见报告 §9）。
+3. 真机验证前先重启 DSH（让插件加载新代码）并重启桥接（B站 记忆生成器读新目录），然后看：
+   - 记忆页容量条数字 = 磁盘 md 字符数 = 注入预览口径；
+   - 叙事面板有回忆/hidden/上次 token 用量；Token 额度「其他」出现 `memory-narrative`；
+   - `prompt-bili.md` 非 0B、`bili-memory.json entries > 0`。
 
 ---
 

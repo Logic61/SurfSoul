@@ -63,6 +63,7 @@
     "privacy-scan:strict": "node scripts/privacy-scan.mjs --strict",
     "test:preset-patches": "node scripts/test-agent-preset-patches.mjs",
     "test:core-rev-sync": "node scripts/test-core-rev-sync.mjs",
+    "sync:engine-rev": "node scripts/sync-engine-rev.mjs",
     "test:privacy-scan": "node scripts/test-privacy-scan.mjs",
     "guard:check": "node scripts/patch-dsh-session-guard.mjs --check",
     "guard:prepare": "node scripts/install-session-guard.mjs --prepare",

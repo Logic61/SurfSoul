@@ -2790,3 +2790,44 @@ return list[0] ?? pool[0];
   空白名单拒绝搬运；feed 只读尾 8 MB；叙事 prompt/输出统一 `redactForOutbound`。
 - **验证**：`test-privacy-hardening.mjs`（7 项：8 类变体 / 正常文本不误伤 / 指令清洗 / 白名单 / 外发脱敏）。
 
+## 叙事层 LLM 用量一直不进 token 额度（P2-20）
+
+- **现象**：叙事压缩每轮最多调 6 次 deepseek-flash，用量直接丢弃；额度、设置页、账本都看不到，
+  用户无法知道「记忆维护」花了多少 token。
+- **根因**：`runNarration()` 收到了 `result.usage` 但只用来返回；桥接日志也不打；插件没有外部用量记账入口。
+- **修法**（2026-10-30 批次 C）：`runNarration` 把 `{at, usage, added}` 写进叙事文件 `lastRun`；
+  插件维护后读 `lastRun`，调 `tokenBudget.recordExternalUsage({category:'other', sessionId:'memory-narrative'})`，
+  并把 `lastRun.at` 写回 `card.meta.narrativeUsageAccountedAt` 去重（同一段只记一次）。
+- **验证**：`test-memory-card-narrative-api.mjs`「叙事用量写入 token 额度」：首次记录、二次 skipped、落盘字段。
+
+## `?rev=` 手工字符串不可靠（P1-9 的结构性收口）
+
+- **现象**：改完引擎忘 bump / 只 bump 一处 / 只 bump 插件不 bump 叙事 import，都会让热重载继续用旧代码；
+  门禁只能事后抓不一致，说不出「应该是什么」。
+- **根因**：rev 是手写常量，和引擎内容没有绑定。
+- **修法**（2026-10-30 批次 C）：`npm run sync:engine-rev` 计算
+  `memfix-<sha1(memory-card.js + memcard-narrative.js) 前 10 位>`（哈希前先把 rev 归一掉防自引用），
+  自动改写 4 处引用；`test-core-rev-sync` 第 3c 节要求 rev === 内容哈希，并在失败信息里直接给出期望值。
+- **验证**：`node scripts/test-core-rev-sync.mjs`；故意改引擎不跑同步脚本 → 红并提示期望 rev。
+
+## 硬编码主人名「羽」+ UTF-16 截断切出孤立代理（P2-16/P2-17）
+
+- **现象**：换安装/换角色后提示词仍叫「羽」；含 emoji 的文本截断后出现 �（U+FFFD）。
+- **根因**：`memory-card.js` / `memcard-narrative.js` 多处写死「羽」；`String.slice` 按 UTF-16 码元切，
+  正好切在代理对中间。
+- **修法**（2026-10-30 批次 C）：config 增加 `ownerName`（空 = 「主人」；插件从 `admin.displayName` 自动补）；
+  叙事 prompt 用 `cfg.ownerName`；新增 `safeSlice()`（切到高位代理就退一码元），引擎/叙事/隐私/B站记忆
+  所有面向用户文本的截断都改走它。
+- **验证**：`test-memory-card.mjs` 称呼 + `safeSlice` 断言；`test-memcard-narrative.mjs` 叙事称呼与 emoji 截断。
+
+## 多实例维护器无锁 + 关闭记忆卡/同步后仍写原料（P2-10/P2-23）
+
+- **现象**：多 DSH 实例/热重载叠加时两个维护器整卡读改写互相覆盖；用户关掉记忆卡或 QQ→B站 后，
+  桥接仍持续往 inbox/feed 堆原料，关也关不掉。
+- **根因**：维护器只有进程内 promise 链，没有跨进程锁；桥接写 inbox/feed 时不看合体层开关。
+- **修法**（2026-10-30 批次 C）：维护器 `<记忆目录>/.memory-maintain.lock`（`wx` + 30 分钟陈旧锁回收，
+  拿不到锁返回 `skipped:'locked'`）；桥接加 `unifiedMemoryFlags()`（按 config mtime 缓存）：
+  `memoryCard.enabled=false` 不写 inbox，`memory.qqToBili.enabled!==true` 不写 feed。
+- **验证**：`test-memory-card-backup.mjs`「维护器锁」（跳过/陈旧锁回收/结束释放）；
+  `test-memory-card-narrative-api.mjs` 静态断言桥接两处开关接线。
+

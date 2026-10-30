@@ -13,10 +13,20 @@
 // 改其它 `src/*.js` 后仍然是"热重载不生效，要重启 DSH"——本测试会把清单打出来提醒。
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const LIB = path.join(ROOT, 'plugins', 'surfcore', 'lib');
+const ENGINE_FILE = path.join(ROOT, 'src', 'memory-card.js');
+const NARRATIVE_FILE = path.join(ROOT, 'src', 'memcard-narrative.js');
+
+/** 和 scripts/sync-engine-rev.mjs 保持同一算法：引擎 + 叙事层内容哈希（rev 先归一掉）。 */
+function expectedEngineRev() {
+  const text = [ENGINE_FILE, NARRATIVE_FILE].map((file) => fs.readFileSync(file, 'utf8')).join('\n');
+  const normalized = text.replace(/\?rev=[^'"]+/g, '');
+  return `memfix-${crypto.createHash('sha1').update(normalized).digest('hex').slice(0, 10)}`;
+}
 
 let failures = 0;
 const ok = (cond, label) => {
@@ -88,14 +98,22 @@ console.log('## 3b. 传递依赖也要挂同一个 rev（2026-10-30 新增：叙
 {
   // P1-9：插件 → memory-card.js?rev=X → memory-card.js 里裸 import './memcard-narrative.js'。
   // 后者不会随 rev 重新求值，于是热重载后「引擎新、叙事旧」，且 0 测试能发现。
-  const engineFile = path.join(ROOT, 'src', 'memory-card.js');
-  const engineText = fs.readFileSync(engineFile, 'utf8');
+  const engineText = fs.readFileSync(ENGINE_FILE, 'utf8');
   const narrativeSpecs = [...engineText.matchAll(/from\s+'([^']*memcard-narrative\.js[^']*)'/g)].map((m) => m[1]);
   ok(narrativeSpecs.length >= 1, 'src/memory-card.js 确实引用了叙事层（这条测试有对象）');
   const narrativeRevs = narrativeSpecs.map((spec) => /(?:^|[?&])rev=([^&]*)/.exec(spec)?.[1] ?? '');
   ok(narrativeSpecs.every((_, i) => narrativeRevs[i]), `叙事层引用都挂了 ?rev=（当前：${narrativeSpecs.join(' | ')}）`);
   const allRevs = new Set([...revs.keys(), ...narrativeRevs.filter(Boolean)]);
   ok(allRevs.size <= 1, `插件与叙事层的 ?rev= 只有一种取值（实际 ${allRevs.size} 种：${[...allRevs].join(' | ') || '无'}）`);
+}
+
+console.log('## 3c. rev 必须等于引擎内容哈希（批次 C：取代手工字符串）');
+{
+  const expected = expectedEngineRev();
+  const actual = [...new Set([...revs.keys(), ...coreImports.filter((i) => i.name === 'memory-card.js' && i.rev).map((i) => i.rev)])];
+  const narrativeRev = [...fs.readFileSync(ENGINE_FILE, 'utf8').matchAll(/memcard-narrative\.js\?rev=([^'"]+)/g)].map((m) => m[1]);
+  const all = [...new Set([...actual, ...narrativeRev])];
+  ok(all.length === 1 && all[0] === expected, `?rev= 应等于引擎内容哈希 ${expected}（实际：${all.join(' | ') || '无'}；改完引擎请跑 npm run sync:engine-rev）`);
 }
 
 console.log('## 4. 提醒：其它核心模块改完后热重载不会生效');

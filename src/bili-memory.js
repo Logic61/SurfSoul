@@ -64,9 +64,19 @@ function cryptoRandom() {
   return Math.random().toString(16).slice(2, 10);
 }
 
+function safeSlice(text, max) {
+  const s = String(text ?? '');
+  const limit = Math.max(0, Number(max) || 0);
+  if (s.length <= limit) return s;
+  let cut = s.slice(0, limit);
+  const last = cut.charCodeAt(cut.length - 1);
+  if (last >= 0xD800 && last <= 0xDBFF) cut = cut.slice(0, -1);
+  return cut;
+}
+
 function short(text, n) {
   const s = String(text ?? '').replace(/\s+/g, ' ').trim();
-  return s.length > n ? `${s.slice(0, n)}…` : s;
+  return s.length > n ? `${safeSlice(s, n)}…` : s;
 }
 
 function localDate(value) {

@@ -144,6 +144,17 @@ export function normalizeText(input) {
     .trim();
 }
 
+/** UTF-16 安全截断（P2-17）：不切出孤立代理（emoji 变 �）。 */
+function safeSlice(text, max) {
+  const s = String(text ?? '');
+  const limit = Math.max(0, Number(max) || 0);
+  if (s.length <= limit) return s;
+  let cut = s.slice(0, limit);
+  const last = cut.charCodeAt(cut.length - 1);
+  if (last >= 0xD800 && last <= 0xDBFF) cut = cut.slice(0, -1);
+  return cut;
+}
+
 export function sanitizeUrl(raw) {
   const text = String(raw ?? '');
   return text.replace(/https?:\/\/[^\s<>"')\]]+/gi, (url) => {
@@ -197,7 +208,7 @@ export function sanitizeText(input, options = {}) {
   text = stripInstructionLines(text);
   text = text.replace(/\s+/g, ' ').trim();
   if (!text) return { ok: false, text: '', dropped: true, reason: 'redacted-empty', hits: scan.hits };
-  if (text.length > maxChars) text = `${text.slice(0, maxChars)}…`;
+  if (text.length > maxChars) text = `${safeSlice(text, maxChars)}…`;
   return { ok: true, text, dropped: false, reason: '', hits: scan.hits };
 }
 

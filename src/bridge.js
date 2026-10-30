@@ -698,8 +698,33 @@ function appendActivity(line) {
 // 做二次过滤（密钥/手机号/地址/私信话题/QQ号一律剔除）。桥接本身不做语义判断，只守住
 // “绝不写私信”这条结构性边界。
 const appendPublicFeedLog = createCappedLogger(PUBLIC_FEED, 5000);
+/**
+ * 合体层全局开关缓存（P2-23，2026-10-30 批次 C）：用户关掉记忆卡 / QQ→B站 同步后，
+ * 桥接不应该继续写 inbox / feed 原料（旧实现会一直堆，关也关不掉）。
+ * 读不到配置文件时按默认（记忆卡开、同步关）处理。
+ */
+let unifiedMemoryFlagsCache = { mtime: -1, memoryCardEnabled: true, qqToBiliEnabled: false };
+function unifiedMemoryFlags() {
+  try {
+    const file = path.join(DSH_HOME, 'surfcore', 'config.json');
+    const stat = fs.statSync(file);
+    if (stat.mtimeMs !== unifiedMemoryFlagsCache.mtime) {
+      const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
+      unifiedMemoryFlagsCache = {
+        mtime: stat.mtimeMs,
+        memoryCardEnabled: raw?.memoryCard?.enabled !== false,
+        qqToBiliEnabled: raw?.memory?.qqToBili?.enabled === true,
+      };
+    }
+  } catch (error) {
+    if (error?.code === 'ENOENT') return { mtime: -1, memoryCardEnabled: true, qqToBiliEnabled: false };
+    unifiedMemoryFlagsCache = { mtime: -1, memoryCardEnabled: false, qqToBiliEnabled: false };
+  }
+  return unifiedMemoryFlagsCache;
+}
 function appendPublicFeed(entry) {
   try {
+    if (!unifiedMemoryFlags().qqToBiliEnabled) return;
     const text = String(entry?.text ?? '').replace(/[\r\n]+/g, ' ').trim().slice(0, 1200);
     if (!text) return;
     appendPublicFeedLog(`${JSON.stringify({
@@ -12278,9 +12303,19 @@ async function main() {
       return null;
     }
   }
+  /** P2-16：叙事 prompt 里的主人称呼用合体层配置，不再硬编码「羽」。 */
+  function unifiedAdminDisplayName() {
+    try {
+      const file = path.join(DSH_HOME, 'surfcore', 'config.json');
+      const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
+      return String(raw?.admin?.displayName ?? '').trim();
+    } catch {
+      return '';
+    }
+  }
   async function memoryNarrativeTick() {
     if (memoryNarrativeBusy) return;
-    const nc = { ...(cfg.socialV2?.memoryNarrative ?? {}), ...(unifiedNarrativeConfig() ?? {}) };
+    const nc = { ...(cfg.socialV2?.memoryNarrative ?? {}), ...(unifiedNarrativeConfig() ?? {}), ownerName: unifiedAdminDisplayName() };
     if (nc.enabled === false) return;
     memoryNarrativeBusy = true;
     // 一轮里连着压好几批：以前一轮只压一批（14 条记录 → 3~5 条回忆）就睡 45 分钟，
@@ -12333,7 +12368,7 @@ async function main() {
 
   function startMemoryNarrativeLoop() {
     if (memoryNarrativeTimer) return;
-    const nc = { ...(cfg.socialV2?.memoryNarrative ?? {}), ...(unifiedNarrativeConfig() ?? {}) };
+    const nc = { ...(cfg.socialV2?.memoryNarrative ?? {}), ...(unifiedNarrativeConfig() ?? {}), ownerName: unifiedAdminDisplayName() };
     if (nc.enabled === false) {
       log('[叙事] 已关闭（memoryNarrative.enabled=false）');
       return;
@@ -14057,6 +14092,8 @@ async function main() {
   //   · 私聊（非主人）：白名单好友的长消息记一条低权重的，短寒暄不记。
   function recordMemoryInboxEvent({ key: conversationKey, kind, event, plainContent, textContent, isOwner, quoteTargetIsSelf }) {
     try {
+      // P2-23：记忆卡关掉后不再往 inbox 堆原料（开了再写，不补历史）。
+      if (!unifiedMemoryFlags().memoryCardEnabled) return;
       const text = String(plainContent || textContent || '').trim();
       if (!text || text.startsWith('/')) return;
       if (/^\[(图片|表情|转发消息|拍一拍)\]/.test(text)) return;
@@ -14092,6 +14129,7 @@ async function main() {
   // 她自己的发言：写进记忆 inbox；插件会尽量并进最近一条主人记录（一问一答）。
   function recordSelfMemoryEvent(key, text) {
     try {
+      if (!unifiedMemoryFlags().memoryCardEnabled) return;
       const body = String(text ?? '').trim();
       if (!body) return;
       if (/^⚠️|^⏳|^⏹️|^❓|^🔐/.test(body)) return; // 系统提示，不是她的话

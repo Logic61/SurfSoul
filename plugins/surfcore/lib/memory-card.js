@@ -23,7 +23,7 @@ import {
   maintainMemoryCard, markOwnerNotified, memoryCardStatus, memoryNarrativeSummary, mergeMemories, normalizeMemoryCardConfig,
   readAllFullRecords, readInboxSince, readMemoryNarrative, recallFullMemory, renderFullMemoryCard, renderMemoryCard,
   saveFullMemoryCard, saveMemoryCardOutputs, saveMemoryNarrative, shouldNotifyOwner,
-} from '../../../src/memory-card.js?rev=20261030-memfix-c';
+} from '../../../src/memory-card.js?rev=memfix-bf81dfb676';
 
 const EMPTY_CONFIG = normalizeMemoryCardConfig({});
 const TICK_MS = 10 * 60 * 1000;
@@ -86,7 +86,11 @@ export function memoryCardIdle() {
 }
 
 export function memoryCardConfig(unified = readUnified().config) {
-  return normalizeMemoryCardConfig(unified?.memoryCard ?? EMPTY_CONFIG);
+  const cfg = normalizeMemoryCardConfig(unified?.memoryCard ?? EMPTY_CONFIG);
+  // P2-16：主人称呼优先用合体层 admin.displayName（UI 里配的），不再硬编码「羽」。
+  const ownerName = String(unified?.admin?.displayName ?? '').trim();
+  if (!cfg.ownerName && ownerName) cfg.ownerName = ownerName.slice(0, 20);
+  return cfg;
 }
 
 export function memoryCardPaths() {
@@ -299,6 +303,30 @@ export function fullMemoryCardSnapshot({ q = '', limit = 40, config = memoryCard
   };
 }
 
+/** 跨进程维护器锁（P2-10，2026-10-30 批次 C）。 */
+const MAINTENANCE_LOCK_STALE_MS = 30 * 60 * 1000;
+function acquireMaintenanceLock(file) {
+  const payload = JSON.stringify({ pid: process.pid, at: Date.now() });
+  try {
+    fs.writeFileSync(file, payload, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+    return { ok: true };
+  } catch (error) {
+    if (error?.code !== 'EEXIST') return { ok: true }; // 权限/磁盘异常不阻塞维护；锁只是防并发覆盖
+    try {
+      const stat = fs.statSync(file);
+      if (Date.now() - stat.mtimeMs > MAINTENANCE_LOCK_STALE_MS) {
+        fs.rmSync(file, { force: true });
+        fs.writeFileSync(file, payload, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+        return { ok: true, stolen: true };
+      }
+    } catch {}
+    return { ok: false };
+  }
+}
+function releaseMaintenanceLock(file) {
+  try { fs.rmSync(file, { force: true }); } catch {}
+}
+
 /** 真正跑一次维护；并发调用会排队，不会互相覆盖。 */
 export function runMemoryCardMaintenance({ forceDecay = false, config = memoryCardConfig(), now = Date.now() } = {}) {
   return serialize(async () => {
@@ -310,7 +338,12 @@ export function runMemoryCardMaintenance({ forceDecay = false, config = memoryCa
       return { ok: true, disabled: true, status: memoryCardStatusNow(config) };
     }
     fs.mkdirSync(pathsNow().dir, { recursive: true });
-    const before = loadMemoryCard(pathsNow());
+    // P2-10：多 DSH 实例/热重载叠加时，两个维护器整卡读改写会互相覆盖；用 wx 锁文件串行化。
+    const lockFile = path.join(pathsNow().dir, '.memory-maintain.lock');
+    const lock = acquireMaintenanceLock(lockFile);
+    if (!lock.ok) return { ok: true, skipped: 'locked', status: memoryCardStatusNow(config) };
+    try {
+      const before = loadMemoryCard(pathsNow());
     // P1-5：inbox 按字节水位增量读；水位在成功维护并落盘后才推进（坏卡时从头读，靠去重兜底）。
     const inbox = readInboxSinceCursor(before);
     const warnings = [];
@@ -367,6 +400,9 @@ export function runMemoryCardMaintenance({ forceDecay = false, config = memoryCa
       fullStatus: result.full?.status ?? fullMemoryCardStatus(pathsNow(), config, now),
       card: result.card,
     };
+    } finally {
+      releaseMaintenanceLock(lockFile);
+    }
   });
 }
 
@@ -524,6 +560,34 @@ export function setNarrativeEnabled(enabled) {
   }
 }
 
+/**
+ * 把叙事层上一次 LLM 用量记入 token 额度「其他」（P2-20，2026-10-30 批次 C）。
+ * 同一段 lastRun.at 只记一次（写回 card.meta.narrativeUsageAccountedAt），避免每 10 分钟重复计费。
+ */
+export function accountMemoryNarrativeUsage({ recordUsage } = {}) {
+  return serialize(async () => {
+    const dir = pathsNow().dir;
+    const narrative = readMemoryNarrative(dir);
+    const lastRun = narrative.lastRun;
+    if (!lastRun?.at || !lastRun.usage) return { ok: true, skipped: 'no-usage' };
+    const card = readCardSafe();
+    if (card.meta?.narrativeUsageAccountedAt === lastRun.at) return { ok: true, skipped: 'accounted' };
+    if (typeof recordUsage !== 'function') return { ok: false, error: 'token 额度服务不可用' };
+    const usage = lastRun.usage;
+    recordUsage({
+      category: 'other',
+      sessionId: 'memory-narrative',
+      model: String(usage.model || lastRun.model || ''),
+      usage,
+      at: Date.parse(lastRun.at) || Date.now(),
+      label: '记忆叙事压缩',
+    });
+    card.meta.narrativeUsageAccountedAt = lastRun.at;
+    writeJsonAtomic(pathsNow().json, card);
+    return { ok: true, recorded: true };
+  });
+}
+
 /** B站调度器 / 调试用：读现成的 B站 注入块（mtime 缓存，避免每次重复读盘）。 */
 export function memoryCardPromptBlock(platform = 'bili') {
   const paths = pathsNow();
@@ -573,7 +637,7 @@ export function notifyOwnerIfNeeded({ callBridge, log = () => {}, config = memor
  * 插件启动时挂上：启动 8 秒后先整理一次，之后每 10 分钟一次。
  * 每日衰减由 maintainMemoryCard 自己按 dailyHour 判断，不需要单独定时器。
  */
-export function startMemoryCardTimer({ log = () => {}, callBridge } = {}) {
+export function startMemoryCardTimer({ log = () => {}, callBridge, onMaintenance } = {}) {
   if (process.env.SURFCORE_DISABLE_MEMORY_TIMER === '1') {
     return { stop() {}, started: false };
   }
@@ -590,6 +654,9 @@ export function startMemoryCardTimer({ log = () => {}, callBridge } = {}) {
         log(`记忆卡已整理：新增 B站 ${result.addedBili ?? 0} 条 / QQ ${result.addedQq ?? 0} 条${result.addedPet ? ` / 桌宠 ${result.addedPet} 条` : ''}，当前 ${result.status.percent}%（${result.status.chars}/${result.status.maxChars} 字）`);
       }
       await notifyOwnerIfNeeded({ callBridge, log });
+      if (typeof onMaintenance === 'function') {
+        try { await onMaintenance(result); } catch (error) { log('记忆卡维护后回调失败：', error?.message ?? error); }
+      }
     } catch (error) {
       log('记忆卡整理失败：', error?.message ?? error);
     }

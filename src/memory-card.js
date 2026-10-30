@@ -31,7 +31,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 // `?rev=` 和插件 lib 的引用保持同一取值：插件热重载时，只有 specifier 变了才会
 // 重新求值；本模块 import 的叙事层也必须挂同一个 rev，否则「引擎新、叙事旧」。
-import { coveredRecordIds, formatEpisodeLine, formatEpisodeTitleLine, loadNarrative, splitEpisodesForPrompt, resolveNarrativePath, saveNarrative, memoryNarrativeSummary } from './memcard-narrative.js?rev=20261030-memfix-c';
+import { coveredRecordIds, formatEpisodeLine, formatEpisodeTitleLine, loadNarrative, splitEpisodesForPrompt, resolveNarrativePath, saveNarrative, memoryNarrativeSummary } from './memcard-narrative.js?rev=memfix-bf81dfb676';
 
 export const MEMORY_CARD_VERSION = 1;
 export const DAY_MS = 24 * 60 * 60 * 1000;
@@ -80,6 +80,8 @@ export const DEFAULT_MEMORY_CARD_CONFIG = Object.freeze({
   notifyOwner: true,
   /** B站 提示词里是否允许带 QQ 记忆（默认关：隐私边界）。 */
   includeQqInBili: false,
+  /** 对主人的称呼（P2-16：不再硬编码「羽」）；空 = 用「主人」。 */
+  ownerName: '',
   /** 记录条数上限，防止 JSON 无限膨胀。 */
   maxRecords: 600,
   /** 全量记忆卡的硬上限：按 JSONL 实际字节数算。0 = 不限制；默认 10GB。 */
@@ -170,6 +172,7 @@ export function normalizeMemoryCardConfig(input = {}) {
     autoCompact: bool(raw.autoCompact, DEFAULT_MEMORY_CARD_CONFIG.autoCompact),
     notifyOwner: bool(raw.notifyOwner, DEFAULT_MEMORY_CARD_CONFIG.notifyOwner),
     includeQqInBili: bool(raw.includeQqInBili, DEFAULT_MEMORY_CARD_CONFIG.includeQqInBili),
+    ownerName: String(raw.ownerName ?? '').trim().slice(0, 20),
     maxRecords: clampInt(raw.maxRecords, DEFAULT_MEMORY_CARD_CONFIG.maxRecords, 100, 2000),
     fullMaxBytes,
     fullMaxRecords,
@@ -217,9 +220,24 @@ function hash(value, len = 16) {
   return crypto.createHash('sha1').update(String(value ?? '')).digest('hex').slice(0, len);
 }
 
+/**
+ * UTF-16 安全截断（P2-17，2026-10-30 批次 C）。
+ * JS 的 slice 按 UTF-16 码元切，可能把 emoji 的代理对切成孤立代理 → 渲染成 �。
+ * 所有面向用户文本的截断都走这里。
+ */
+export function safeSlice(text, max) {
+  const s = String(text ?? '');
+  const limit = Math.max(0, Number(max) || 0);
+  if (s.length <= limit) return s;
+  let cut = s.slice(0, limit);
+  const last = cut.charCodeAt(cut.length - 1);
+  if (last >= 0xD800 && last <= 0xDBFF) cut = cut.slice(0, -1);
+  return cut;
+}
+
 function short(text, max = 80) {
   const s = String(text ?? '').replace(/\s+/g, ' ').trim();
-  return s.length > max ? `${s.slice(0, max)}…` : s;
+  return s.length > max ? `${safeSlice(s, max)}…` : s;
 }
 
 function dateOnly(value) {
@@ -259,7 +277,7 @@ export function redactForMemory(text, { scope = 'qq', maxChars = 600 } = {}) {
   }
   s = s.replace(/[ \t]+/g, ' ').replace(/\n{2,}/g, '\n').trim();
   const limit = clampInt(maxChars, 600, 100, 4000);
-  return s.length > limit ? `${s.slice(0, limit)}…` : s;
+  return s.length > limit ? `${safeSlice(s, limit)}…` : s;
 }
 
 /** 情绪浓度 0-24。越高越可能是「重要记忆」。 */
@@ -304,6 +322,8 @@ export function createEmptyCard(now = Date.now()) {
       firstMetEventId: '',
       // P2-7：每日备份闸门。旧实现用 lastDecayDate 当闸门 → 00:00–04:00 每 10 分钟备份一次。
       lastBackupDate: '',
+      // P2-20：叙事层 LLM 用量已记入 token 额度的最后一个 lastRun.at（防止每 10 分钟重复记账）。
+      narrativeUsageAccountedAt: '',
     },
     alerts: {
       level: 0,
@@ -391,8 +411,8 @@ function normalizeRecord(item) {
     scope: ['qq', 'bili', 'shared', 'pet'].includes(raw.scope) ? raw.scope : 'qq',
     kind: String(raw.kind ?? 'event'),
     title: short(title, 80),
-    text: String(text).slice(0, 1200),
-    detail: String(raw.detail ?? '').slice(0, 600),
+    text: safeSlice(String(text), 1200),
+    detail: safeSlice(String(raw.detail ?? ''), 600),
     tags: asArray(raw.tags).map(String).slice(0, 12),
     importance: clampInt(raw.importance, 20, 1, 100),
     importanceReasons: asArray(raw.importanceReasons).map(String).slice(0, 12),
@@ -411,7 +431,7 @@ function normalizeRecord(item) {
     sensitive: raw.sensitive === true,
     fullArchivedAt: String(raw.fullArchivedAt ?? ''),
     // QQ 对话另一侧：主人记录里存“她是怎么回的”；self 记录表示这条是她自己说的。
-    botReply: String(raw.botReply ?? '').slice(0, 600),
+    botReply: safeSlice(String(raw.botReply ?? ''), 600),
     isSelf: raw.isSelf === true,
     conversationKey: String(raw.conversationKey ?? ''),
     // 「最初」是独立于「重要」的判定：仅和主人的互动，按首次接触的 30 天窗口分档。
@@ -1252,7 +1272,7 @@ function makeRecord(input, config, now) {
     sensitive: input.sensitive === true || SENSITIVE_TOPIC_RE.test(`${cleanTitle} ${cleanText}`),
     // 全量卡归档标记：有值 = 已追加进 memory-card-full.jsonl，维护器不再重复归档。
     fullArchivedAt: String(input.fullArchivedAt ?? ''),
-    botReply: String(input.botReply ?? '').slice(0, 600),
+    botReply: safeSlice(String(input.botReply ?? ''), 600),
     isSelf: input.isSelf === true,
     conversationKey: String(input.conversationKey ?? ''),
     initialTier: '',
@@ -1393,7 +1413,7 @@ export function ingestInboxLines(card, lines, config = {}, now = Date.now(), opt
             && Math.abs(at - timeOf(record.createdAt, 0)) <= cutoff)
           .sort((a, b) => timeOf(b.createdAt, 0) - timeOf(a.createdAt, 0))[0];
         if (recent) {
-          recent.botReply = text.slice(0, 600);
+          recent.botReply = safeSlice(text, 600);
           recent.lastSeenAt = iso(at);
           recent.recallCount = Math.min(999, (Number(recent.recallCount) || 0) + 1);
           touched += 1;
@@ -1992,10 +2012,13 @@ export function renderMemoryCard(card, options = {}) {
     '> 「最初」和「重要」是两套判断：最初只看和主人的互动；初次相遇由用户指定或自动取最早一条。',
     '> 平台模块：B站冲浪、QQ 聊天、桌宠的私下相处、和主人的互动都在这张卡里；QQ / 桌宠的私事默认不带到 B站。',
   ].join('\n');
+  const ownerAddress = cfg.ownerName
+    ? `「${cfg.ownerName}」或者「主人」`
+    : '「主人」（或按人格卡里的称呼）';
   const headerPrompt = [
     '【记忆卡 · 你自己的记忆】',
     '（不是别人给你的设定。最初 / 最近 / 和主人相关的记得清楚，其余会淡忘；真的记不清就说“记不清了”，不要编。）',
-    '（称呼：叫他「羽」或者「主人」，不要叫「管理员」——那是别人对他的误称。）',
+    `（称呼：叫他${ownerAddress}，不要叫「管理员」——那是别人对他的误称。）`,
     '（每条前面的 [私聊] / [群里] 是这件事发生在哪段对话里：私聊的事别主动搬到群里，群里的事在私聊里提起要先说一句「群里刚才…」，别让两边混成一锅。）',
   ].join('\n');
   const footerFull = '\n\n---\n\n（这张卡由 SurfCore 自动维护：每天模糊一点不重要的事，重要的事和最早的事不会丢。）';

@@ -53,6 +53,17 @@ function hash(value, len = 12) {
   return crypto.createHash('sha1').update(String(value ?? '')).digest('hex').slice(0, len);
 }
 
+/** UTF-16 安全截断（P2-17）：不切出孤立代理（emoji 变 �）。 */
+function safeSlice(text, max) {
+  const s = String(text ?? '');
+  const limit = Math.max(0, Number(max) || 0);
+  if (s.length <= limit) return s;
+  let cut = s.slice(0, limit);
+  const last = cut.charCodeAt(cut.length - 1);
+  if (last >= 0xD800 && last <= 0xDBFF) cut = cut.slice(0, -1);
+  return cut;
+}
+
 /**
  * 外发前脱敏（P2-22，2026-10-30）：叙事层会把记录正文发给外部模型。
  * 旧实现只依赖入库时的 redactForMemory，叙事 prompt 的 who/text/reply 原样出去；
@@ -114,8 +125,8 @@ export function loadNarrative(memoryDir) {
         id: String(ep.id || `ep_${hash(`${ep.date}|${ep.title}|${ep.text}`)}`),
         date: /^\d{4}-\d{2}-\d{2}$/.test(String(ep.date ?? '')) ? String(ep.date) : dateKey(Date.now()),
         conv: ['私聊', '群里'].includes(String(ep.conv ?? '')) ? String(ep.conv) : '',
-        title: String(ep.title ?? '').trim().slice(0, 30),
-        text: String(ep.text).trim().slice(0, 600),
+        title: safeSlice(String(ep.title ?? '').trim(), 30),
+        text: safeSlice(String(ep.text).trim(), 600),
         covers: Array.isArray(ep.covers) ? ep.covers.map((id) => String(id ?? '')).filter(Boolean) : [],
         at: Number(ep.at) || 0
       }))
@@ -146,7 +157,7 @@ export function memoryNarrativeSummary(narrative) {
       date: ep.date,
       conv: ep.conv || '',
       title: ep.title || '',
-      text: String(ep.text ?? '').slice(0, 400),
+      text: safeSlice(ep.text, 400),
       covers: Array.isArray(ep.covers) ? ep.covers.length : 0,
     })),
   };
@@ -192,14 +203,14 @@ function convTag(ep) {
 export function formatEpisodeTitleLine(ep) {
   const thisYear = String(new Date().getFullYear());
   const day = String(ep.date).startsWith(thisYear) ? String(ep.date).slice(5) : String(ep.date);
-  return `- ${day}${convTag(ep)} ${ep.title || ep.text.slice(0, 14)}`;
+  return `- ${day}${convTag(ep)} ${ep.title || safeSlice(ep.text, 14)}`;
 }
 
 /** 一条回忆渲染成一行（日期只留月日；今年以前的带年份）。 */
 export function formatEpisodeLine(ep, { maxChars = DEFAULT_NARRATIVE_CONFIG.episodeMaxChars } = {}) {
   const thisYear = String(new Date().getFullYear());
   const day = String(ep.date).startsWith(thisYear) ? String(ep.date).slice(5) : String(ep.date);
-  const text = ep.text.length > maxChars ? `${ep.text.slice(0, maxChars)}…` : ep.text;
+  const text = ep.text.length > maxChars ? `${safeSlice(ep.text, maxChars)}…` : ep.text;
   return ep.title ? `- ${day}${convTag(ep)} ${ep.title}：${text}` : `- ${day}${convTag(ep)} ${text}`;
 }
 
@@ -271,14 +282,15 @@ function recordForPrompt(record) {
     id: String(record.id),
     date: dateKey(timeOf(record.createdAt, Date.now())),
     conv: conversationOf(record) || undefined,
-    who: redactForOutbound(String(record.speaker || (Array.isArray(record.tags) && record.tags.includes('owner') ? '羽' : '群里')).slice(0, 20)),
-    text: redactForOutbound(String(record.text ?? record.title ?? '').replace(/\s+/g, ' ').trim().slice(0, 220)),
-    ...(record.botReply ? { reply: redactForOutbound(String(record.botReply).replace(/\s+/g, ' ').trim().slice(0, 220)) } : {})
+    who: redactForOutbound(String(record.speaker || (Array.isArray(record.tags) && record.tags.includes('owner') ? '主人' : '群里')).slice(0, 20)),
+    text: redactForOutbound(safeSlice(String(record.text ?? record.title ?? '').replace(/\s+/g, ' ').trim(), 220)),
+    ...(record.botReply ? { reply: redactForOutbound(safeSlice(String(record.botReply).replace(/\s+/g, ' ').trim(), 220)) } : {})
   };
 }
 
-export function buildNarrationPrompt(records, existingEpisodes = [], { selfNames = [] } = {}) {
-  const titles = [...existingEpisodes].sort((a, b) => String(b.date).localeCompare(String(a.date))).slice(0, 12).map((ep) => `${ep.date} ${ep.title || ep.text.slice(0, 12)}`);
+export function buildNarrationPrompt(records, existingEpisodes = [], { selfNames = [], ownerName = '' } = {}) {
+  const ownerLabel = String(ownerName ?? '').trim() || '主人';
+  const titles = [...existingEpisodes].sort((a, b) => String(b.date).localeCompare(String(a.date))).slice(0, 12).map((ep) => `${ep.date} ${ep.title || safeSlice(ep.text, 12)}`);
   // 她自己的 QQ 昵称/群名片会作为 speaker 出现在记录里。不告诉她这件事，
   // 模型就会把「甘棠说……」当成另一个人，写出「我把甘棠叫成了鹦鹉」这种第三人称的怪句子。
   const names = [...new Set((Array.isArray(selfNames) ? selfNames : []).map((n) => String(n ?? '').trim()).filter(Boolean))];
@@ -296,7 +308,7 @@ export function buildNarrationPrompt(records, existingEpisodes = [], { selfNames
     '',
     '要求：',
     '1. 每条回忆 2~5 句、40~200 字，写清楚发生了什么、当时的情绪/态度、有没有约定或改主意的地方；',
-    '2. 第一人称：用「我」指自己，主人写成「羽」（不要写「主人」「管理员」，除非他自称）；不要「他说/她说/然后我」这种转述腔；',
+    '2. 第一人称：用「我」指自己，主人写成「' + ownerLabel + '」（不要写「主人」「管理员」，除非他自称）；不要「他说/她说/然后我」这种转述腔；',
     '3. 同一件事的多条记录合成一条回忆；一次输出 3~8 条，尽量把给的记录都用上；',
     '4. 保留具体细节（时间、人名、梗、视频、改过什么），不要写空泛评价（「我们聊得很开心」这种不要）；',
     '5. 输出严格 JSON 数组，元素形如 {"date":"YYYY-MM-DD","conv":"私聊|群里","title":"不超过14字的小标题","text":"回忆正文","covers":["id1","id2"]}；',
@@ -358,14 +370,14 @@ export function parseEpisodes(text, allowedIds, dateById = null) {
       .filter((id) => allowed.has(id) && !used.has(id));
     if (!covers.length) continue;
     for (const id of covers) used.add(id);
-    const title = String(item.title ?? '').replace(/[\r\n]+/g, ' ').trim().slice(0, 20);
+    const title = safeSlice(String(item.title ?? '').replace(/[\r\n]+/g, ' ').trim(), 20);
     // 日期：模型给的优先；否则用这批记录里最早的那天（别写成「今天」，那会把旧事说成刚发生的）。
     const fallbackDate = covers
       .map((id) => (dateById instanceof Map ? dateById.get(id) : null))
       .filter(Boolean)
       .sort()[0] ?? dateKey(Date.now());
     const date = /^\d{4}-\d{2}-\d{2}$/.test(String(item.date ?? '')) ? String(item.date) : fallbackDate;
-    const trimmed = text.slice(0, 600);
+    const trimmed = safeSlice(text, 600);
     // 哪段对话：模型给的优先，否则按覆盖记录里占比多的那边算。
     const declared = String(item.conv ?? '').trim();
     const conv = ['私聊', '群里'].includes(declared) ? declared : '';
@@ -421,7 +433,7 @@ export async function runNarration({ memoryDir, config = {}, now = Date.now(), d
   if (records.length < Math.max(1, Number(cfg.minRecords) || 1)) {
     return { ok: true, skipped: 'not-enough', picked: records.length };
   }
-  const { system, user } = buildNarrationPrompt(records, narrative.episodes, { selfNames });
+  const { system, user } = buildNarrationPrompt(records, narrative.episodes, { selfNames, ownerName: cfg.ownerName });
   // 懒加载：memory-card.js 渲染时也会 import 本模块，但它用不到网络与凭据。
   const completeFn = complete || (await import('./llm-text.js')).completeText;
   const result = await completeFn({

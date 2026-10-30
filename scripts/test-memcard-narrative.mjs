@@ -265,3 +265,21 @@ test('叙事外发：发给模型的记录已脱敏（P2-22）', () => {
   assert.match(user, /编号已隐藏/);
 });
 
+test('称呼可配置 + emoji 截断安全（P2-16/P2-17）', () => {
+  const card = createEmptyCard(NOW);
+  const rec = addMemoryRecord(card, {
+    source: 'qq-group',
+    text: '群里聊了两句，内容足够长可以进入叙事。',
+    createdAt: NOW - 2 * DAY_MS,
+    lastSeenAt: NOW - 2 * DAY_MS,
+  }, CFG, NOW).record;
+  const { user } = buildNarrationPrompt([rec], [], { ownerName: '阿羽' });
+  assert.match(user, /阿羽/, '叙事 prompt 应使用配置的称呼');
+  assert.doesNotMatch(user, /写成「羽」/, '不能再硬编码「羽」');
+
+  const line = formatEpisodeLine({
+    date: '2026-10-20', conv: '', title: '', text: '😀'.repeat(300), at: 1,
+  }, { maxChars: 3 });
+  assert.equal(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(line), false, '截断后不能有孤立代理');
+});
+

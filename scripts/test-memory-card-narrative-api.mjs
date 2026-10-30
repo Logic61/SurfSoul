@@ -125,7 +125,36 @@ test('桥接会读取 unified 的叙事开关覆盖仓库配置（B4 接线）',
   const bridge = fs.readFileSync(new URL('../src/bridge.js', import.meta.url), 'utf8');
   assert.match(bridge, /unifiedNarrativeConfig\(/, '桥接必须读 unified 配置的叙事开关');
   assert.match(bridge, /memoryNarrative/, '桥接要认 memoryNarrative 覆盖键');
+  // 批次 C：用量记账 / 关闭记忆卡不写 inbox / 关闭同步不写 feed。
+  assert.match(bridge, /unifiedMemoryFlags\(\)/, '桥接必须有 unified 全局开关缓存');
+  assert.match(bridge, /recordMemoryInboxEvent[\s\S]{0,300}unifiedMemoryFlags\(\)\.memoryCardEnabled/, '关掉记忆卡后不应继续写 inbox');
+  assert.match(bridge, /appendPublicFeed[\s\S]{0,300}unifiedMemoryFlags\(\)\.qqToBiliEnabled/, '关掉 QQ→B站 后不应继续写 feed');
   const client = fs.readFileSync(new URL('../plugins/surfcore/lib/client.js', import.meta.url), 'utf8');
   assert.match(client, /narrative-forget/, 'UI 必须有删除回忆入口');
   assert.match(client, /memoryNarrative/, 'UI 必须有叙事开关');
+});
+
+test('叙事用量写入 token 额度：同一段 lastRun 只记一次（P2-20）', async () => {
+  const paths = writeFixture();
+  const calls = [];
+  const recordUsage = (payload) => { calls.push(payload); return true; };
+  const first = await memoryLib.accountMemoryNarrativeUsage({ recordUsage });
+  assert.equal(first.ok, true);
+  assert.equal(first.recorded, true);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].category, 'other');
+  assert.equal(calls[0].sessionId, 'memory-narrative');
+  assert.equal(calls[0].usage.total_tokens, 1234);
+  assert.equal(calls[0].label, '记忆叙事压缩');
+
+  const second = await memoryLib.accountMemoryNarrativeUsage({ recordUsage });
+  assert.equal(second.skipped, 'accounted');
+  assert.equal(calls.length, 1, '同一段用量不能重复记账');
+
+  const card = JSON.parse(fs.readFileSync(paths.json, 'utf8'));
+  assert.equal(card.meta.narrativeUsageAccountedAt, '2026-10-30T09:00:00.000Z');
+
+  // 没有 usage 的 lastRun 不记。
+  const noUsage = await memoryLib.accountMemoryNarrativeUsage({ recordUsage });
+  assert.equal(noUsage.skipped, 'accounted');
 });

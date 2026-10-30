@@ -12,7 +12,7 @@ import {
   maintainMemoryCard, memoryCardStatus, mergeMemories, normalizeMemoryCardConfig, readAllFullRecords,
   readInboxSince, recallFullMemory, redactForMemory, refreshInitialState, renderFullMemoryCard, renderMemoryCard,
   resolveMemoryCardPaths, saveMemoryCardOutputs, scoreMemory, shouldNotifyOwner, targetClarity,
-  trimMemoryCard,
+  trimMemoryCard, safeSlice,
 } from '../src/memory-card.js';
 import { loadNarrative, saveNarrative } from '../src/memcard-narrative.js';
 
@@ -874,8 +874,7 @@ test('维护幂等：没有新输入时不重写输出（P2-19）', () => {
   assert.ok(third.qq >= 1);
 });
 
-test('压缩性能：600 条卡不再按「渲染×档位」跑（P2-18）', () => {
-  const card = createEmptyCard(NOW);
+test('压缩性能：600 条卡不再按「渲染×档位」跑（P2-18）', () => {  const card = createEmptyCard(NOW);
   const bigCfg = normalizeMemoryCardConfig({ maxChars: 30000, warnChars: 60000, maxRecords: 2000, autoCompact: false });
   for (let i = 0; i < 600; i += 1) {
     addMemoryRecord(card, {
@@ -894,6 +893,29 @@ test('压缩性能：600 条卡不再按「渲染×档位」跑（P2-18）', () 
   assert.ok(steps > 0, '应该有压缩动作');
   assert.ok(after <= Math.floor(30000 * 0.8) + 100, `压缩后 ${after} 应回到 80% 附近`);
   assert.ok(elapsed < 1500, `600 条压缩耗时 ${elapsed.toFixed(0)}ms（旧实现 7.9s；>1.5s 视为回归）`);
+});
+
+test('称呼可配置 + UTF-16 安全截断（P2-16/P2-17）', () => {
+  const card = createEmptyCard(NOW);
+  addMemoryRecord(card, {
+    source: 'qq-owner',
+    text: '主人今天说了句话，让卡里有一条记录。',
+    isOwner: true,
+    isPrivate: true,
+    direct: true,
+    createdAt: NOW - DAY_MS,
+    lastSeenAt: NOW - DAY_MS,
+  }, CFG, NOW);
+  const cfg = normalizeMemoryCardConfig({ ownerName: '阿羽' });
+  const out = renderMemoryCard(card, { config: cfg, platform: 'qq', maxChars: 900, now: NOW });
+  assert.match(out, /阿羽/, '提示词应使用配置的称呼');
+  assert.doesNotMatch(out, /「羽」/, '不能再硬编码「羽」');
+
+  // 代理对不能被切开（否则 emoji 变 �）。
+  assert.equal(safeSlice('😀x', 1), '');
+  assert.equal(safeSlice('😀x', 2), '😀');
+  assert.equal(safeSlice('abc', 2), 'ab');
+  assert.equal(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(safeSlice('😀😀', 3)), false);
 });
 
 

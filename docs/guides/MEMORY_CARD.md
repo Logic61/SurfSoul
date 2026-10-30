@@ -53,6 +53,8 @@ B站 调度器每次醒来的统一上下文 = 人设卡 + 管理员 + 身份对
   注意：**这一层会把聊天记录发给模型**（脱敏规则外发前会再说明，见 §11 与 P2 修复项）。
 - **B站 调度器** 只读 `memory-card-prompt-bili.md`（mtime 缓存），不解析 JSON，也不读全量卡。
 - 只有插件写衰减卡，所以不存在两个进程同时改 JSON 的覆盖问题；桥接只 append inbox，并负责写叙事层。
+  另外维护器有跨进程锁（`<记忆目录>/.memory-maintain.lock`，30 分钟视为陈旧锁可回收）：多 DSH 实例同时跑时，
+  拿不到锁的那次直接跳过，不会两个维护器整卡读改写互相覆盖。
 - 写盘是原子写（临时文件 + rename）；每日整理前备份衰减卡；全量卡是 append-only JSONL，**不整份备份**（只备份很小的 stats 文件）。
 - **归档时机**：`archiveDecayedToFull()` 在衰减/压缩/遗忘/条数淘汰**之前**执行，只 append 新行到 `memory-card-full.jsonl`；
   衰减卡记录追加成功后才写 `fullArchivedAt`，避免「标记了但没写进去」。全量卡只增不删；
@@ -271,6 +273,7 @@ retention = importance
 | `autoCompact` | true | 满 100% 自动压到 90% |
 | `notifyOwner` | true | 容量告警私聊管理员 |
 | `includeQqInBili` | false | B站 提示词是否带 QQ 记忆（隐私红线，默认关） |
+| `ownerName` | ""（=「主人」） | 对主人的称呼；空 = 用「主人」，也可由合体层 `admin.displayName` 自动补 |
 | `maxRecords` | 600 | 衰减卡 JSON 记录条数上限 |
 | `fullMaxBytes` | 10GB | 全量卡硬上限（按 JSONL 字节数；0 = 不限制，超过只告警） |
 | `fullMaxRecords` | 0 | 全量卡记录条数上限（0 = 不限制） |
@@ -318,6 +321,7 @@ QQ 桥接侧还有：
 npm run test:memory-card      # 规则引擎 31 项：评分 / 遗忘 / 压缩性能 / 容量口径 / 归档顺序 / inbox 水位 / 幂等
 npm run test:memory-card-wiring
 npm run test:core-rev-sync    # 插件 → 核心 → 叙事层的 ?rev= 一致性（热重载正确性）
+node scripts/test-core-rev-sync.mjs    # ?rev= 必须等于引擎内容哈希（改了引擎先跑 npm run sync:engine-rev）
 node scripts/test-memcard-narrative.mjs        # 叙事层：文件容错 / 分档 / hidden 覆盖 / 不可信模型输出 / 外发脱敏
 node scripts/test-memory-card-backup.mjs       # 备份/恢复/轮转/stats 重建
 node scripts/test-memory-card-narrative-api.mjs # 叙事层可见/可删/开关
@@ -345,6 +349,10 @@ cd plugins/surfcore && npm test   # 含 test-memory-card-api.mjs（临时 DSH_HO
    删一条回忆 → 提示释放了几条覆盖记录，被释放的原记录重新出现在「最近记忆」和注入预览里。
 10. 搜索框输入一个只存在于旧记录里的词 → 列表按页过滤；「叙事层」开关关闭并保存 → 桥接下一轮日志出现
     `[叙事] 已关闭`，不再新增回忆。
+11. Token 额度页 → 「其他」分类：叙事压缩的用量会以 `memory-narrative` 会话出现（每段 `lastRun` 只记一次，
+    不会每 10 分钟重复计费）；「最近维护」时间与日志里不再出现重复备份/重复写盘告警。
+12. 改完 `src/memory-card.js` 或 `src/memcard-narrative.js`：跑 `npm run sync:engine-rev` 更新 `?rev=`
+    （内容哈希），再跑 `npm run test:core-rev-sync`；忘记这一步门禁会红并直接报出期望的 rev。
 
 ---
 
