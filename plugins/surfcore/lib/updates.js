@@ -173,6 +173,79 @@ export function writeInstalledMeta(dir, meta) {
 `, 'utf8');
   } catch {}
 }
+// ── 延迟应用（宿主退出后由 scripts/apply-update.mjs 执行）的 pending 队列 ──────────
+// 2026-10-30 修复（审计 F3/P1-5）：以前 pending 文件只装一个 job，`apply([a, b])` 逐个
+// 组件调用时后一个覆盖前一个 → 多选更新只落地最后一个，而提醒已经被 dismiss（静默丢版本）。
+// 现在升级成 jobs 数组：同一宿主进程只起一个 helper，后续 stage 只追加 job；
+// 旧单 job 形状（顶层直接有 kind/target/...）读取时自动归一成 [job]（helper 侧同样兼容）。
+const PENDING_ENVELOPE_KEYS = ['waitPid', 'logFile', 'createdAt', 'resumedAt', 'jobs'];
+
+/** 兼容新旧两种 pending 形状：新 = { waitPid, logFile, createdAt, jobs:[…] }；旧 = 单 job 顶层。 */
+export function normalizePendingPayload(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const isEnvelope = Array.isArray(raw.jobs);
+  const jobs = (isEnvelope ? raw.jobs : [raw])
+    .filter((job) => job && typeof job === 'object' && !Array.isArray(job))
+    .map((job) => (isEnvelope
+      ? { ...job }
+      : Object.fromEntries(Object.entries(job).filter(([key]) => !PENDING_ENVELOPE_KEYS.includes(key)))));
+  if (!jobs.length) return null;
+  return {
+    waitPid: Number(raw.waitPid) || 0,
+    logFile: typeof raw.logFile === 'string' ? raw.logFile : '',
+    createdAt: typeof raw.createdAt === 'string' ? raw.createdAt : '',
+    jobs,
+  };
+}
+
+/** 读 pending（不存在/坏文件返回 null；调用方决定是首次写还是报错）。 */
+function readPendingPayload(pendingFile) {
+  try {
+    return normalizePendingPayload(JSON.parse(fs.readFileSync(pendingFile, 'utf8')));
+  } catch { return null; }
+}
+
+/** pending 是 helper 在宿主退出后要读的文件，必须整份原子写（tmp + rename），不能留半截 JSON。 */
+function writePendingAtomic(pendingFile, payload) {
+  fs.mkdirSync(path.dirname(pendingFile), { recursive: true });
+  const tmp = `${pendingFile}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, `${JSON.stringify(payload, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
+  fs.renameSync(tmp, pendingFile);
+}
+
+// 模块级标记：同一宿主进程内，同一个 pending 文件只起一个 helper（后续 stage 只追加 job）。
+let spawnedHelperPendingFile = '';
+
+/** 起"等宿主退出后执行"的 helper；同一进程内同一 pending 文件只起一次。 */
+function spawnApplyHelper(pendingFile, { cwd, pluginLog = () => {} } = {}) {
+  // 测试里不想真的起"等宿主退出"的进程时，设 SURFCORE_UPDATE_NO_SPAWN=1
+  if (process.env.SURFCORE_UPDATE_NO_SPAWN === '1') return { pid: null, spawned: false, reason: 'no-spawn' };
+  if (spawnedHelperPendingFile === pendingFile) return { pid: null, spawned: false, reason: 'already-spawned' };
+  const helper = path.join(REPO_ROOT, 'scripts', 'apply-update.mjs');
+  try {
+    const child = spawn(process.execPath, [helper, '--pending', pendingFile], {
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: true,
+      cwd: cwd || path.dirname(pendingFile),
+      env: helperSpawnEnv(),
+    });
+    child.unref();
+    spawnedHelperPendingFile = pendingFile;
+    // 2.5 秒后看 helper 有没有留 .started：Electron 没带 RUN_AS_NODE 时会静默退出，必须报出来。
+    const startedFile = `${pendingFile}.started`;
+    setTimeout(() => {
+      if (fs.existsSync(startedFile)) return;
+      pluginLog(`[updates] 更新助手没有启动（${pendingFile}）：请重启 DSH 让其重试，或手动覆盖 zip`);
+    }, 2500).unref?.();
+    return { pid: child.pid, spawned: true, reason: 'spawned' };
+  } catch (error) {
+    spawnedHelperPendingFile = '';
+    pluginLog(`[updates] 起更新助手失败：${String(error?.message ?? error)}`);
+    return { pid: null, spawned: false, reason: 'spawn-failed', error: String(error?.message ?? error) };
+  }
+}
+
 const releaseManifestCache = new Map(); // versionUrl -> { json, at }
 
 /**
@@ -834,36 +907,26 @@ export function createUpdatesService({ stateDir, components, blockedReason = () 
     }
   }
 
-/** 写 pending 文件 + 起独立进程（等本宿主退出后执行覆盖）。 */
+/** 写 pending 文件（追加 job）+ 起独立进程（等本宿主退出后执行覆盖）。
+ *  2026-10-30：多个组件要一次更新时必须追加到同一个 jobs 数组，不能互相覆盖（审计 F3/P1-5）。 */
   function stageDeferredApply(job) {
     const pendingFile = path.join(stateDir, 'updates-pending.json');
+    const existing = readPendingPayload(pendingFile);
+    const nowIso = new Date().toISOString();
+    if (existing && existing.waitPid !== process.pid) {
+      pluginLog(`[updates] 发现残留的待应用更新（waitPid=${existing.waitPid || '?'}），改为等当前宿主退出后执行`);
+    }
     const payload = {
-      ...job,
       waitPid: process.pid,
-      logFile: path.join(stateDir, 'apply-update.log'),
-      createdAt: new Date().toISOString(),
+      logFile: existing?.logFile || path.join(stateDir, 'apply-update.log'),
+      createdAt: existing?.createdAt || nowIso,
+      jobs: [...(existing?.jobs ?? []), job],
     };
-    fs.mkdirSync(stateDir, { recursive: true });
-    fs.writeFileSync(pendingFile, `${JSON.stringify(payload, null, 2)}
-`, 'utf8');
-    // 测试里不想真的起"等宿主退出"的进程时，设 SURFCORE_UPDATE_NO_SPAWN=1
-    if (process.env.SURFCORE_UPDATE_NO_SPAWN === '1') return { pid: null, pendingFile, spawned: false };
-    const helper = path.join(REPO_ROOT, 'scripts', 'apply-update.mjs');
-    const child = spawn(process.execPath, [helper, '--pending', pendingFile], {
-      detached: true,
-      stdio: 'ignore',
-      windowsHide: true,
-      cwd: stateDir,
-      env: helperSpawnEnv(),
-    });
-    child.unref();
-    // 2.5 秒后看 helper 有没有留 .started：Electron 没带 RUN_AS_NODE 时会静默退出，必须报出来。
-    const startedFile = `${pendingFile}.started`;
-    setTimeout(() => {
-      if (fs.existsSync(startedFile)) return;
-      pluginLog(`[updates] 更新助手没有启动（${pendingFile}）：请重启 DSH 让其重试，或手动覆盖 zip`);
-    }, 2500).unref?.();
-    return { pid: child.pid, pendingFile };
+    writePendingAtomic(pendingFile, payload);
+    const spawned = spawnApplyHelper(pendingFile, { pluginLog });
+    if (spawned.spawned) pluginLog(`[updates] 已排队 ${payload.jobs.length} 个待应用更新，等宿主退出（pid=${spawned.pid ?? '?'}）`);
+    else if (spawned.reason === 'already-spawned') pluginLog(`[updates] 追加待应用更新（共 ${payload.jobs.length} 个），沿用在等的更新助手`);
+    return { pid: spawned.pid ?? null, pendingFile, spawned: spawned.spawned, jobs: payload.jobs.length };
   }
 
   async function apply(ids) {
@@ -1004,24 +1067,30 @@ export { resumePendingApply };
 /**
  * 启动时重试未完成的更新：上次的助手可能没跑起来（Electron 没带 RUN_AS_NODE）。
  * 这里把 waitPid 改成当前进程并重新拉起 —— 用户下一次退出 DSH 就会应用。
+ * 2026-10-30（审计 F3/P1-5）：兼容旧单 job 形状与新 jobs 队列；重排队时保留**所有** job。
  */
 function resumePendingApply({ stateDir, pluginLog = () => {} } = {}) {
   try {
     const pendingFile = path.join(stateDir, 'updates-pending.json');
     if (!fs.existsSync(pendingFile)) return false;
-    const pending = JSON.parse(fs.readFileSync(pendingFile, 'utf8'));
+    const pending = readPendingPayload(pendingFile);
+    if (!pending || !pending.jobs.length) {
+      pluginLog(`[updates] 待应用的更新文件无法解析，暂不重试（可手动检查 ${pendingFile}）`);
+      return false;
+    }
     const started = `${pendingFile}.started`;
     try { fs.rmSync(started, { force: true }); } catch {}
-    pending.waitPid = process.pid;
-    pending.resumedAt = new Date().toISOString();
-    fs.writeFileSync(pendingFile, `${JSON.stringify(pending, null, 2)}
-`, 'utf8');
-    const helper = path.join(REPO_ROOT, 'scripts', 'apply-update.mjs');
-    const child = spawn(process.execPath, [helper, '--pending', pendingFile], {
-      detached: true, stdio: 'ignore', windowsHide: true, cwd: stateDir, env: helperSpawnEnv(),
-    });
-    child.unref();
-    pluginLog(`[updates] 发现未完成的更新（${pending.component} → v${pending.to ?? '?'}），已重新排队（pid=${child.pid ?? '?'}）`);
+    const payload = {
+      waitPid: process.pid,
+      logFile: pending.logFile || path.join(stateDir, 'apply-update.log'),
+      createdAt: pending.createdAt || new Date().toISOString(),
+      resumedAt: new Date().toISOString(),
+      jobs: pending.jobs,
+    };
+    writePendingAtomic(pendingFile, payload);
+    const spawned = spawnApplyHelper(pendingFile, { pluginLog });
+    const names = payload.jobs.map((job) => job?.component).filter(Boolean).join('、') || `${payload.jobs.length} 个组件`;
+    pluginLog(`[updates] 发现未完成的更新（${names}），已重新排队（pid=${spawned.pid ?? '?'}）`);
     return true;
   } catch (error) {
     pluginLog('[updates] 重试未完成更新失败：', String(error?.message ?? error));

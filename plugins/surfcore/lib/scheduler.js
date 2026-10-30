@@ -423,6 +423,72 @@ export function applySessionPermission(ctx, sessionId, target = 'danger-full-acc
   return applySessionPermissionTo(ctx, session, target, log);
 }
 
+/**
+ * 创建/确认 B站 专用会话就绪。2026-10-30（审计 F1/P1-8）从 `ensureSession()` 收敛出来，
+ * 便于离线单测（旧实现在 startScheduler 闭包里，只能真机回归）。
+ *
+ * 关键语义：`sessionReady` **只能**在「inspect 成功」或「create 成功」之后置位。
+ * 旧实现把 create 的异常吞掉后无条件置 true → 一次瞬时抖动（宿主服务忙 / cwd 权限 /
+ * 会话服务未就绪）就让生物钟/监听/私信/直播间四路唤醒整晚静默失效，直到插件重启。
+ *
+ * settle 顺序与返回值保持不变：inspect 成功 → 权限补丁（inspect[/-retry]）；
+ * create 成功 → 权限补丁（ensureSession[/-retry]）。create 失败只记日志、保持未就绪，
+ * 让下一个 tick 重新走 ensureSession 重试。
+ *
+ * @returns {Promise<{sessionReady: boolean, inspected: boolean, created: boolean, error?: string}>}
+ */
+export async function ensureSchedulerSession({
+  sessionReady = false,
+  sessionId,
+  cwd,
+  getSessionController,
+  ensurePermission,
+  log = () => {},
+  settleRetryMs = 80,
+} = {}) {
+  if (sessionReady) return { sessionReady: true, inspected: false, created: false }
+  const controller = typeof getSessionController === 'function' ? getSessionController() : null
+  if (!controller?.inspect || !controller?.create) {
+    const error = 'sessionController 不可用'
+    log(`[bili-whale] 创建会话失败，下个 tick 重试：${error}`)
+    return { sessionReady: false, inspected: false, created: false, error }
+  }
+  // 2026-10-23：新会话默认 workspace-write，在 %USERPROFILE% 下会因 WRITE_OWNER 起不了命令；
+  // 创建/挂载后立刻按配置切到 danger-full-access（只影响这一个 B站 会话）。
+  // inspect 之后 session 可能还没同步进 ctx.sessions，所以再补一次。
+  const patchPermission = async (where) => {
+    if (typeof ensurePermission !== 'function') return
+    const first = ensurePermission(where)
+    if (!first?.ok && first?.reason === 'session-not-active') {
+      if (settleRetryMs > 0) await new Promise((resolve) => setTimeout(resolve, settleRetryMs))
+      ensurePermission(`${where}-retry`)
+    }
+  }
+  let inspected = false
+  try {
+    // 2026-10-20：已经存在就别再 create —— create 对"非空白"的已有会话会**新建一个空壳会话** ✗
+    //   （实测：每次重启侧栏都多一个空的 session-xxxx，看着像她开了一堆空会话）
+    await controller.inspect(sessionId)
+    inspected = true
+  } catch {}
+  if (inspected) {
+    // 权限补丁放在"决定要不要 create"之外：补丁自己抛错时不能掉进 create 分支
+    // （会话明明存在，再 create 会多一个空壳会话）。
+    await patchPermission('inspect')
+    return { sessionReady: true, inspected: true, created: false }
+  }
+  try {
+    await controller.create({ sessionId, cwd })
+  } catch (error) {
+    // create 抛错不代表"会话已存在"：宿主服务忙 / 权限 / 服务未就绪都会抛。
+    // 保持未就绪，下个 tick 会重试；不能像以前那样缓存成 ready（否则整晚静默）。
+    log(`[bili-whale] 创建会话失败，下个 tick 重试：${String(error?.message ?? error).slice(0, 160)}`)
+    return { sessionReady: false, inspected: false, created: false, error: String(error?.message ?? error) }
+  }
+  await patchPermission('ensureSession')
+  return { sessionReady: true, inspected: false, created: true }
+}
+
 export function startScheduler(ctx, opts) {
   const {
     dshHome,
@@ -535,33 +601,18 @@ export function startScheduler(ctx, opts) {
   })
 
   let sessionReady = false
+  // 会话创建/确认的实现在模块级 ensureSchedulerSession（可离线单测）；这里只负责维护 ready 状态。
+  // 2026-10-30（审计 F1/P1-8）：create 失败不再缓存成 ready，下一 tick 会重试。
   async function ensureSession() {
-    if (sessionReady) return
-    try {
-      // 2026-10-20：已经存在就别再 create —— create 对"非空白"的已有会话会**新建一个空壳会话** ✗
-      //   （实测：每次重启侧栏都多一个空的 session-xxxx，看着像她开了一堆空会话）
-      try {
-        await ctx.sessionController.inspect(sessionId); sessionReady = true;
-        const inspected = ensurePermission('inspect');
-        if (!inspected.ok && inspected.reason === 'session-not-active') {
-          await new Promise((resolve) => setTimeout(resolve, 80));
-          ensurePermission('inspect-retry');
-        }
-        return;
-      } catch {}
-      await ctx.sessionController.create({ sessionId, cwd })
-    } catch {
-      /* 已存在就忽略（create 对同 id 会抛）✓ */
-    }
-    sessionReady = true
-    // 2026-10-23：新会话默认 workspace-write，在 %USERPROFILE% 下会因 WRITE_OWNER 起不了命令；
-    // 创建/挂载后立刻按配置切到 danger-full-access（只影响这一个 B站 会话）。
-    // inspect 之后 session 可能还没同步进 ctx.sessions，所以再补一次。
-    const first = ensurePermission('ensureSession')
-    if (!first.ok && first.reason === 'session-not-active') {
-      await new Promise((resolve) => setTimeout(resolve, 80))
-      ensurePermission('ensureSession-retry')
-    }
+    const result = await ensureSchedulerSession({
+      sessionReady,
+      sessionId,
+      cwd,
+      getSessionController: () => ctx.sessionController,
+      ensurePermission,
+      log,
+    })
+    sessionReady = result.sessionReady
   }
 
   let waking = false
