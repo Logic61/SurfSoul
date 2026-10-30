@@ -79,6 +79,8 @@ const tests = [
   'test-character-store.mjs',
   // B站 工具链路径：有角色时行为账本进角色包，cookie/表情包仍在账号目录。
   'test-bili-state-paths.mjs',
+  // B站→QQ 记忆生成器输入目录（P1-6）：只读当前角色 bili/，不再读旧全局目录；hermetic 不联网。
+  'test-bili-memory-path.mjs',
   // 体检修复回归：无令牌智能体调用面、send-burst 失败回滚、唤醒限频重试、
   // 定时器类暂存唤醒补发、collector 生命周期、ownerQQ 覆盖语义、预设名校验、
   // wake triggers 白名单、memory-update 边界、wait 租约归一化、md/黑话/表情/账本；

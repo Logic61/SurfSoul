@@ -256,16 +256,19 @@ export function createBiliMemory({ stateDir, home = os.homedir(), log = () => {}
 
   async function collect({ force = false } = {}) {
     const config = cfg();
+    // P1-6（2026-10-30 审计）：输入账本在**当前角色的 B站 行为目录**（stateDir），
+    // 旧实现读全局 ~/.dsh/surfcore/bili/ → 角色迁移后 entries 恒空、B站 记忆永远 0 条。
+    const stateFile = (name) => path.join(stateDir, name);
     const diaryRaw = (() => {
-      try { return fs.readFileSync(path.join(paths.bili, 'whale-diary.md'), 'utf8'); } catch { return ''; }
+      try { return fs.readFileSync(stateFile('whale-diary.md'), 'utf8'); } catch { return ''; }
     })();
     const fallbackDate = (() => {
-      try { return fs.statSync(path.join(paths.bili, 'whale-diary.md')).mtime.toLocaleDateString('sv-SE'); } catch { return new Date().toLocaleDateString('sv-SE'); }
+      try { return fs.statSync(stateFile('whale-diary.md')).mtime.toLocaleDateString('sv-SE'); } catch { return new Date().toLocaleDateString('sv-SE'); }
     })();
 
-    const scoresRaw = readJson(path.join(paths.bili, 'scores.json'), {}) ?? {};
-    const favoritesRaw = readJson(path.join(paths.bili, 'favorites.json'), {}) ?? {};
-    const quotaRaw = readJson(path.join(paths.bili, 'quota.json'), {}) ?? {};
+    const scoresRaw = readJson(stateFile('scores.json'), {}) ?? {};
+    const favoritesRaw = readJson(stateFile('favorites.json'), {}) ?? {};
+    const quotaRaw = readJson(stateFile('quota.json'), {}) ?? {};
 
     const scoreItems = [];
     for (const [date, arr] of Object.entries(scoresRaw)) {

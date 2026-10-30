@@ -353,12 +353,30 @@ export function biliToQqStatus() {
   const severe = scanBrief.hits.filter((hit) => hit.severe);
   let mtime = null;
   try { mtime = fs.statSync(biliBriefFile()).mtime.toISOString(); } catch {}
+  // P1-6：把「生成器实际读哪个目录、有没有产出」暴露给 UI/日志。
+  // 旧实现只显示 available/briefChars，路径错了也看不出来（B站 记忆空了 2 天无人告警）。
+  const dataDir = activePlatformStateDir(QQ_STATE_DIR);
+  const indexFile = path.join(dataDir, 'bili-memory.json');
+  let entries = null;
+  let generatedAt = null;
+  let indexError = '';
+  try {
+    const raw = JSON.parse(fs.readFileSync(indexFile, 'utf8'));
+    entries = Array.isArray(raw?.entries) ? raw.entries.length : 0;
+    generatedAt = raw?.generatedAt ?? null;
+  } catch (error) {
+    indexError = error?.code === 'ENOENT' ? 'missing' : String(error?.message ?? error);
+  }
   return {
     enabled,
     available: Boolean(brief),
-    generatedAt: mtime,
+    generatedAt: generatedAt ?? mtime,
     briefChars: brief.length,
     docChars: doc.length,
+    // 明确告诉大家：生成器读的是当前角色目录，还是回退旧的全局目录。
+    dataDir,
+    entries,
+    indexError,
     blocked: severe.length > 0,
     labels: [...new Set(severe.map((hit) => hit.label))],
     briefPreview: severe.length ? '' : brief.slice(0, 4000),
