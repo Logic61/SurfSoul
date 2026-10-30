@@ -11,8 +11,10 @@ import {
   fullMemoryCardStatus, ingestBiliEntries, ingestInboxLines, initialProbabilityForOffset, loadMemoryCard,
   maintainMemoryCard, memoryCardStatus, mergeMemories, normalizeMemoryCardConfig, readAllFullRecords,
   recallFullMemory, redactForMemory, refreshInitialState, renderFullMemoryCard, renderMemoryCard,
-  resolveMemoryCardPaths, scoreMemory, shouldNotifyOwner, targetClarity,
+  resolveMemoryCardPaths, saveMemoryCardOutputs, scoreMemory, shouldNotifyOwner, targetClarity,
+  trimMemoryCard,
 } from '../src/memory-card.js';
+import { loadNarrative, saveNarrative } from '../src/memcard-narrative.js';
 
 const temps = [];
 function tempDir() {
@@ -612,8 +614,7 @@ test('桌宠对话：同一张记忆卡、platform/scope 独立，默认不进 B
   assert.equal(line.platform, 'pet');
 });
 
-test('桌宠记忆在提示词预算里不会被普通最近记忆挤掉', () => {
-  const card = createEmptyCard(NOW);
+test('桌宠记忆在提示词预算里不会被普通最近记忆挤掉', () => {  const card = createEmptyCard(NOW);
   for (let i = 0; i < 30; i += 1) {
     addMemoryRecord(card, {
       source: 'qq-owner',
@@ -643,3 +644,106 @@ test('桌宠记忆在提示词预算里不会被普通最近记忆挤掉', () =>
   assert.match(out, /桌宠（私下相处）/, '桌宠小节必须出现在 QQ 注入块里');
   assert.match(out, /桌宠预算验证/, '预算紧张时也不能先砍掉桌宠记忆');
 });
+
+test('容量口径唯一：状态/写盘/注入按同一份「含叙事」渲染算（P1-1）', () => {
+  const dir = tempDir();
+  const paths = resolveMemoryCardPaths(dir);
+  const card = createEmptyCard(NOW);
+  const records = [];
+  for (let i = 0; i < 6; i += 1) {
+    records.push(addMemoryRecord(card, {
+      source: 'qq-group',
+      text: `普通群聊记忆第 ${i} 条：今天聊了很多事情，内容不短也不长，用来占一点容量。`,
+      createdAt: NOW - (30 + i) * DAY_MS,
+      lastSeenAt: NOW - (30 + i) * DAY_MS,
+    }, CFG, NOW).record);
+  }
+  saveNarrative(dir, {
+    episodes: [{
+      id: 'ep_capacity', date: '2026-09-20', conv: '群里', title: '容量口径测试',
+      text: '这些天的事被压成了一段回忆，所以被覆盖的记录不该再逐条出现在卡片里。',
+      covers: records.slice(0, 3).map((record) => record.id),
+      at: NOW,
+    }],
+  });
+  const cfg = normalizeMemoryCardConfig({ maxChars: 4000, injectMaxChars: { qq: 900, bili: 700 } });
+  const narrative = loadNarrative(dir);
+  const statusWithNarrative = memoryCardStatus(card, cfg, NOW, { narrative });
+  const statusWithout = memoryCardStatus(card, cfg, NOW);
+  assert.equal(statusWithNarrative.narrative.has, true);
+  assert.ok(statusWithNarrative.chars < statusWithout.chars, '含叙事的状态必须比不含叙事小（被覆盖的记录不再逐条渲染）');
+
+  const saved = saveMemoryCardOutputs(paths, card, cfg, NOW); // 内部按同一入口读叙事文件
+  const md = fs.readFileSync(paths.markdown, 'utf8');
+  const mdChars = md.endsWith('\n') ? md.length - 1 : md.length;
+  assert.equal(statusWithNarrative.chars, mdChars, 'status.chars 必须等于磁盘 memory-card.md 的字符数');
+  assert.equal(saved.status.chars, mdChars, '保存返回的 status 必须和磁盘同口径');
+  assert.equal(saved.full, renderMemoryCard(card, { config: cfg, full: true, now: NOW, narrative }));
+
+  const promptQq = fs.readFileSync(paths.promptQq, 'utf8');
+  const promptChars = promptQq.endsWith('\n') ? promptQq.length - 1 : promptQq.length;
+  assert.equal(statusWithNarrative.promptChars.qq, promptChars, 'promptChars.qq 必须等于磁盘注入块字符数');
+  assert.equal(saved.promptQq, renderMemoryCard(card, { config: cfg, platform: 'qq', maxChars: cfg.injectMaxChars.qq, now: NOW, narrative }));
+});
+
+test('归档先于淘汰：卡满时新记忆不会同时从衰减卡和全量档消失（P1-4）', () => {
+  const dir = tempDir();
+  const paths = resolveMemoryCardPaths(dir);
+  const cfg = normalizeMemoryCardConfig({ maxRecords: 100, maxChars: 0, warnChars: 0 });
+  const old = createEmptyCard(NOW - 200 * DAY_MS);
+  for (let i = 0; i < 100; i += 1) {
+    addMemoryRecord(old, {
+      source: 'qq-group',
+      text: `旧记忆 ${i}：这是卡满之前就存在的一条普通群聊记录，用来把卡撑到上限。`,
+      createdAt: NOW - (150 - i) * DAY_MS,
+      lastSeenAt: NOW - (150 - i) * DAY_MS,
+    }, cfg, NOW - 100 * DAY_MS);
+  }
+  archiveDecayedToFull(paths, old, cfg, NOW - 100 * DAY_MS);
+  assert.equal(old.records.filter((record) => record.fullArchivedAt).length, 100, '测试前提：100 条旧记忆已归档');
+
+  const added = [];
+  for (let i = 0; i < 10; i += 1) {
+    const result = addMemoryRecord(old, {
+      source: 'qq-group',
+      text: `卡满后的新记忆 ${i}：这条绝不能因为淘汰发生在归档之前而消失。`,
+      createdAt: NOW - i * 60_000,
+      lastSeenAt: NOW - i * 60_000,
+    }, cfg, NOW);
+    assert.equal(result.added, true);
+    added.push(result.record);
+  }
+  assert.equal(old.records.length, 100, '淘汰后仍回到上限');
+  for (const record of added) {
+    assert.ok(old.records.some((item) => item.id === record.id), `新记忆 ${record.title} 必须留在衰减卡里`);
+  }
+  assert.equal(fullMemoryCardStatus(paths, cfg, NOW).records, 100, '淘汰只删已归档记录，全量档此时仍是 100');
+
+  // 下一次维护把新 10 条补进全量档；衰减卡仍是 100。
+  saveMemoryCardOutputs(paths, old, cfg, NOW);
+  const maintained = maintainMemoryCard({ paths, config: cfg, now: NOW, fullPaths: paths, fullConfig: cfg });
+  assert.equal(maintained.full.added, 10, '新记忆必须被补进全量档');
+  assert.equal(fullMemoryCardStatus(paths, cfg, NOW).records, 110);
+  assert.equal(maintained.card.records.length, 100);
+
+  // 另一条路径：未归档就超限（旧卡/大导入），maintain 归档后必须把条数收回上限。
+  const dir2 = tempDir();
+  const paths2 = resolveMemoryCardPaths(dir2);
+  const cfg2 = normalizeMemoryCardConfig({ maxRecords: 100, maxChars: 0, warnChars: 0 });
+  const big = createEmptyCard(NOW);
+  for (let i = 0; i < 120; i += 1) {
+    addMemoryRecord(big, {
+      source: 'qq-group',
+      text: `大导入记忆 ${i}：还没归档，条数已经超过上限。`,
+      createdAt: NOW - (200 - i) * DAY_MS,
+      lastSeenAt: NOW - (200 - i) * DAY_MS,
+    }, cfg2, NOW);
+  }
+  saveMemoryCardOutputs(paths2, big, cfg2, NOW);
+  const trimmedRun = maintainMemoryCard({ paths: paths2, config: cfg2, now: NOW, fullPaths: paths2, fullConfig: cfg2 });
+  assert.equal(trimmedRun.trimmed, 20, '归档后应淘汰 20 条');
+  assert.equal(trimmedRun.card.records.length, 100);
+  assert.equal(fullMemoryCardStatus(paths2, cfg2, NOW).records, 120, '被淘汰的 20 条必须已在全量档里');
+});
+
+

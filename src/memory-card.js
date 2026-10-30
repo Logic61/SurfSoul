@@ -1239,6 +1239,38 @@ function findDuplicate(card, record) {
     && Math.abs(timeOf(item.createdAt, created) - created) <= windowMs) ?? null;
 }
 
+function removableForLimit(record, cfg) {
+  return !record.pinned
+    && !record.isInitial
+    && !(record.tags.includes('owner') && record.importance >= cfg.minOwnerImportance);
+}
+
+/**
+ * 条数上限淘汰（P1-4，2026-10-30 审计隔离实验 10/10 复现）。
+ *
+ * 旧实现：addMemoryRecord 先把超限记录删掉，maintainMemoryCard 之后才归档 →
+ * 卡满时新摄取的记忆在「衰减卡 + 全量档」双双静默消失。
+ * 现在：只淘汰**已经进全量档**（fullArchivedAt 有值）的记录；未归档的留给
+ * maintain「归档 → trim」那一步。宁可在两次维护之间暂时超出上限，也不能丢数据。
+ */
+export function trimMemoryCard(card, config = {}, now = Date.now()) {
+  const cfg = normalizeMemoryCardConfig(config);
+  if (!card || !Array.isArray(card.records) || card.records.length <= cfg.maxRecords) return 0;
+  const candidates = card.records
+    .filter((record) => record && removableForLimit(record, cfg) && record.fullArchivedAt)
+    .sort((a, b) => ((Number(a.importance) || 0) - (Number(b.importance) || 0))
+      || (timeOf(a.createdAt, 0) - timeOf(b.createdAt, 0)));
+  let removed = 0;
+  while (card.records.length > cfg.maxRecords && candidates.length) {
+    const victim = candidates.shift();
+    card.records = card.records.filter((item) => item.id !== victim.id);
+    card.stats.forgotten = (Number(card.stats.forgotten) || 0) + 1;
+    removed += 1;
+  }
+  if (removed) card.updatedAt = iso(now);
+  return removed;
+}
+
 /** 加入一条记录；重复的只刷新 lastSeenAt，不重复占容量。 */
 export function addMemoryRecord(card, input, config = {}, now = Date.now()) {
   const cfg = normalizeMemoryCardConfig(config);
@@ -1254,17 +1286,9 @@ export function addMemoryRecord(card, input, config = {}, now = Date.now()) {
   card.records.push(record);
   card.stats.ingested = (Number(card.stats.ingested) || 0) + 1;
   card.updatedAt = iso(now);
-  // 条数上限：先丢最不重要、最老的（pinned / 主人重要记忆不动）。
-  if (card.records.length > cfg.maxRecords) {
-    const removable = card.records
-      .filter((item) => !item.pinned && !item.isInitial && !(item.tags.includes('owner') && item.importance >= cfg.minOwnerImportance))
-      .sort((a, b) => (a.importance - b.importance) || (timeOf(a.createdAt, 0) - timeOf(b.createdAt, 0)));
-    while (card.records.length > cfg.maxRecords && removable.length) {
-      const victim = removable.shift();
-      card.records = card.records.filter((item) => item.id !== victim.id);
-      card.stats.forgotten = (Number(card.stats.forgotten) || 0) + 1;
-    }
-  }
+  // 条数上限：先丢最不重要、最老、**且已经归档**的（pinned / 主人重要记忆不动）。
+  // 未归档的新记忆不能在归档前删（P1-4）；maintain 会在归档后调用 trimMemoryCard。
+  if (card.records.length > cfg.maxRecords) trimMemoryCard(card, cfg, now);
   return { added: true, record };
 }
 
@@ -1645,16 +1669,20 @@ function stepDown(record) {
 /**
  * 压缩：按「不重要 → 老 → 已经模糊」的顺序一档一档降级，直到回到目标容量。
  * 永远不会动 pinned / 主人重要记忆。
+ *
+ * 容量口径（P1-1）：必须和 memoryCardStatus / 写盘用同一份渲染（含叙事）。
+ * 传 options.narrative 后，被叙事覆盖的记录本就不在可见渲染里，不会再被「过度压缩」。
  */
-export function compactMemoryCard(card, config = {}, { targetRatio = 0.85, now = Date.now() } = {}) {
+export function compactMemoryCard(card, config = {}, { targetRatio = 0.85, now = Date.now(), narrative = null } = {}) {
   const cfg = normalizeMemoryCardConfig(config);
-  const currentChars = renderMemoryCard(card, { config: cfg, full: true, now }).length;
+  const nar = narrative && typeof narrative === 'object' ? narrative : { episodes: [] };
+  const currentChars = renderMemoryCard(card, { config: cfg, full: true, now, narrative: nar }).length;
   const baseChars = cfg.maxChars > 0 ? cfg.maxChars : (cfg.warnChars > 0 ? cfg.warnChars : currentChars);
   const targetChars = Math.max(400, Math.floor(baseChars * clamp(targetRatio, 0.3, 0.95)));
   let guard = 0;
   let steps = 0;
   while (guard++ < 5000) {
-    const chars = renderMemoryCard(card, { config: cfg, full: true, now }).length;
+    const chars = renderMemoryCard(card, { config: cfg, full: true, now, narrative: nar }).length;
     if (chars <= targetChars) break;
     const candidates = card.records.filter((record) => !record.pinned
       && !record.isInitial
@@ -1956,9 +1984,33 @@ export function readPromptBlock(paths, platform) {
   }
 }
 
-export function memoryCardStatus(card, config = {}, now = Date.now()) {
+/**
+ * 读叙事层；不存在/损坏都返回空叙事（P1-1：容量口径必须唯一，不能一处读一处不读）。
+ * 插件宿主、维护器、状态/快照、写盘都走这个入口，保证「状态里的大小 = 磁盘 md 大小」。
+ */
+export function readMemoryNarrative(memoryDir) {
+  try {
+    return loadNarrative(memoryDir);
+  } catch {
+    return { episodes: [] };
+  }
+}
+
+/**
+ * 记忆卡状态（容量口径的唯一定义）。
+ *
+ * 2026-10-30 审计 P1-1：旧实现不传叙事 → status.chars=32,740、磁盘 md=16,243、
+ * 真实注入 5,721，容量条/告警/自动压缩全按「幽灵尺寸」。现在：
+ *   · chars        = 完整 memory-card.md 的字符数（含叙事；与写盘同一份渲染）
+ *   · promptChars  = QQ/B站 注入块的真实字符数（含叙事；与写盘同一份渲染）
+ * 调用方要拿到正确口径，必须传 options.narrative（插件侧统一读 readMemoryNarrative）。
+ */
+export function memoryCardStatus(card, config = {}, now = Date.now(), options = {}) {
   const cfg = normalizeMemoryCardConfig(config);
-  const full = renderMemoryCard(card, { config: cfg, full: true, now });
+  const narrative = options?.narrative && typeof options.narrative === 'object'
+    ? options.narrative
+    : { episodes: [] };
+  const full = renderMemoryCard(card, { config: cfg, full: true, now, narrative });
   const chars = full.length;
   const unlimited = cfg.maxChars === 0;
   const hardRatio = cfg.maxChars > 0 ? chars / cfg.maxChars : 0;
@@ -1993,9 +2045,14 @@ export function memoryCardStatus(card, config = {}, now = Date.now()) {
       ? ['正常', '接近警告值（80%）', '接近警告值（90%）', '超过警告值（100%）'][level]
       : ['正常', '接近满（80%）', '快满了（90%）', '已满（100%）'][level],
     counts,
+    // 容量口径自检用：告诉调用方/UI 这份状态是否已含叙事层。
+    narrative: {
+      has: Array.isArray(narrative.episodes) && narrative.episodes.length > 0,
+      episodes: Array.isArray(narrative.episodes) ? narrative.episodes.length : 0,
+    },
     promptChars: {
-      qq: renderMemoryCard(card, { config: cfg, platform: 'qq', maxChars: cfg.injectMaxChars.qq, now }).length,
-      bili: renderMemoryCard(card, { config: cfg, platform: 'bili', maxChars: cfg.injectMaxChars.bili, now }).length,
+      qq: renderMemoryCard(card, { config: cfg, platform: 'qq', maxChars: cfg.injectMaxChars.qq, now, narrative }).length,
+      bili: renderMemoryCard(card, { config: cfg, platform: 'bili', maxChars: cfg.injectMaxChars.bili, now, narrative }).length,
     },
     updatedAt: card.updatedAt,
     lastMaintenanceAt: card.lastMaintenanceAt,
@@ -2006,15 +2063,15 @@ export function memoryCardStatus(card, config = {}, now = Date.now()) {
 }
 
 /** 维护后写盘：json + 人看的 md + QQ/B站 两份注入块。原子写，失败不覆盖旧文件。 */
-export function saveMemoryCardOutputs(paths, card, config = {}, now = Date.now()) {
+export function saveMemoryCardOutputs(paths, card, config = {}, now = Date.now(), options = {}) {
   const cfg = normalizeMemoryCardConfig(config);
   fs.mkdirSync(paths.dir, { recursive: true });
   // 叙事层由桥接写、这里只读：读到就渲染「我们一起经历过的」并摘掉被覆盖的原记录。
   // 读失败一律当空（记忆本体不能因为叙事文件坏了而不写）。
-  let narrative = { episodes: [] };
-  try {
-    narrative = loadNarrative(paths.dir);
-  } catch {}
+  // options.narrative 由维护器传入（一次读取、多处复用），没传就自己读。
+  const narrative = options?.narrative && typeof options.narrative === 'object'
+    ? options.narrative
+    : readMemoryNarrative(paths.dir);
   const full = renderMemoryCard(card, { config: cfg, full: true, now, narrative });
   const promptQq = renderMemoryCard(card, { config: cfg, platform: 'qq', maxChars: cfg.injectMaxChars.qq, now, narrative });
   const promptBili = renderMemoryCard(card, { config: cfg, platform: 'bili', maxChars: cfg.injectMaxChars.bili, now, narrative });
@@ -2026,7 +2083,8 @@ export function saveMemoryCardOutputs(paths, card, config = {}, now = Date.now()
     full,
     promptQq,
     promptBili,
-    status: memoryCardStatus(card, cfg, now),
+    // 状态和写盘必须同一口径：status.chars 恰好是刚写下去的 memory-card.md 字符数。
+    status: memoryCardStatus(card, cfg, now, { narrative }),
   };
 }
 
@@ -2060,6 +2118,8 @@ export function maintainMemoryCard({
   const fullCfg = normalizeMemoryCardConfig(fullConfig ?? config);
   let card = loadMemoryCard(paths) || createEmptyCard(now);
   let changed = false;
+  // P1-1 容量口径唯一：叙事层只读一次，状态/压缩/写盘共用（避免「一处含叙事一处不含」）。
+  const narrative = readMemoryNarrative(paths.dir);
   const bili = ingestBiliEntries(card, biliEntries, cfg, now);
   if (bili.added) changed = true;
   const qq = ingestInboxLines(card, inboxLines, cfg, now);
@@ -2068,18 +2128,24 @@ export function maintainMemoryCard({
   // 全量卡是 JSONL：这里只 append 新行，不读整个档案、也不重写。
   const fullAdded = fullPaths ? archiveDecayedToFull(fullPaths, card, fullCfg, now) : 0;
   if (fullAdded) changed = true;
+  // 归档之后再淘汰（P1-4）：这时被删的记录一定已经进了全量档。
+  let trimmed = 0;
+  if (fullPaths) {
+    trimmed = trimMemoryCard(card, cfg, now);
+    if (trimmed) changed = true;
+  }
   if (forceDecay || needsDailyDecay(card, cfg, now)) {
     // 插件/DSH 关了一周再开：按「错过几天」补跑，而不是只降一档。
     const steps = forceDecay ? 1 : decayDaysBetween(card.lastDecayDate, now);
     if (applyDailyDecay(card, cfg, now, { force: forceDecay, steps })) changed = true;
   }
-  let status = memoryCardStatus(card, cfg, now);
+  let status = memoryCardStatus(card, cfg, now, { narrative });
   // 先记住压缩前的档位：100% 自动压缩到 90% 后，用户仍然应该看到「刚满过」的提醒。
   const peakLevel = status.level;
   if (status.ratio >= 1 && cfg.autoCompact) {
-    const steps = compactMemoryCard(card, cfg, { targetRatio: 0.9, now });
+    const steps = compactMemoryCard(card, cfg, { targetRatio: 0.9, now, narrative });
     if (steps) changed = true;
-    status = memoryCardStatus(card, cfg, now);
+    status = memoryCardStatus(card, cfg, now, { narrative });
   }
   const alertLevel = Math.max(status.level, peakLevel);
   // 告警：80/90/100 三档；容量回落后把「已确认」一起清掉，下次再满会重新弹。
@@ -2097,7 +2163,7 @@ export function maintainMemoryCard({
   }
   card.lastMaintenanceAt = iso(now);
   card.updatedAt = iso(now);
-  const saved = saveMemoryCardOutputs(paths, card, cfg, now);
+  const saved = saveMemoryCardOutputs(paths, card, cfg, now, { narrative });
   const fullSaved = fullPaths ? saveFullMemoryCard(fullPaths, fullCfg, now) : null;
   return {
     card,
@@ -2105,6 +2171,7 @@ export function maintainMemoryCard({
     bili: bili.added,
     qq: Math.max(0, (qq.added || 0) - (qq.addedPet || 0)),
     pet: qq.addedPet || 0,
+    trimmed,
     ...saved,
     full: fullSaved ? { added: fullAdded, status: fullSaved.status, markdown: fullSaved.markdown } : null,
   };

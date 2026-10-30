@@ -21,7 +21,7 @@ import {
   DEFAULT_MEMORY_CARD_CONFIG, addManualMemory, archiveDecayedToFull, clearFirstMeeting,
   compactMemoryCard, createEmptyCard, designateFirstMeeting, fullMemoryCardStatus, loadMemoryCard,
   maintainMemoryCard, markOwnerNotified, memoryCardStatus, mergeMemories, normalizeMemoryCardConfig,
-  readAllFullRecords, recallFullMemory, renderFullMemoryCard, renderMemoryCard,
+  readAllFullRecords, readMemoryNarrative, recallFullMemory, renderFullMemoryCard, renderMemoryCard,
   saveFullMemoryCard, saveMemoryCardOutputs, shouldNotifyOwner,
 } from '../../../src/memory-card.js?rev=20261030-memfix-a';
 
@@ -107,7 +107,9 @@ function fullPathsSummary() {
 /** 读盘 + 状态（只读，不写）。 */
 export function memoryCardStatusNow(config = memoryCardConfig()) {
   const card = readCardSafe();
-  const status = memoryCardStatus(card, config);
+  // P1-1：状态必须含叙事（和磁盘 md / 注入块同一口径）；否则容量条/告警按幽灵尺寸报警。
+  const narrative = readMemoryNarrative(pathsNow().dir);
+  const status = memoryCardStatus(card, config, Date.now(), { narrative });
   // 全量卡状态按 JSONL 文件大小/统计计数算，不渲染整份档案（否则 10GB 档案会直接卡死）。
   const full = fullMemoryCardStatus(pathsNow(), config);
   return {
@@ -134,7 +136,8 @@ export function memoryCardStatusNow(config = memoryCardConfig()) {
 export function memoryCardSnapshot(config = memoryCardConfig()) {
   const card = readCardSafe();
   const now = Date.now();
-  const status = memoryCardStatus(card, config);
+  const narrative = readMemoryNarrative(pathsNow().dir);
+  const status = memoryCardStatus(card, config, now, { narrative });
   const records = [...card.records]
     // 初次相遇永远第一；其次置顶；同为置顶按最近活动/重要度排。
     .sort((a, b) => {
@@ -193,9 +196,9 @@ export function memoryCardSnapshot(config = memoryCardConfig()) {
         ...fullPathsSummary(),
       },
     },
-    markdown: renderMemoryCard(card, { config, full: true, now }),
-    promptQq: renderMemoryCard(card, { config, platform: 'qq', maxChars: config.injectMaxChars.qq, now }),
-    promptBili: renderMemoryCard(card, { config, platform: 'bili', maxChars: config.injectMaxChars.bili, now }),
+    markdown: renderMemoryCard(card, { config, full: true, now, narrative }),
+    promptQq: renderMemoryCard(card, { config, platform: 'qq', maxChars: config.injectMaxChars.qq, now, narrative }),
+    promptBili: renderMemoryCard(card, { config, platform: 'bili', maxChars: config.injectMaxChars.bili, now, narrative }),
     firstMet: (() => {
       const record = card.records.find((item) => item.id === String(card.meta.firstMetEventId ?? ''))
         ?? card.records.find((item) => item.firstMet)
@@ -450,7 +453,7 @@ export function notifyOwnerIfNeeded({ callBridge, log = () => {}, config = memor
   return serialize(async () => {
     if (config.notifyOwner === false) return { ok: true, skipped: 'disabled' };
     const card = readCardSafe();
-    const status = memoryCardStatus(card, config, now);
+    const status = memoryCardStatus(card, config, now, { narrative: readMemoryNarrative(pathsNow().dir) });
     const level = Math.max(status.level, Number(card.alerts?.level) || 0);
     if (!level) return { ok: true, skipped: 'no-alert' };
     if (!shouldNotifyOwner(card, level, now)) return { ok: true, skipped: 'cooldown' };
