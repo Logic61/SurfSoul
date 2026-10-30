@@ -20,6 +20,7 @@ const map = {
   video: ['commands/video-content.mjs', '不点开视频也能还原它讲什么（读文字：简介/字幕/弹幕/评论）'],
   subtitles: ['commands/subtitles.mjs', '拉官方字幕全文（WBI 签名，带时间戳）：<BV> [--lan ai-zh] [--print N] —— 看视频最省的一条腿'],
   'watch-video': ['commands/bili-watch.mjs', '真"看"视频：取直链 → 下载 → ffmpeg 抽帧拼九宫格 → 交给 read_image：<BV> [3x3|4x4] [--uniform]'],
+  'watch-storyboard': ['commands/watch-storyboard.mjs', '真看 + 可引用分镜：官方字幕对齐 + 编号格 + 音频条 + cell 清单（需 dsh-video-storyboard，缺则自动退回九宫格）：<BV> [--cells 9] [--from S] [--to S] [--detail low|med|high] [--no-subs] [--out 目录] [--no-history]'],
   debrief: ['commands/debrief.mjs', '看懂一条视频（一条龙）：封面+简介+官方字幕+弹幕热区(对齐字幕)+热评+画面抽帧：<BV> [--bucket 30] [--top 5] [--grid 3x3] [--no-frames]'],
   feed: ['commands/feed.mjs', '选题器（只读）：按偏好权重分配名额、排除看过的/最近推过的：--n 6 [--per 2] [--pages 3] [--source all] [--json]'],
   prefs: ['commands/prefs.mjs', '抓取偏好关键词（只读）：scan [--target fish|owner|both] [--sources history,favorites,local] [--limit 24] [--json]'],
