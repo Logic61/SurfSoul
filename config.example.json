@@ -172,6 +172,20 @@
     "longGapMaxMs": 10000
   },
   "socialV2": {
+    "memoryNarrative": {
+      "enabled": true,
+      "minAgeMinutes": 90,
+      "minRecords": 6,
+      "batchRecords": 24,
+      "maxBatchesPerTick": 6,
+      "maxEpisodes": 120,
+      "maxEpisodesInPrompt": 16,
+      "maxEpisodeTitles": 40,
+      "episodeMaxChars": 220,
+      "model": "",
+      "maxTokens": 4000,
+      "timeoutMs": 120000
+    },
     "enabled": true,
     "autoReplyCheckMs": 30000,
     "agentPreset": "qq-chat-v2",

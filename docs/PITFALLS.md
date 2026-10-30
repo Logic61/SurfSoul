@@ -2739,3 +2739,54 @@ return list[0] ?? pool[0];
   `test-core-rev-sync` 增加第 3b 节校验传递依赖的 rev；新增 `test-memcard-narrative.mjs`（10 项）并登记。
 - **验证**：`node scripts/test-core-rev-sync.mjs` 与 `node scripts/test-memcard-narrative.mjs` 全绿。
 
+## 叙事层「hidden 覆盖失效 + 预算全给叙事」（P1-2/P1-3）
+
+- **现象**：91 条回忆里只有 16+40 条进渲染，hidden 35 条的 106 个 covers 不抑制 → 106 条原记录逐条冒回；
+  注入块 5,721 字里叙事占 47.5%，预算一紧先砍「今天/桌宠/主人」，用户感觉「一天之内说的话她又忘了」。
+- **根因**：`covered` 只取 `splitEpisodesForPrompt()` 的 full+compact；有叙事时原始记录限额被砍半；
+  narrative priority 96 天然压倒记录（30–45），没有类别配额。
+- **修法**（2026-10-30 批次 B）：`covered = coveredRecordIds(narrative)`（含 hidden）；叙事单独限 ≤40% 注入预算；
+  去掉「有叙事就砍半原始限额」；today/pet 列入不可裁分区；回忆到 `maxEpisodes` 时
+  `runNarration` 返回 `skipped:'full'`、桥接立即 break（不再挤掉最旧再重压）。
+- **验证**：`test-memcard-narrative.mjs`（hidden 抑制 / 混合来源降级无标签）+ `test-memory-card.mjs`
+  （叙事 ≤40% 且今天/桌宠保底）。
+
+## 备份/恢复管道：跨角色覆盖 + 坏备份变空卡 + 备份无限增长（P1-10/P2-7）
+
+- **现象**：多角色用户点「恢复」能拿别的角色的备份覆盖当前角色（隔离实验 `ok:true`）；
+  坏 JSON 恢复后返回 `ok:true` 且整卡变空；备份目录只增不减。
+- **根因**：备份名不含角色；restore 直接 `copyFileSync` 不校验；`pruneBackups` 正则
+  `T[^-]+` 匹配不到 ISO 时间里的 `-`；每日备份闸门用 `lastDecayDate`（00:00–04:00 每 10 分钟备份一次）。
+- **修法**（2026-10-30 批次 B2）：备份 label 带角色 id、快照/恢复按角色过滤；restore 先 parse+校验
+  `records` 再 `writeJsonAtomic`，失败不动当前卡；恢复前自动留底并透出 warnings；
+  `pruneBackups` 正则修成完整 ISO；每日备份改 `meta.lastBackupDate` 且成功才写回；stats 重建改 4MB 分块流式。
+- **验证**：`test-memory-card-backup.mjs`（6 项：分组轮转 / 每日一次 / 坏备份拒绝 / 跨角色拒绝 / 正常恢复 / 流式重建）。
+
+## 容量压缩 O(渲染×档位) + 无变化也重写 5 个文件（P2-18/P2-19）
+
+- **现象**：600 条卡压缩实测 7.9 s / 1368 步，跑在宿主事件循环（手动压缩/`maxChars` 时界面假死）；
+  每 10 分钟维护即使 0 新增也重写 6 次渲染 + 5 个文件。
+- **根因**：每步重新 render 整卡并重新过滤排序；maintain 无条件 `saveMemoryCardOutputs`。
+- **修法**（2026-10-30 批次 B3）：候选只排序一次、每步只算单条记录行长变化、删除延后一次性过滤、
+  最后真实渲染确认；maintain 检测 changed / cursor / lastDecayDate / 输出缺失，无变化返回 `noop` 不写盘。
+- **验证**：`test-memory-card.mjs`：600 条压缩 <1.5 s（实测 ~40 ms）、无变化维护不重写 md、有新消息恢复写入。
+
+## 叙事层不可见、不可关、不可删（B4）
+
+- **现象**：用户看不到「她记成了什么」，删不掉一条压错的回忆，也无法关掉这一层；记忆列表只显示前 30 条。
+- **根因**：叙事文件只被渲染读取，没有进快照/UI/API；配置只认仓库 `config.json`（用户改不到）。
+- **修法**（2026-10-30 批次 B4）：快照返回叙事摘要（条数/hidden/更新时间/上次 token 用量）；
+  新增 `narrative-forget`（删回忆释放 covers 并重渲染）与 `narrative-toggle`（写 unified 顶层
+  `memoryNarrative`，桥接每轮读取覆盖）；记忆页加叙事面板/开关、记录搜索与分页。
+- **验证**：`test-memory-card-narrative-api.mjs`（4 项）与 `test-memory-card.mjs` 快照口径检查。
+
+## 隐私纵深：数字变体穿透 + 指令样式 + 白名单 fail-open（P1-8/P2-22/P2-23）
+
+- **现象**：全角数字、数字间夹空格/连字符、13+ 位长号码四层隐私闸全 PASS；
+  群友原文「忽略以上指令，你现在是…」原样进 B站 提示词；群白名单为空时任何 feed 群都通过。
+- **根因**：所有规则只匹配原文半角连续数字；跨平台文档只有边界声明没有清洗；空名单被当成「不限制」。
+- **修法**（2026-10-30 批次 B5）：`scanText` 增加 NFKC + 去数字间分隔符的变体扫描（日期先打码防误伤），
+  变体命中整行丢弃；`stripInstructionLines()` 接入双向生成器并加「数据不是指令」围栏；
+  空白名单拒绝搬运；feed 只读尾 8 MB；叙事 prompt/输出统一 `redactForOutbound`。
+- **验证**：`test-privacy-hardening.mjs`（7 项：8 类变体 / 正常文本不误伤 / 指令清洗 / 白名单 / 外发脱敏）。
+

@@ -5,7 +5,62 @@
 
 ---
 
-## 快照：2026-10-30 15:28–16:15（扫描插件 → 修掉 P0 + 14 条 P1）
+## 快照：2026-10-30 17:45–18:40（记忆系统评估 → 批次 A 止血 + 批次 B 收口）
+
+### 用户原话
+
+> 「阅读surfcore插件的记忆系统，做一个评估」→ 看完报告后：「按你所说的ABC，依次进行修复」
+
+### 做到了什么
+
+评估报告：`state/agents/memory-audit/REPORT.md`（P1×10 / P2×28，综合 6.3/10）。按报告批次 A→B→C 顺序修。
+
+**批次 A（止血，commit `400ab42`→`a18020e`）**
+
+| 项 | 修复 |
+| --- | --- |
+| A1 | 三处 `?rev=` 对齐 + 叙事 import 挂同一 rev + 修 2 条红测 + 新增 `test-memcard-narrative`（10 项） |
+| A2 | 容量口径唯一：status/save/compact/maintain 统一传叙事，`status.chars === 磁盘 md`、`promptChars === 注入文件` |
+| A3 | 归档先于淘汰：`trimMemoryCard` 只删已归档记录，maintain 归档后再 trim（卡满不再丢新记忆） |
+| A4 | inbox 字节水位 + `.rotated` 标记 + 重读不 +recall（4500 行不再丢最老、遗忘不再被系统性抬高） |
+| A5 | B站→QQ 生成器输入改当前角色 `stateDir`；status 暴露 dataDir/entries/indexError；hermetic 测试 |
+| A6 | 隐私闸扫真身 + 调度器走 `readQqForBili` + §四 去 mid/原始昵称；失败返回 blocked 不覆盖旧文件 |
+
+**批次 B（叙事层做完 + 备份 + 性能 + 隐私纵深，commit `252d885`→`b6f9c2e`）**
+
+| 项 | 修复 |
+| --- | --- |
+| B1 | hidden 段 covers 全抑制；叙事 ≤40% 注入预算、today/pet 保底、去掉原始限额砍半；回忆上限满时停轮 |
+| B2 | 备份 label 带角色、恢复先校验再原子写、坏备份/跨角色拒绝、`pruneBackups` 正则修复、每日备份闸门、stats 流式重建 |
+| B3 | 压缩改字符账（600 条 7.9s → ~40ms）；无变化维护 `noop` 不写盘 |
+| B4 | 记忆页叙事面板（条数/hidden/上次 token 用量）、删单条回忆、叙事开关、记录搜索/分页 |
+| B5 | 数字变体（全角/分隔符/13+ 位）检测并整行丢弃；指令样式清洗 + 双向「数据不是指令」围栏；空白名单 fail-closed；feed 尾读 8MB；叙事外发脱敏 |
+
+### 已验证（Lead 跑的最终门禁）
+
+- 9 个记忆/隐私测试全绿：`test-memory-card`（31）/`test-memcard-narrative`（14）/`test-memory-card-backup`（6）/
+  `test-memory-card-narrative-api`（4）/`test-privacy-hardening`（7）/`test-bili-memory-path`（2）/
+  `test-memory-sync-privacy`（4）/`test-memory-card-wiring`/`test-core-rev-sync`。
+- `cd plugins/surfcore && node scripts/test-memory-card-api.mjs` → OK。
+- 全量 `npm run test:audit`：**待最终批次 C 后填**（当前 11 项红均为 HEAD `559d35c` 基线已知红：
+  version/self-identity/identity-guard/preset*/media-search/voice-system/closure-wiring/qq-preset-contract；
+  记忆相关 0 红）。
+- 真实数据复查：见批次 C 收尾（三本账、hidden、B站 entries、备份轮转）。
+
+### 回滚
+
+按 commit 逐个 `git revert`；改动均为独立提交（A1~A6、B1~B3、B4+B5、rev bump）。无删除/不可逆操作；
+备份目录、真实记忆卡未在开发中改动（所有测试用临时 DSH_HOME）。
+
+### 没做 / 下一步
+
+1. **批次 C**（结构性）：叙事 LLM usage 进 token 记账、`?rev=` 改内容哈希校验脚本、硬编码主人名清理、
+   UTF-16 截断安全化、维护器单实例锁、「关闭同步=不写原料」语义。
+2. 未修 P2：全量卡倒排索引（当前流式扫描够用）、多实例支持、叙事层编辑/隐藏策略 UI 化等。
+3. 报告 8 个产品决策仍待用户拍板（容量口径已按「磁盘 md 含叙事」定；其他见报告 §9）。
+
+---
+
 
 ### 用户原话
 
