@@ -292,6 +292,9 @@ export function createEmptyCard(now = Date.now()) {
     meta: {
       inboxSeen: [],
       sourceSeen: [],
+      // P1-5：inbox 读取水位（字节游标）。旧实现只读「最后 4000 行」且无水位，
+      // 积压时永久丢最老一段；游标由 maintainMemoryCard 在成功摄取后推进。
+      inboxCursor: null,
       firstOwnerRecordId: '',
       // 「最初」窗口从第一次和主人互动开始；firstMet* 是用户可指定的“初次相遇”事件。
       firstOwnerAt: '',
@@ -346,6 +349,15 @@ export function normalizeCard(raw) {
   };
   card.meta.inboxSeen = asArray(card.meta.inboxSeen).map(String).slice(-5000);
   card.meta.sourceSeen = asArray(card.meta.sourceSeen).map(String).slice(-5000);
+  // inbox 水位：坏值一律当「没有水位」（从头读，靠 inboxSeen/findDuplicate 去重，不会丢）。
+  const cursor = asObject(card.meta.inboxCursor);
+  card.meta.inboxCursor = Number.isFinite(Number(cursor.offset))
+    ? {
+      offset: Math.max(0, Number(cursor.offset)),
+      size: Math.max(0, Number(cursor.size) || 0),
+      rotatedAt: Math.max(0, Number(cursor.rotatedAt) || 0),
+    }
+    : null;
   card.meta.firstMetRecordIds = asArray(card.meta.firstMetRecordIds).map(String).filter(Boolean).slice(0, 20);
   card.alerts.lastNotified = asObject(card.alerts.lastNotified);
   for (const item of asArray(input.records)) {
@@ -1278,8 +1290,14 @@ export function addMemoryRecord(card, input, config = {}, now = Date.now()) {
   if (!record) return { added: false, record: null };
   const duplicate = findDuplicate(card, record);
   if (duplicate) {
-    duplicate.lastSeenAt = iso(now);
-    duplicate.recallCount = Math.min(999, (Number(duplicate.recallCount) || 0) + 1);
+    // P1-5：inbox 重读（水位丢失 / 旧文件轮转 / 上游窗口重放）不能当成「复习」——
+    // 旧实现每次重读都 recallCount+1、lastSeenAt=now，老记忆因此永不衰减。
+    // 现在只把 lastSeenAt 推进到「这条消息真实发生的时间」，且绝不抬高 recallCount。
+    const seenAt = Math.max(
+      timeOf(duplicate.lastSeenAt, 0),
+      timeOf(input.lastSeenAt, timeOf(input.createdAt, now)),
+    );
+    duplicate.lastSeenAt = iso(seenAt);
     card.updatedAt = iso(now);
     return { added: false, record: duplicate };
   }
@@ -1312,7 +1330,7 @@ export function touchMemories(card, text, now = Date.now()) {
 }
 
 /** 一批 QQ inbox 行 → 记忆记录。第一句主人消息会被钉成永久锚点。 */
-export function ingestInboxLines(card, lines, config = {}, now = Date.now()) {
+export function ingestInboxLines(card, lines, config = {}, now = Date.now(), options = {}) {
   const cfg = normalizeMemoryCardConfig(config);
   let added = 0;
   let addedPet = 0;
@@ -1502,6 +1520,9 @@ export function ingestInboxLines(card, lines, config = {}, now = Date.now()) {
     }
   }
   card.meta.inboxSeen = [...seen].slice(-3000);
+  // 只有成功走完这一批才推进水位（maintain 后续失败会导致本轮 card 不落盘，下一轮按旧水位重读，
+  // inboxSeen/findDuplicate 会兜住重复，不会重复入库）。
+  if (options?.inboxCursor) card.meta.inboxCursor = options.inboxCursor;
   if (added) {
     const addedQq = Math.max(0, added - addedPet);
     if (addedQq) card.stats.fromQq = (Number(card.stats.fromQq) || 0) + addedQq;
@@ -2109,6 +2130,7 @@ export function maintainMemoryCard({
   config = {},
   biliEntries = [],
   inboxLines = [],
+  inboxCursor = null,
   now = Date.now(),
   forceDecay = false,
   fullPaths = null,
@@ -2122,7 +2144,7 @@ export function maintainMemoryCard({
   const narrative = readMemoryNarrative(paths.dir);
   const bili = ingestBiliEntries(card, biliEntries, cfg, now);
   if (bili.added) changed = true;
-  const qq = ingestInboxLines(card, inboxLines, cfg, now);
+  const qq = ingestInboxLines(card, inboxLines, cfg, now, { inboxCursor });
   if (qq.added) changed = true;
   // **先归档再衰减**：刚进来的旧记忆/冷门记忆也可能在同一次补跑里被忘掉。
   // 全量卡是 JSONL：这里只 append 新行，不读整个档案、也不重写。
@@ -2197,6 +2219,70 @@ export function addManualMemory(card, { text, title = '', importance, scope = 'q
   }, cfg, now);
 }
 
+/**
+ * 读 inbox 增量（P1-5）。
+ *
+ * 旧实现：插件读「.1 + 当前文件」再 slice(-4000)，engine 只保留 3000 个 inboxSeen →
+ * 积压 4500 行时永久丢最老一段，且每次重读都会把老记录当「复习」。
+ * 现在按字节水位读，返回 { lines, nextCursor }；调用方把 nextCursor 存进
+ * card.meta.inboxCursor（maintainMemoryCard 落盘）。
+ *
+ * 轮转（桥接把当前文件 rename 成 .1，并写 `.rotated` 标记）：
+ *   · 游标还在旧文件 → 把 .1 + 新文件一起读（取最后 maxLines 行），重复交给
+ *     inboxSeen/findDuplicate 去重。宁可重读，不能漏读。
+ *   · 旧版本留下的 .1（没有标记）用「当前文件比游标短」兜底识别。
+ */
+export function readInboxSince(paths, cursor = null, { maxLines = 4000 } = {}) {
+  const limit = Math.max(1, Number(maxLines) || 4000);
+  const readBuffer = (file) => { try { return fs.readFileSync(file); } catch { return null; } };
+  const marker = (() => {
+    try { return JSON.parse(fs.readFileSync(`${paths.inbox}.rotated`, 'utf8')); } catch { return null; }
+  })();
+  const current = readBuffer(paths.inbox) ?? Buffer.alloc(0);
+  const hasCursor = cursor && Number.isFinite(Number(cursor.offset));
+  const offset = hasCursor ? Math.max(0, Math.min(Number(cursor.offset), current.length)) : 0;
+  const cursorRotatedAt = Number(hasCursor ? cursor.rotatedAt : 0) || 0;
+  const markerAt = Number(marker?.at) || 0;
+  const rotated = Boolean(markerAt > cursorRotatedAt) || Boolean(hasCursor && current.length < Number(cursor.offset));
+  if (rotated) {
+    const previous = readBuffer(`${paths.inbox}.1`);
+    const all = [];
+    for (const buffer of [previous, current]) {
+      if (!buffer) continue;
+      for (const line of buffer.toString('utf8').split('\n')) {
+        const text = line.trim();
+        if (text) all.push(text);
+      }
+    }
+    return {
+      lines: all.slice(-limit),
+      rotated: true,
+      nextCursor: { offset: current.length, size: current.length, rotatedAt: markerAt || cursorRotatedAt },
+    };
+  }
+  const buffer = current.subarray(offset);
+  const text = buffer.toString('utf8');
+  const lines = [];
+  let position = 0;
+  while (position < text.length && lines.length < limit) {
+    const newline = text.indexOf('\n', position);
+    if (newline < 0) break; // 半行（桥接正在写）：留到下一轮，不推进游标
+    const line = text.slice(position, newline).trim();
+    position = newline + 1;
+    if (line) lines.push(line);
+  }
+  const consumed = Buffer.byteLength(text.slice(0, position), 'utf8');
+  return {
+    lines,
+    rotated: false,
+    nextCursor: {
+      offset: offset + consumed,
+      size: current.length,
+      rotatedAt: cursorRotatedAt,
+    },
+  };
+}
+
 /** 桥接进程调用：把一条 QQ 事件追加到 inbox（只追加，不做重活）。 */
 export function appendMemoryInboxEvent(paths, event = {}, { maxBytes = 1024 * 1024 } = {}) {
   try {
@@ -2208,6 +2294,11 @@ export function appendMemoryInboxEvent(paths, event = {}, { maxBytes = 1024 * 10
       if (stat.size > maxBytes) {
         try { fs.rmSync(`${paths.inbox}.1`, { force: true }); } catch {}
         fs.renameSync(paths.inbox, `${paths.inbox}.1`);
+        // P1-5：写轮转标记，读取方才能知道「游标所在的旧文件被换走了」，
+        // 从而把 .1 的剩余段也读掉；没有标记只能靠文件长度猜。
+        try {
+          fs.writeFileSync(`${paths.inbox}.rotated`, JSON.stringify({ at: Date.now(), size: stat.size }), { encoding: 'utf8', mode: 0o600 });
+        } catch {}
       }
     } catch {}
     const line = JSON.stringify({

@@ -21,7 +21,7 @@ import {
   DEFAULT_MEMORY_CARD_CONFIG, addManualMemory, archiveDecayedToFull, clearFirstMeeting,
   compactMemoryCard, createEmptyCard, designateFirstMeeting, fullMemoryCardStatus, loadMemoryCard,
   maintainMemoryCard, markOwnerNotified, memoryCardStatus, mergeMemories, normalizeMemoryCardConfig,
-  readAllFullRecords, readMemoryNarrative, recallFullMemory, renderFullMemoryCard, renderMemoryCard,
+  readAllFullRecords, readInboxSince, readMemoryNarrative, recallFullMemory, renderFullMemoryCard, renderMemoryCard,
   saveFullMemoryCard, saveMemoryCardOutputs, shouldNotifyOwner,
 } from '../../../src/memory-card.js?rev=20261030-memfix-a';
 
@@ -78,17 +78,9 @@ function readBiliEntries() {
   }
 }
 
-function readInboxLines() {
-  const lines = [];
-  // 桥接在 1MB 时把当前文件轮转成 .1；维护器要同时读 .1 + 当前，
-  // 否则「轮转恰好在两次整理之间」会永久丢掉那一段（inboxSeen 会去重，读多不会重复入库）。
-  for (const file of [`${pathsNow().inbox}.1`, pathsNow().inbox]) {
-    try {
-      const text = fs.readFileSync(file, 'utf8');
-      for (const line of text.split('\n')) if (line.trim()) lines.push(line);
-    } catch {}
-  }
-  return lines.slice(-4000);
+/** 读 inbox 增量（P1-5）：按记忆卡里的字节水位读，不再「只取最后 4000 行」。 */
+function readInboxSinceCursor(card) {
+  return readInboxSince(pathsNow(), card?.meta?.inboxCursor ?? null);
 }
 
 function readCardSafe() {
@@ -284,6 +276,8 @@ export function runMemoryCardMaintenance({ forceDecay = false, config = memoryCa
     }
     fs.mkdirSync(pathsNow().dir, { recursive: true });
     const before = loadMemoryCard(pathsNow());
+    // P1-5：inbox 按字节水位增量读；水位在成功维护并落盘后才推进（坏卡时从头读，靠去重兜底）。
+    const inbox = readInboxSinceCursor(before);
     // 坏卡不能静默覆盖：先留一份原始文件（load 失败时 before=null）。
     if (!before && fs.existsSync(pathsNow().json)) {
       try { backupFile(pathsNow().json, 'memory-card-corrupt'); } catch {}
@@ -303,7 +297,8 @@ export function runMemoryCardMaintenance({ forceDecay = false, config = memoryCa
       paths: pathsNow(),
       config,
       biliEntries: readBiliEntries(),
-      inboxLines: readInboxLines(),
+      inboxLines: inbox.lines,
+      inboxCursor: inbox.nextCursor,
       now,
       forceDecay,
       fullPaths: pathsNow(),

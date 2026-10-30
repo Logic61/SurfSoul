@@ -10,7 +10,7 @@ import {
   archiveDecayedToFull, clearFirstMeeting, compactMemoryCard, createEmptyCard, designateFirstMeeting,
   fullMemoryCardStatus, ingestBiliEntries, ingestInboxLines, initialProbabilityForOffset, loadMemoryCard,
   maintainMemoryCard, memoryCardStatus, mergeMemories, normalizeMemoryCardConfig, readAllFullRecords,
-  recallFullMemory, redactForMemory, refreshInitialState, renderFullMemoryCard, renderMemoryCard,
+  readInboxSince, recallFullMemory, redactForMemory, refreshInitialState, renderFullMemoryCard, renderMemoryCard,
   resolveMemoryCardPaths, saveMemoryCardOutputs, scoreMemory, shouldNotifyOwner, targetClarity,
   trimMemoryCard,
 } from '../src/memory-card.js';
@@ -745,5 +745,62 @@ test('归档先于淘汰：卡满时新记忆不会同时从衰减卡和全量�
   assert.equal(trimmedRun.card.records.length, 100);
   assert.equal(fullMemoryCardStatus(paths2, cfg2, NOW).records, 120, '被淘汰的 20 条必须已在全量档里');
 });
+
+test('inbox 水位：只消费新行、轮转不丢未读、重读不抬高 recall（P1-5）', () => {
+  const dir = tempDir();
+  const paths = resolveMemoryCardPaths(dir);
+  const cfg = normalizeMemoryCardConfig({});
+  for (let i = 0; i < 5; i += 1) {
+    appendMemoryInboxEvent(paths, {
+      at: NOW - (5 - i) * 60_000,
+      kind: 'group',
+      sender: '群友',
+      senderId: '10001',
+      text: `inbox 水位消息 ${i}：这是一条用来验证增量读取的群聊内容。`,
+    });
+  }
+  const first = readInboxSince(paths, null);
+  assert.equal(first.lines.length, 5);
+  const card = createEmptyCard(NOW);
+  const ingested = ingestInboxLines(card, first.lines, cfg, NOW, { inboxCursor: first.nextCursor });
+  assert.equal(ingested.added, 5);
+  assert.ok(card.meta.inboxCursor.offset > 0, '摄取成功后必须记录字节水位');
+
+  // 同一个水位再读：0 行（旧实现会把同样的行再读一遍）。
+  const second = readInboxSince(paths, card.meta.inboxCursor);
+  assert.equal(second.lines.length, 0);
+  assert.equal(second.nextCursor.offset, card.meta.inboxCursor.offset);
+
+  // 追加两条：只读新的两条。
+  appendMemoryInboxEvent(paths, { at: NOW, kind: 'group', sender: '群友', senderId: '10002', text: '水位之后的新消息一：这条必须被读到。' });
+  appendMemoryInboxEvent(paths, { at: NOW + 1000, kind: 'group', sender: '群友', senderId: '10003', text: '水位之后的新消息二：这条也必须被读到。' });
+  const third = readInboxSince(paths, card.meta.inboxCursor);
+  assert.equal(third.lines.length, 2);
+  assert.match(third.lines.join('\n'), /新消息一/);
+  assert.match(third.lines.join('\n'), /新消息二/);
+  ingestInboxLines(card, third.lines, cfg, NOW + 2000, { inboxCursor: third.nextCursor });
+  assert.equal(readInboxSince(paths, card.meta.inboxCursor).lines.length, 0);
+
+  // 重放旧行（模拟水位丢失 + inboxSeen 被挤出）：不得抬高 recallCount，也不得把 lastSeenAt 推到现在。
+  const anchor = card.records.find((record) => record.text.includes('inbox 水位消息 0'));
+  assert.ok(anchor);
+  const recallBefore = anchor.recallCount;
+  const seenBefore = anchor.lastSeenAt;
+  card.meta.inboxSeen = [];
+  ingestInboxLines(card, first.lines, cfg, NOW + 60 * 60_000);
+  assert.equal(anchor.recallCount, recallBefore, '重读旧 inbox 不是复习，不能 +recall');
+  assert.equal(anchor.lastSeenAt, seenBefore, '重读旧 inbox 不能把 lastSeenAt 推到当前时间');
+
+  // 轮转：当前文件 rename 成 .1 并写标记，旧游标必须能读到新旧两段。
+  const cursorBeforeRotate = card.meta.inboxCursor;
+  fs.renameSync(paths.inbox, `${paths.inbox}.1`);
+  fs.writeFileSync(`${paths.inbox}.rotated`, JSON.stringify({ at: Date.now(), size: 0 }));
+  appendMemoryInboxEvent(paths, { at: NOW + 2 * 60_000, kind: 'group', sender: '群友', senderId: '10004', text: '轮转后的新消息：游标还在旧文件里，这条不能丢。' });
+  const rotated = readInboxSince(paths, cursorBeforeRotate);
+  assert.equal(rotated.rotated, true);
+  assert.match(rotated.lines.join('\n'), /轮转后的新消息/);
+  assert.equal(readInboxSince(paths, rotated.nextCursor).lines.length, 0);
+});
+
 
 
