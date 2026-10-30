@@ -31,7 +31,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 // `?rev=` 和插件 lib 的引用保持同一取值：插件热重载时，只有 specifier 变了才会
 // 重新求值；本模块 import 的叙事层也必须挂同一个 rev，否则「引擎新、叙事旧」。
-import { coveredRecordIds, formatEpisodeLine, formatEpisodeTitleLine, loadNarrative, splitEpisodesForPrompt, resolveNarrativePath } from './memcard-narrative.js?rev=20261030-memfix-a';
+import { coveredRecordIds, formatEpisodeLine, formatEpisodeTitleLine, loadNarrative, splitEpisodesForPrompt, resolveNarrativePath } from './memcard-narrative.js?rev=20261030-memfix-b';
 
 export const MEMORY_CARD_VERSION = 1;
 export const DAY_MS = 24 * 60 * 60 * 1000;
