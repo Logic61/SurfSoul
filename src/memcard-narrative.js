@@ -95,9 +95,9 @@ export function loadNarrative(memoryDir) {
         id: String(ep.id || `ep_${hash(`${ep.date}|${ep.title}|${ep.text}`)}`),
         date: /^\d{4}-\d{2}-\d{2}$/.test(String(ep.date ?? '')) ? String(ep.date) : dateKey(Date.now()),
         conv: ['私聊', '群里'].includes(String(ep.conv ?? '')) ? String(ep.conv) : '',
-        title: String(ep.title ?? '').slice(0, 30),
+        title: String(ep.title ?? '').trim().slice(0, 30),
         text: String(ep.text).trim().slice(0, 600),
-        covers: Array.isArray(ep.covers) ? ep.covers.map(String).filter(Boolean) : [],
+        covers: Array.isArray(ep.covers) ? ep.covers.map((id) => String(id ?? '')).filter(Boolean) : [],
         at: Number(ep.at) || 0
       }))
   };

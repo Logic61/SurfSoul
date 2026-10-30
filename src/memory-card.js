@@ -29,13 +29,22 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { coveredRecordIds, formatEpisodeLine, formatEpisodeTitleLine, loadNarrative, splitEpisodesForPrompt, resolveNarrativePath } from './memcard-narrative.js';
+// `?rev=` 和插件 lib 的引用保持同一取值：插件热重载时，只有 specifier 变了才会
+// 重新求值；本模块 import 的叙事层也必须挂同一个 rev，否则「引擎新、叙事旧」。
+import { coveredRecordIds, formatEpisodeLine, formatEpisodeTitleLine, loadNarrative, splitEpisodesForPrompt, resolveNarrativePath } from './memcard-narrative.js?rev=20261030-memfix-a';
 
 export const MEMORY_CARD_VERSION = 1;
 export const DAY_MS = 24 * 60 * 60 * 1000;
 
 /** 容量告警阈值：80% / 90% / 100%（用户明确要求的三档）。 */
 export const MEMORY_CAPACITY_THRESHOLDS = Object.freeze([0.8, 0.9, 1.0]);
+
+/**
+ * 预算再紧也不能先删的分区：初次相遇 / 永远不忘 / 桌宠私下相处。
+ * 2026-10-30 红测 #25 钉住「桌宠被普通最近记忆挤掉」是真实回归；改用「保护集合」而不是
+ * 只调 priority，避免以后加新分区时又把它挤下去。
+ */
+const PROMPT_PROTECTED_SECTIONS = Object.freeze(new Set(['firstMet', 'anchors', 'pet']));
 
 /** 清晰度阶梯：只允许按这个顺序一格一格地变。 */
 export const CLARITY_ORDER = Object.freeze(['vivid', 'clear', 'fuzzy', 'trace', 'forgotten']);
@@ -1868,11 +1877,13 @@ export function renderMemoryCard(card, options = {}) {
     { key: 'earlier', title: '## 更早还记得的', priority: 94, lines: earlierLines },
     { key: 'firstMet', title: '## 初次相遇（和主人）', priority: 120, lines: vis(sections.firstMet).slice(0, limits.firstMet).map((record) => recordLine(record, { platform, full })) },
     { key: 'anchors', title: '## 永远不会忘的', priority: 100, lines: vis(sections.anchors).slice(0, limits.anchors).map((record) => recordLine(record, { platform, full })) },
+    // 桌宠是「私下相处」的重要记忆（2026-10-25 用户要求，2026-10-30 红测 #25 钉住）：
+    // 预算紧张时要最后才动它，优先级高于「今天/最初/和主人/最近」，并列入不可裁分区。
+    { key: 'pet', title: '## 桌宠（私下相处）', priority: 55, lines: vis(sections.petModule).slice(0, limits.pet).map((record) => recordLine(record, { platform, full })) },
     { key: 'today', title: '## 今天聊过的（最近 24 小时）', priority: 90, lines: todayRecap.map((record) => recordLine(record, { platform, full })) },
     { key: 'initial', title: '## 最初的日子（和主人）', priority: 45, lines: vis(sections.initial).slice(0, limits.initial).map((record) => recordLine(record, { platform, full })) },
     { key: 'owner', title: '## 和主人的记忆', priority: 40, lines: vis(sections.owner).slice(0, limits.owner).map((record) => recordLine(record, { platform, full })) },
     { key: 'recent', title: '## 最近记得的', priority: 30, lines: vis(sections.recent).slice(0, limits.recent).map((record) => recordLine(record, { platform, full })) },
-    { key: 'pet', title: '## 桌宠（私下相处）', priority: 36, lines: vis(sections.petModule).slice(0, limits.pet).map((record) => recordLine(record, { platform, full })) },
     { key: 'bili', title: '## B站（冲浪）', priority: 22, lines: vis(sections.biliModule).slice(0, limits.bili).map((record) => recordLine(record, { platform, full })) },
     { key: 'qq', title: '## QQ 与群里的记忆', priority: 20, lines: vis(sections.qqModule).slice(0, limits.qq).map((record) => recordLine(record, { platform, full })) },
     { key: 'fuzzy', title: '## 正在模糊的事', priority: 10, lines: vis(sections.fuzzy).slice(0, limits.fuzzy).map((record) => recordLine(record, { platform, full })) },
@@ -1921,7 +1932,9 @@ export function renderMemoryCard(card, options = {}) {
     let guard = 0;
     while (out.length > maxChars && guard++ < 1000) {
       const trimmable = active
-        .filter((section) => section.priority < 100 && section.lines.length)
+        .filter((section) => section.lines.length
+          && !PROMPT_PROTECTED_SECTIONS.has(section.key)
+          && section.priority < 100)
         .sort((a, b) => a.priority - b.priority);
       if (!trimmable.length) break;
       trimmable[0].lines.pop();

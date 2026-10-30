@@ -84,6 +84,20 @@ console.log('## 3. 不允许「同一个核心模块，一处挂 rev、一处裸
   ok(bareMemoryCard.length === 0, `没有裸引用 src/memory-card.js 的插件文件${bareMemoryCard.length ? `（${bareMemoryCard.join(', ')}）` : ''}`);
 }
 
+console.log('## 3b. 传递依赖也要挂同一个 rev（2026-10-30 新增：叙事层）');
+{
+  // P1-9：插件 → memory-card.js?rev=X → memory-card.js 里裸 import './memcard-narrative.js'。
+  // 后者不会随 rev 重新求值，于是热重载后「引擎新、叙事旧」，且 0 测试能发现。
+  const engineFile = path.join(ROOT, 'src', 'memory-card.js');
+  const engineText = fs.readFileSync(engineFile, 'utf8');
+  const narrativeSpecs = [...engineText.matchAll(/from\s+'([^']*memcard-narrative\.js[^']*)'/g)].map((m) => m[1]);
+  ok(narrativeSpecs.length >= 1, 'src/memory-card.js 确实引用了叙事层（这条测试有对象）');
+  const narrativeRevs = narrativeSpecs.map((spec) => /(?:^|[?&])rev=([^&]*)/.exec(spec)?.[1] ?? '');
+  ok(narrativeSpecs.every((_, i) => narrativeRevs[i]), `叙事层引用都挂了 ?rev=（当前：${narrativeSpecs.join(' | ')}）`);
+  const allRevs = new Set([...revs.keys(), ...narrativeRevs.filter(Boolean)]);
+  ok(allRevs.size <= 1, `插件与叙事层的 ?rev= 只有一种取值（实际 ${allRevs.size} 种：${[...allRevs].join(' | ') || '无'}）`);
+}
+
 console.log('## 4. 提醒：其它核心模块改完后热重载不会生效');
 {
   const others = [...new Set(coreImports.map((i) => i.name))].filter((n) => n !== 'memory-card.js');

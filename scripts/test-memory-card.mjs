@@ -540,7 +540,9 @@ test('QQ 记忆包含她自己的发言：主人记录合并回复；没有对�
   assert.equal(selfRecord.source, 'qq-self');
   assert.equal(selfRecord.scope, 'qq');
   const rendered = renderMemoryCard(card, { config: CFG, full: true, now: NOW });
-  assert.match(rendered, /她回：wo也想你/);
+  // 2026-10-30：注入版已经改成第一人称「我回」（见 PITFALLS #83 关联修复），
+  // 断言跟着实现走；全量导出/UI 仍是「她回」（见 P2 文档同步项）。
+  assert.match(rendered, /我回：wo也想你/);
   assert.match(rendered, /这个视频好可爱呀/);
 });
 

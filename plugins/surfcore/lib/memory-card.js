@@ -1,4 +1,4 @@
-﻿/**
+/**
  * 记忆卡（插件宿主侧）—— 唯一维护者。
  *
  * 分工：
@@ -23,7 +23,7 @@ import {
   maintainMemoryCard, markOwnerNotified, memoryCardStatus, mergeMemories, normalizeMemoryCardConfig,
   readAllFullRecords, recallFullMemory, renderFullMemoryCard, renderMemoryCard,
   saveFullMemoryCard, saveMemoryCardOutputs, shouldNotifyOwner,
-} from '../../../src/memory-card.js?rev=20261029-memalloc';
+} from '../../../src/memory-card.js?rev=20261030-memfix-a';
 
 const EMPTY_CONFIG = normalizeMemoryCardConfig({});
 const TICK_MS = 10 * 60 * 1000;
