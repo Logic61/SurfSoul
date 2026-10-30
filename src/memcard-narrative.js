@@ -53,6 +53,23 @@ function hash(value, len = 12) {
   return crypto.createHash('sha1').update(String(value ?? '')).digest('hex').slice(0, len);
 }
 
+/**
+ * 外发前脱敏（P2-22，2026-10-30）：叙事层会把记录正文发给外部模型。
+ * 旧实现只依赖入库时的 redactForMemory，叙事 prompt 的 who/text/reply 原样出去；
+ * 这里再兜一层（号码/邮箱/密钥），模型输出落盘前也过同一层。
+ */
+const OUTBOUND_REDACTIONS = [
+  { re: /(?<!\d)\d{6,20}(?!\d)/g, repl: '[编号已隐藏]' },
+  { re: /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, repl: '[邮箱已隐藏]' },
+  { re: /\b(?:sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16})\b/g, repl: '[密钥已隐藏]' },
+];
+
+export function redactForOutbound(text) {
+  let out = String(text ?? '');
+  for (const rule of OUTBOUND_REDACTIONS) out = out.replace(rule.re, rule.repl);
+  return out;
+}
+
 function dateKey(ms) {
   const d = new Date(Number(ms) || Date.now());
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
@@ -89,6 +106,8 @@ export function loadNarrative(memoryDir) {
   return {
     version: NARRATIVE_VERSION,
     updatedAt: raw?.updatedAt ?? null,
+    // 上一次压缩的用量/时间：给 UI 显示「叙事层花了多少 token」（P2-20 的可观测部分）。
+    lastRun: raw?.lastRun && typeof raw.lastRun === 'object' ? raw.lastRun : null,
     episodes: episodes
       .filter((ep) => ep && typeof ep.text === 'string' && ep.text.trim())
       .map((ep) => ({
@@ -107,8 +126,30 @@ export function saveNarrative(memoryDir, narrative) {
   writeJsonAtomic(resolveNarrativePath(memoryDir), {
     version: NARRATIVE_VERSION,
     updatedAt: new Date().toISOString(),
-    episodes: narrative.episodes
+    episodes: narrative.episodes,
+    ...(narrative.lastRun ? { lastRun: narrative.lastRun } : {})
   });
+}
+
+/** 给 UI 的叙事层摘要（只读；不返回全部正文，最多 60 条）。 */
+export function memoryNarrativeSummary(narrative) {
+  const sorted = [...(narrative?.episodes ?? [])]
+    .sort((a, b) => String(b.date).localeCompare(String(a.date)) || (b.at || 0) - (a.at || 0));
+  const split = splitEpisodesForPrompt(narrative);
+  return {
+    total: sorted.length,
+    hidden: split.hidden,
+    updatedAt: narrative?.updatedAt ?? null,
+    lastRun: narrative?.lastRun ?? null,
+    episodes: sorted.slice(0, 60).map((ep) => ({
+      id: ep.id,
+      date: ep.date,
+      conv: ep.conv || '',
+      title: ep.title || '',
+      text: String(ep.text ?? '').slice(0, 400),
+      covers: Array.isArray(ep.covers) ? ep.covers.length : 0,
+    })),
+  };
 }
 
 /** 已经被回忆覆盖的记录 id。 */
@@ -230,9 +271,9 @@ function recordForPrompt(record) {
     id: String(record.id),
     date: dateKey(timeOf(record.createdAt, Date.now())),
     conv: conversationOf(record) || undefined,
-    who: String(record.speaker || (Array.isArray(record.tags) && record.tags.includes('owner') ? '羽' : '群里')).slice(0, 20),
-    text: String(record.text ?? record.title ?? '').replace(/\s+/g, ' ').trim().slice(0, 220),
-    ...(record.botReply ? { reply: String(record.botReply).replace(/\s+/g, ' ').trim().slice(0, 220) } : {})
+    who: redactForOutbound(String(record.speaker || (Array.isArray(record.tags) && record.tags.includes('owner') ? '羽' : '群里')).slice(0, 20)),
+    text: redactForOutbound(String(record.text ?? record.title ?? '').replace(/\s+/g, ' ').trim().slice(0, 220)),
+    ...(record.botReply ? { reply: redactForOutbound(String(record.botReply).replace(/\s+/g, ' ').trim().slice(0, 220)) } : {})
   };
 }
 
@@ -400,12 +441,24 @@ export async function runNarration({ memoryDir, config = {}, now = Date.now(), d
     if (ep.conv) continue;
     ep.conv = resolveConvFallback(ep.covers, convById);
   }
+  // 模型输出落盘前也过一遍外发脱敏（P2-22）：模型可能把 prompt 里的号码/邮箱写进回忆。
+  for (const ep of episodes) {
+    ep.text = redactForOutbound(ep.text);
+    ep.title = redactForOutbound(ep.title);
+  }
   if (!episodes.length) {
     log('[叙事] 模型没给出可用的回忆（输出无法解析或 covers 全空）');
     return { ok: false, error: 'no-episodes', picked: records.length, raw: String(result?.text ?? '').slice(0, 300) };
   }
   const merged = mergeEpisodes(narrative, episodes, { max: cfg.maxEpisodes });
-  if (!dryRun) saveNarrative(memoryDir, { episodes: merged.episodes });
+  const lastRun = {
+    at: new Date().toISOString(),
+    added: merged.added,
+    picked: records.length,
+    total: merged.episodes.length,
+    usage: result?.usage ?? null,
+  };
+  if (!dryRun) saveNarrative(memoryDir, { episodes: merged.episodes, lastRun });
   return {
     ok: true,
     picked: records.length,
@@ -414,6 +467,7 @@ export async function runNarration({ memoryDir, config = {}, now = Date.now(), d
     total: merged.episodes.length,
     episodes: merged.episodes.slice(-merged.added),
     usage: result?.usage ?? null,
+    lastRun: dryRun ? null : lastRun,
     dryRun: Boolean(dryRun)
   };
 }

@@ -12260,9 +12260,27 @@ async function main() {
   // 所以这里不需要碰记忆卡本体，也不怕 DSH 重启丢状态。
   let memoryNarrativeTimer = null;
   let memoryNarrativeBusy = false;
+  /**
+   * B4（2026-10-30）：设置页的叙事开关写在 unified 配置（~/.dsh/surfcore/config.json）顶层
+   * `memoryNarrative`；兼容旧位置 `memoryCard.narrative`。桥接每轮 tick 读它覆盖仓库 config.json。
+   */
+  function unifiedNarrativeConfig() {
+    try {
+      const file = path.join(DSH_HOME, 'surfcore', 'config.json');
+      const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
+      const legacy = raw?.memoryCard?.narrative;
+      const merged = {
+        ...(legacy && typeof legacy === 'object' ? legacy : {}),
+        ...(raw?.memoryNarrative && typeof raw.memoryNarrative === 'object' ? raw.memoryNarrative : {}),
+      };
+      return Object.keys(merged).length ? merged : null;
+    } catch {
+      return null;
+    }
+  }
   async function memoryNarrativeTick() {
     if (memoryNarrativeBusy) return;
-    const nc = cfg.socialV2?.memoryNarrative ?? {};
+    const nc = { ...(cfg.socialV2?.memoryNarrative ?? {}), ...(unifiedNarrativeConfig() ?? {}) };
     if (nc.enabled === false) return;
     memoryNarrativeBusy = true;
     // 一轮里连着压好几批：以前一轮只压一批（14 条记录 → 3~5 条回忆）就睡 45 分钟，
@@ -12273,6 +12291,7 @@ async function main() {
     let picked = 0;
     let batches = 0;
     let total = 0;
+    let usage = null;
     try {
       for (let i = 0; i < maxBatches; i += 1) {
         const result = await runNarration({
@@ -12296,13 +12315,14 @@ async function main() {
         picked += result.picked || 0;
         added += result.added || 0;
         total = result.total || total;
+        usage = result.usage ?? usage;
         batches += 1;
         // 这批一条都没写成（模型没给可用条目）就别再空转，等下一轮。
         if (!result.added) break;
         await new Promise((resolve) => setTimeout(resolve, 1200));
       }
       if (added > 0) {
-        log(`[叙事] 记忆压缩：新增 ${added} 条回忆（${batches} 批 / 喂了 ${picked} 条记录，共 ${total} 条回忆）`);
+        log(`[叙事] 记忆压缩：新增 ${added} 条回忆（${batches} 批 / 喂了 ${picked} 条记录，共 ${total} 条回忆）${usage?.total_tokens ? `，本轮消耗 ${usage.total_tokens} tokens` : ''}`);
       }
     } catch (error) {
       log(`[叙事] 失败：${error?.message ?? error}`);
@@ -12313,9 +12333,9 @@ async function main() {
 
   function startMemoryNarrativeLoop() {
     if (memoryNarrativeTimer) return;
-    const nc = cfg.socialV2?.memoryNarrative ?? {};
+    const nc = { ...(cfg.socialV2?.memoryNarrative ?? {}), ...(unifiedNarrativeConfig() ?? {}) };
     if (nc.enabled === false) {
-      log('[叙事] 已关闭（socialV2.memoryNarrative.enabled=false）');
+      log('[叙事] 已关闭（memoryNarrative.enabled=false）');
       return;
     }
     // 启动后先等 90 秒再压：桥接刚起来时 DSH 也许还在拉会话，别抢资源。

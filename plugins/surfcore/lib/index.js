@@ -74,9 +74,9 @@ import {
   adminFromSources, adminSummary, projectAdminSave,
 } from '../../../src/admin-identity.js';
 import {
-  applyMemoryCardAction, compactMemoryCardNow, fullMemoryCardSnapshot, memoryCardIdle, memoryCardSnapshot,
+  applyMemoryCardAction, compactMemoryCardNow, forgetNarrativeEpisode, fullMemoryCardSnapshot, memoryCardIdle, memoryCardSnapshot,
   memoryCardStatusNow, notifyOwnerIfNeeded, restoreMemoryCardBackup, runMemoryCardMaintenance,
-  startMemoryCardTimer,
+  setNarrativeEnabled, startMemoryCardTimer,
 } from './memory-card.js';
 import { readWatchHistory } from '../tools/lib/watch-history.mjs';
 import { enrichWatchHistory } from '../tools/lib/watch-actions.mjs';
@@ -1111,6 +1111,19 @@ export function apply(ctx) {
       const result = await applyMemoryCardAction(action, body, { config });
       if (!result.ok) { json(res, 400, result); return; }
       json(res, 200, memoryCardSnapshot(config));
+      return;
+    }
+    // B4（2026-10-30）：叙事层可操作化——删除单条回忆 / 整层开关。
+    if (action === 'narrative-forget') {
+      const result = await forgetNarrativeEpisode(String(body.id ?? ''), { config });
+      if (!result.ok) { json(res, 400, result); return; }
+      json(res, 200, { ...memoryCardSnapshot(config), removedEpisode: result.removed });
+      return;
+    }
+    if (action === 'narrative-toggle') {
+      const result = setNarrativeEnabled(body.enabled === true);
+      if (!result.ok) { json(res, 400, result); return; }
+      json(res, 200, { ...memoryCardSnapshot(config), narrativeEnabled: result.enabled });
       return;
     }
     json(res, 400, { ok: false, error: '未知 action' });

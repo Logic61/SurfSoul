@@ -16,14 +16,14 @@ import { BACKUP_DIR, QQ_STATE_DIR, maskPath } from './paths.js';
 import {
   activeMemoryPaths, activePlatformStateDir, readCurrentCharacter,
 } from '../../../src/character-persona.js';
-import { backupFile, listBackups, readUnified, writeJsonAtomic, writeTextAtomic } from './store.js';
+import { backupFile, listBackups, readUnified, saveUnified, writeJsonAtomic, writeTextAtomic } from './store.js';
 import {
   DEFAULT_MEMORY_CARD_CONFIG, addManualMemory, archiveDecayedToFull, clearFirstMeeting,
   compactMemoryCard, createEmptyCard, designateFirstMeeting, fullMemoryCardStatus, loadMemoryCard,
-  maintainMemoryCard, markOwnerNotified, memoryCardStatus, mergeMemories, normalizeMemoryCardConfig,
+  maintainMemoryCard, markOwnerNotified, memoryCardStatus, memoryNarrativeSummary, mergeMemories, normalizeMemoryCardConfig,
   readAllFullRecords, readInboxSince, readMemoryNarrative, recallFullMemory, renderFullMemoryCard, renderMemoryCard,
-  saveFullMemoryCard, saveMemoryCardOutputs, shouldNotifyOwner,
-} from '../../../src/memory-card.js?rev=20261030-memfix-b';
+  saveFullMemoryCard, saveMemoryCardOutputs, saveMemoryNarrative, shouldNotifyOwner,
+} from '../../../src/memory-card.js?rev=20261030-memfix-c';
 
 const EMPTY_CONFIG = normalizeMemoryCardConfig({});
 const TICK_MS = 10 * 60 * 1000;
@@ -235,6 +235,12 @@ export function memoryCardSnapshot(config = memoryCardConfig()) {
       };
     })(),
     records,
+    // 叙事层只读面板 + 开关状态（B4，2026-10-30）：用户能看见「我们一起经历过的」、
+    // 删除某条回忆（释放它覆盖的原记录），也能关掉整层。
+    narrative: {
+      ...memoryNarrativeSummary(narrative),
+      enabled: readUnified().config.memoryNarrative?.enabled !== false,
+    },
     backups: listBackups(200).filter((item) => backupBelongsToCurrentCharacter(item.name)
       && !item.name.startsWith('memory-card-full')
       && !item.name.startsWith('memory-card-prompt')).slice(0, 80),
@@ -482,6 +488,40 @@ export function restoreMemoryCardBackup(name, { config = memoryCardConfig(), now
     promptCache = new Map();
     return { ok: true, warnings, status: memoryCardStatusNow(config) };
   });
+}
+
+/** 删除一条叙事回忆（P2-4/B4）：被它覆盖的原记录会重新出现在卡片/提示词里，记忆本体不受影响。 */
+export function forgetNarrativeEpisode(id, { config = memoryCardConfig(), now = Date.now() } = {}) {
+  return serialize(async () => {
+    const dir = pathsNow().dir;
+    const narrative = readMemoryNarrative(dir);
+    const target = String(id ?? '');
+    const before = narrative.episodes.length;
+    const episodes = narrative.episodes.filter((episode) => episode.id !== target);
+    if (episodes.length === before) return { ok: false, error: '回忆不存在（可能已被删除或重新压缩过）' };
+    if (!saveMemoryNarrative(dir, { episodes, lastRun: narrative.lastRun ?? null })) {
+      return { ok: false, error: '写叙事文件失败（磁盘/权限）' };
+    }
+    // 覆盖关系变了：重渲染输出，让被释放的原记录重新出现。
+    const card = readCardSafe();
+    saveMemoryCardOutputs(pathsNow(), card, config, now);
+    promptCache = new Map();
+    return { ok: true, removed: before - episodes.length, status: memoryCardStatusNow(config) };
+  });
+}
+
+/**
+ * 叙事层总开关（B4）：写 unified 配置的顶层 memoryNarrative；
+ * 桥接每轮 tick 会读 ~/.dsh/surfcore/config.json 覆盖仓库 config.json 的 socialV2.memoryNarrative。
+ */
+export function setNarrativeEnabled(enabled) {
+  try {
+    const next = enabled !== false;
+    const result = saveUnified({ memoryNarrative: { enabled: next } });
+    return { ok: true, enabled: next, backupError: result?.backupError ?? null };
+  } catch (error) {
+    return { ok: false, error: String(error?.message ?? error) };
+  }
 }
 
 /** B站调度器 / 调试用：读现成的 B站 注入块（mtime 缓存，避免每次重复读盘）。 */

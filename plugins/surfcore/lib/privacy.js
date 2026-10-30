@@ -57,6 +57,40 @@ const SAFE_URL_HOSTS = new Set([
 const ZERO_WIDTH = /[\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/g;
 const CONTROL = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g;
 
+/**
+ * 数字变体归一（P1-8，2026-10-30）：全角数字、数字之间夹空格/连字符/点/下划线，
+ * 旧正则一个都拦不住（实测 6 类全部 PASS）。做法：NFKC 归一半角，再把「数字之间的分隔符」
+ * 去掉后重新扫一遍；只在检测侧归一，不改写原文（脱敏仍走原文正则/整行丢弃）。
+ */
+export function compactForScan(input) {
+  return String(input ?? '')
+    .normalize('NFKC')
+    .replace(ZERO_WIDTH, '')
+    .replace(CONTROL, '')
+    // 先给常见日期打码，避免把 2026-10-30 归一成 20261030 后被当成「6+ 位裸数字」误伤。
+    .replace(/\b(?:19|20)\d{2}[-/.]\d{1,2}[-/.]\d{1,2}\b/g, '[日期]')
+    .replace(/(?<=\d)[\s\-_.·、,，](?=\d)/g, '');
+}
+
+/** 变体扫描用：裸数字放宽到 6–20 位（13+ 位手机号/长账号旧规则完全漏掉）。 */
+const VARIANT_PATTERNS = [
+  { kind: 'cn-id', re: /\b[1-9]\d{5}(?:19|20)\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])\d{3}[\dXx]\b/g, label: '身份证号', severe: true },
+  { kind: 'bank-card', re: /\b(?:62|4|5)\d{15,18}\b/g, label: '银行卡号', severe: true },
+  { kind: 'phone', re: /(?<!\d)1[3-9]\d{9}(?!\d)/g, label: '手机号', severe: true },
+  { kind: 'bare-long-number', re: /(?<!\d)\d{6,20}(?!\d)/g, label: '疑似账号/号码', severe: true },
+];
+
+/** 指令样式文本：跨平台搬运来的「数据」里如果出现这些，当指令执行就完了（P1-8）。 */
+const INSTRUCTION_RE = /忽略(?:以上|之前|前面|上述)|ignore\s+(?:all\s+)?(?:previous|above)|system\s*prompt|系统提示词?|你现在(?:是|扮演)|从现在开始你|请(?:执行|照做|回复|忽略)|必须(?:执行|回复)|转发(?:这条|给)|点击(?:链接|这个)|访问(?:这个)?链接|disregard\s+(?:previous|above)/i;
+
+/** 丢掉「指令样式」的行；正常群聊/标题不受影响。 */
+export function stripInstructionLines(input) {
+  return String(input ?? '')
+    .split('\n')
+    .filter((line) => !INSTRUCTION_RE.test(line))
+    .join('\n');
+}
+
 function collect(text, patterns) {
   const hits = [];
   for (const pattern of patterns) {
@@ -82,16 +116,20 @@ export function scanText(input) {
   const secrets = collect(text, SEVERE_SECRET);
   const pii = collect(text, PII);
   const contacts = collect(text, CONTACT);
+  // P1-8：原文扫不到的变体（全角/夹空格/13+ 位）在归一文本上再扫一遍；命中标记 variant。
+  const compact = compactForScan(text);
+  const variant = collect(compact, VARIANT_PATTERNS).map((hit) => ({ ...hit, variant: true }));
   const privateTopic = PRIVATE_TOPIC.test(text);
-  const hits = [...secrets, ...pii, ...contacts];
+  const hits = [...secrets, ...pii, ...contacts, ...variant];
   return {
     text,
     hits,
     secrets,
     pii,
     contacts,
+    variant,
     privateTopic,
-    severe: secrets.length > 0 || pii.some((h) => h.severe) || contacts.some((h) => h.severe) || privateTopic,
+    severe: secrets.length > 0 || pii.some((h) => h.severe) || contacts.some((h) => h.severe) || variant.length > 0 || privateTopic,
   };
 }
 
@@ -132,6 +170,8 @@ function redactNumbers(text) {
   }
   // 5 位以上的裸数字仍可能是 QQ / mid / 手机号：统一打码，保留年份与 BV 号。
   out = out.replace(/(?<![\w.\/-])\d{5,12}(?![\w.\/-])/g, (num) => (/^(?:19|20)\d{2}$/.test(num) ? num : '[编号已隐藏]'));
+  // 13 位以上（超长手机号/账号）也要打码（P1-8）。
+  out = out.replace(/(?<![\w.\/-])\d{13,20}(?![\w.\/-])/g, '[编号已隐藏]');
   return out;
 }
 
@@ -146,13 +186,15 @@ export function sanitizeText(input, options = {}) {
   const raw = normalizeText(input);
   if (!raw) return { ok: false, text: '', dropped: true, reason: 'empty', hits: [] };
   const scan = scanText(raw);
-  if (scan.severe && dropUnsafeLines) {
+  // 变体命中无法安全按原文脱敏（数字被分隔符拆开），整行丢弃最安全（P1-8）。
+  if (scan.severe && (dropUnsafeLines || scan.variant.length)) {
     return { ok: false, text: '', dropped: true, reason: scan.privateTopic ? 'private-topic' : 'secret-or-pii', hits: scan.hits };
   }
   let text = sanitizeUrl(raw);
   for (const pattern of SEVERE_SECRET) text = text.replace(pattern.re, '[已隐藏]');
   for (const pattern of PII) text = text.replace(pattern.re, '[已隐藏]');
   if (!keepNumbers) text = redactNumbers(text);
+  text = stripInstructionLines(text);
   text = text.replace(/\s+/g, ' ').trim();
   if (!text) return { ok: false, text: '', dropped: true, reason: 'redacted-empty', hits: scan.hits };
   if (text.length > maxChars) text = `${text.slice(0, maxChars)}…`;
@@ -189,7 +231,9 @@ export function groupIdOf(key) {
 export function isPublicGroupMessage({ key, groupIds, text, senderId, ownerId, includeOwner = false }) {
   if (!isGroupKey(key)) return { ok: false, reason: '不是 QQ 群会话（私信/未知一律不搬运）' };
   const groupId = groupIdOf(key);
-  if (Array.isArray(groupIds) && groupIds.length && !groupIds.includes(groupId)) {
+  // P2-23（2026-10-30）：旧实现「白名单为空 = 全放行」，等于 fail-open；空名单必须拒绝搬运。
+  if (!Array.isArray(groupIds) || !groupIds.length) return { ok: false, reason: '群白名单为空（拒绝搬运）' };
+  if (!groupIds.includes(groupId)) {
     return { ok: false, reason: '群不在白名单' };
   }
   if (ownerId && String(senderId) === String(ownerId) && !includeOwner) {

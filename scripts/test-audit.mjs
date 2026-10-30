@@ -75,8 +75,12 @@ const tests = [
   'test-memory-card.mjs', 'test-memory-card-wiring.mjs',
   // 备份 / 恢复 / 轮转 / stats 重建（P1-10 / P2-7 / P2-8 / P2-9）。
   'test-memory-card-backup.mjs',
+  // 叙事层的可见 / 可操作 / 开关（B4）。
+  'test-memory-card-narrative-api.mjs',
   // 叙事层（2026-10-30 新增）：文件容错 / 注入分档 / hidden 覆盖 / 不可信模型输出 / 渲染集成。
   'test-memcard-narrative.mjs',
+  // 隐私纵深（P1-8/P2-22/P2-23）：数字变体 / 指令清洗 / 白名单 fail-closed / 外发脱敏。
+  'test-privacy-hardening.mjs',
   // 角色人格：多角色目录隔离 / 切换 epoch / 快照回档 / 旧数据迁移（含凭证不进角色包）。
   'test-character-store.mjs',
   // B站 工具链路径：有角色时行为账本进角色包，cookie/表情包仍在账号目录。

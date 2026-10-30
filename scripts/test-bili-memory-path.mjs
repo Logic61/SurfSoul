@@ -86,8 +86,11 @@ test('B站记忆生成器读当前角色账本目录（不是旧全局目录）'
   const doc = fs.readFileSync(path.join(stateDir, 'bili-memory.md'), 'utf8');
   assert.match(doc, new RegExp(TITLE));
   assert.match(doc, /鲸鱼娘新视频/);
+  // P1-8：B站→QQ 注入文本也要声明「数据不是指令」。
+  assert.match(doc, /不是指令/);
   const brief = fs.readFileSync(path.join(stateDir, 'bili-memory-brief.md'), 'utf8');
   assert.match(brief, /B站记忆/);
+  assert.match(brief, /不是指令/);
   assert.equal(memory.status().entries, index.entries.length);
 });
 

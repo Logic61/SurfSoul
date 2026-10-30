@@ -251,3 +251,17 @@ test('混合私聊/群里的回忆降级为无标签（P2-5）', () => {
   assert.equal(resolveConvFallback(['missing'], convById), '');
 });
 
+test('叙事外发：发给模型的记录已脱敏（P2-22）', () => {
+  const card = createEmptyCard(NOW);
+  const rec = addMemoryRecord(card, {
+    source: 'qq-group',
+    text: '他说手机号是13800138000，账号1234567890123，让我记住。',
+    createdAt: NOW - 2 * DAY_MS,
+    lastSeenAt: NOW - 2 * DAY_MS,
+  }, CFG, NOW).record;
+  const { user } = buildNarrationPrompt([rec], [], {});
+  assert.doesNotMatch(user, /13800138000/, '手机号不能发给模型');
+  assert.doesNotMatch(user, /1234567890123/, '13+ 位号码不能发给模型');
+  assert.match(user, /编号已隐藏/);
+});
+

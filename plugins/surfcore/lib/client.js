@@ -2808,8 +2808,12 @@ F("socialV2.voice.ffmpegPath", "ffmpeg 路径", "留空走 PATH", "text", { wide
       const [selected, setSelected] = useState([]);
       const [mergeTitle, setMergeTitle] = useState("");
       const [mergePinned, setMergePinned] = useState(true);
+      // B4（2026-10-30）：记忆列表可搜索/分页（旧实现只显示前 30 条，用户找不到要改的记忆）。
+      const [recordQuery, setRecordQuery] = useState("");
+      const [recordPage, setRecordPage] = useState(1);
       if (!data) return h("div", { className: "qbw-card" }, h("div", { className: "qbw-hint" }, "记忆卡读取中…"));
       const status = data.status ?? {};
+      const narrative = data.narrative ?? {};
       // 关键：表单必须绑到**可编辑的 unified.memoryCard**，不能绑服务端快照 data.config。
       // 旧写法导致输入一个字符后 React 又用旧快照值覆盖 → 输入框看起来完全没反应。
       const config = {
@@ -2826,6 +2830,17 @@ F("socialV2.voice.ffmpegPath", "ffmpeg 路径", "留空走 PATH", "text", { wide
       const needsAttention = level > 0 && level > (Number(status.acknowledgedLevel) || 0);
       const selectedRecords = (data.records ?? []).filter((record) => selected.includes(record.id));
       const selectedHasNonOwner = selectedRecords.some((record) => !record.tags?.includes('owner'));
+      const recordQueryTrim = recordQuery.trim();
+      const filteredRecords = (() => {
+        const list = data.records ?? [];
+        if (!recordQueryTrim) return list;
+        const q = recordQueryTrim.toLowerCase();
+        return list.filter((record) => `${record.title ?? ""} ${record.text ?? ""} ${record.speaker ?? ""}`.toLowerCase().includes(q));
+      })();
+      const recordPageSize = 30;
+      const recordPageCount = Math.max(1, Math.ceil(filteredRecords.length / recordPageSize));
+      const recordSafePage = Math.min(Math.max(1, recordPage), recordPageCount);
+      const pageRecords = filteredRecords.slice((recordSafePage - 1) * recordPageSize, recordSafePage * recordPageSize);
       const act = async (action, extra = {}) => {
         setBusy(`mc-${action}`);
         try {
@@ -2834,7 +2849,8 @@ F("socialV2.voice.ffmpegPath", "ffmpeg 路径", "留空走 PATH", "text", { wide
             : action === "compact" ? `✓ 已压缩（降级 ${r.steps ?? 0} 档）`
               : action === "merge-memories" ? `✓ 已合并 ${r.merged ?? 0} 条为一个事件`
                 : action === "set-first-meet" ? `✓ 已设为初次相遇（${r.merged ?? 1} 条）`
-                  : (r.staged ? "✓ 已下载，退出 DSH 后自动应用" : "✓ 已更新"));
+                  : action === "narrative-forget" ? `✓ 已删除回忆（释放 ${r.removedEpisode ?? 1} 条覆盖记录）`
+                    : (r.staged ? "✓ 已下载，退出 DSH 后自动应用" : "✓ 已更新"));
           await reload();
           onChanged?.();
         } catch (e) { toast(`✗ ${e.message}`); } finally { setBusy(""); }
@@ -2971,8 +2987,33 @@ F("socialV2.voice.ffmpegPath", "ffmpeg 路径", "留空走 PATH", "text", { wide
           h(Row, { label: "容量告警私聊管理员", hint: "80/90/100% 时私聊 ownerQQ；同一档 12 小时只发一次" },
             h("input", { className: "qbw-switch", type: "checkbox", checked: config.notifyOwner !== false, onChange: (e) => setConfig("notifyOwner", e.target.checked) })),
           h(Row, { label: "B站 提示词带 QQ 记忆", hint: "默认关：QQ 的私事不跨平台（隐私红线）" },
-            h("input", { className: "qbw-switch", type: "checkbox", checked: config.includeQqInBili === true, onChange: (e) => setConfig("includeQqInBili", e.target.checked) }))),
-        h(Section, { title: "最近记忆", note: `${data.records?.length ?? 0} 条（按重要度）`, collapsible: false },
+            h("input", { className: "qbw-switch", type: "checkbox", checked: config.includeQqInBili === true, onChange: (e) => setConfig("includeQqInBili", e.target.checked) })),
+          // B4（2026-10-30）：叙事层可见/可关。开关写 unified 配置顶层 memoryNarrative，
+          // 桥接每轮 tick 读它覆盖仓库 config.json 的 socialV2.memoryNarrative。
+          h(Row, { label: "叙事层（我们一起经历过的）", hint: "开 = 桥接每 45 分钟把旧记录压成回忆（调用 deepseek-flash，记忆内容会发给模型）；关 = 只保留逐条记录" },
+            h("input", { className: "qbw-switch", type: "checkbox", checked: (unified?.memoryNarrative?.enabled ?? data.narrative?.enabled) !== false, onChange: (e) => setUnified(["memoryNarrative", "enabled"], e.target.checked) }))),
+        h(Section, { title: "我们一起经历过的（叙事层）", note: `${narrative.total ?? 0} 条回忆 · hidden ${narrative.hidden ?? 0} · ${narrative.updatedAt ? fmtTime(narrative.updatedAt) : "还没生成"}`, collapsible: false },
+          h("div", { className: "qbw-infobox" },
+            "桥接把旧记录压成回忆；被回忆 covers 覆盖的原记录不再逐条出现。删一条回忆会释放它覆盖的原记录（记忆本体和全量档不受影响）。",
+            narrative.lastRun?.at ? h("div", { className: "qbw-hint", style: { marginTop: "4px" } },
+              `上次压缩：${fmtTime(narrative.lastRun.at)} · 新增 ${narrative.lastRun.added ?? 0} 条 · 消耗 ${narrative.lastRun.usage?.total_tokens ?? "?"} tokens`) : null,
+            narrative.enabled === false ? h("div", { className: "qbw-warnbox" }, "叙事层当前关闭：打开上面「叙事层」开关并保存后，桥接下一轮恢复压缩。") : null),
+          (narrative.episodes ?? []).length
+            ? (narrative.episodes ?? []).slice(0, 8).map((episode) => h("div", { key: episode.id, className: "qbw-item" },
+              h("div", null,
+                h("div", { className: "qbw-label" }, `${fmtDate(episode.date)}${episode.conv ? ` [${episode.conv}]` : ""} ${episode.title || ""}`),
+                h("div", { className: "qbw-rec-text" }, episode.text),
+                h("div", { className: "qbw-hint" }, `覆盖 ${episode.covers ?? 0} 条原记录`)),
+              h(Btn, {
+                kind: "qbw-btn2",
+                onClick: async () => {
+                  if (!confirm(`删除这条回忆？它覆盖的 ${episode.covers ?? 0} 条原记录会重新出现在记忆卡/提示词里。`)) return;
+                  await act("narrative-forget", { id: episode.id });
+                },
+                disabled: !!busy,
+              }, "删除回忆")))
+            : h("div", { className: "qbw-hint" }, "还没有回忆：桥接会在有足够旧记录后自动压缩（或已关闭叙事层）。")),
+        h(Section, { title: "最近记忆", note: `${filteredRecords.length} 条${recordQueryTrim ? `（筛选自 ${data.records?.length ?? 0} 条）` : "（按重要度）"}`, collapsible: false },
           h("div", { className: "qbw-infobox" },
             h("b", null, "初次相遇："),
             data.firstMet?.source === "manual" ? "手动指定" : "自动（最早一条主人互动）",
@@ -2998,7 +3039,17 @@ F("socialV2.voice.ffmpegPath", "ffmpeg 路径", "留空走 PATH", "text", { wide
             h("span", { className: "qbw-hint" }, "合并会移除原记录（全量卡已保留），只留一个事件；可稍后取消置顶")),
           h("div", { className: "qbw-hint", style: { marginBottom: "6px" } },
             `「最初」是独立判定：只算和主人的互动，从首次互动起 30 天窗口；前 10 天最容易被标为最初，之后逐渐降低。当前标记 ${status.counts?.initial ?? 0} 条。`),
-          (data.records ?? []).slice(0, 30).map((record) => h("div", { key: record.id, className: "qbw-rec" },
+          h("div", { className: "qbw-search", style: { marginBottom: "6px" } },
+            h("input", {
+              className: "qbw-input", placeholder: "搜索记忆（标题 / 正文 / 说话人）",
+              value: recordQuery,
+              onChange: (e) => { setRecordQuery(e.target.value); setRecordPage(1); },
+              style: { flex: 1, minWidth: "240px" },
+            }),
+            h("span", { className: "qbw-hint" }, `第 ${recordSafePage} / ${recordPageCount} 页 · 共 ${filteredRecords.length} 条`),
+            h(Btn, { kind: "qbw-btn2", onClick: () => setRecordPage((page) => Math.max(1, page - 1)), disabled: recordSafePage <= 1 }, "上一页"),
+            h(Btn, { kind: "qbw-btn2", onClick: () => setRecordPage((page) => Math.min(recordPageCount, page + 1)), disabled: recordSafePage >= recordPageCount }, "下一页")),
+          pageRecords.map((record) => h("div", { key: record.id, className: "qbw-rec" },
             h("div", null,
               h("div", { className: "qbw-rec-title" },
                 h("input", {
