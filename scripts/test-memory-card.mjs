@@ -802,5 +802,54 @@ test('inbox 水位：只消费新行、轮转不丢未读、重读不抬高 reca
   assert.equal(readInboxSince(paths, rotated.nextCursor).lines.length, 0);
 });
 
+test('注入预算分层：叙事 ≤40%，今天/桌宠的原始事实保底（P1-3）', () => {
+  const card = createEmptyCard(NOW);
+  const old = [];
+  for (let i = 0; i < 20; i += 1) {
+    old.push(addMemoryRecord(card, {
+      source: 'qq-group',
+      text: `老记录 ${i}：很久以前群里聊过的事情，内容不短也不长，足够占一点空间。`,
+      createdAt: NOW - (30 + i) * DAY_MS,
+      lastSeenAt: NOW - (30 + i) * DAY_MS,
+    }, CFG, NOW).record);
+  }
+  for (let i = 0; i < 5; i += 1) {
+    addMemoryRecord(card, {
+      source: 'qq-group',
+      text: `今天新聊的 ${i}：这是今天真实发生、必须保留的事。`,
+      createdAt: NOW - i * 60_000,
+      lastSeenAt: NOW - i * 60_000,
+    }, CFG, NOW);
+  }
+  ingestInboxLines(card, [JSON.stringify({
+    at: new Date(NOW).toISOString(), platform: 'pet', kind: 'private', sender: '主人',
+    isOwner: true, private: true, direct: true, conversationKey: 'pet',
+    text: '桌宠预算分层验证：这句话必须留下',
+  })], CFG, NOW);
+
+  const narrative = {
+    episodes: old.map((record, i) => ({
+      id: `ep_budget_${i}`, date: '2026-09-01', conv: '群里', title: `旧事 ${i}`,
+      text: `旧事回忆正文 ${i}，写得比较长，用来把叙事预算占满。`,
+      covers: [record.id], at: NOW - i * 1000,
+    })),
+  };
+  const out = renderMemoryCard(card, { config: CFG, platform: 'qq', maxChars: 900, now: NOW, narrative });
+  assert.match(out, /## 今天聊过的/, '今天栏必须还在');
+  assert.match(out, /今天新聊的 0/, '今天的原始事实不能被叙事挤掉');
+  assert.match(out, /桌宠预算分层验证/, '桌宠原始事实不能被叙事挤掉');
+  assert.ok(out.length <= 900, `注入块超预算：${out.length} > 900`);
+
+  // 叙事块字符数 ≤ 40% 预算（标题另算，留 40 字余量）。
+  const start = out.indexOf('## 我们一起经历过的');
+  assert.ok(start >= 0, '叙事段应出现');
+  const next = out.indexOf('\n## ', start + 1);
+  const narrativeBlock = next > 0 ? out.slice(start, next) : out.slice(start);
+  assert.ok(narrativeBlock.length <= Math.floor(900 * 0.4) + 40, `叙事块 ${narrativeBlock.length} 字，超过 40% 预算`);
+  // 旧记录被回忆覆盖，不应再逐条出现。
+  assert.doesNotMatch(out, /老记录 3：/);
+});
+
+
 
 

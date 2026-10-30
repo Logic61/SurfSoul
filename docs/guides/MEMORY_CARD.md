@@ -27,14 +27,15 @@ B站 调度器每次醒来的统一上下文 = 人设卡 + 管理员 + 身份对
 
 | 文件 | 作用 | 谁写 |
 | --- | --- | --- |
-| `memory-card.json` | **唯一真相**：衰减记录、重要度、清晰度、告警状态 | 插件宿主（唯一写者） |
-| `memory-card.md` | 完整、给人看的衰减卡（容量按它算） | 插件宿主 |
+| `memory-card.json` | **唯一真相**：衰减记录、重要度、清晰度、告警状态、inbox 读取水位 | 插件宿主（唯一写者） |
+| `memory-card.md` | 完整、给人看的衰减卡（**容量按它算：含叙事层**） | 插件宿主 |
 | `memory-card-prompt-qq.md` | 给 QQ 每条提示词的裁剪版 | 插件宿主 |
 | `memory-card-prompt-bili.md` | 给 B站 每次醒来的裁剪版（隐私过滤后） | 插件宿主 |
 | `memory-card-full.jsonl` | **全量存档**：一行一条、只追加；所有记录 `clarity=vivid`，不衰减 | 插件宿主 |
 | `memory-card-full-stats.json` | 全量卡计数/字节数索引（容量按它算，不扫全档案） | 插件宿主 |
 | `memory-card-full.md` | 全量卡人看版（导出/查看用） | 插件宿主 |
-| `memory-inbox.jsonl` | 桥接 append 的原始 QQ 事件（最多 1MB，轮转 `.1`）；桌宠对话也追加到这里（`platform=pet`） | QQ 桥接 / 桌宠插件（只追加） |
+| `memory-card-narrative.json` | **叙事层**：桥接把散记录压成「我们一起经历过的」，插件渲染时只读 | QQ 桥接（调 deepseek-flash） |
+| `memory-inbox.jsonl` | 桥接 append 的原始 QQ 事件（最多 1MB，轮转 `.1` 并写 `.rotated` 标记）；桌宠对话也追加（`platform=pet`） | QQ 桥接 / 桌宠插件（只追加） |
 
 - **QQ 桥接**（独立进程）不写卡：它只把「主人消息 / 直接对她说的话 / 有情绪的公开发言」追加到 inbox，
   并在每条提示词里读现成的 `memory-card-prompt-qq.md`（按 mtime 缓存）。
@@ -43,13 +44,19 @@ B站 调度器每次醒来的统一上下文 = 人设卡 + 管理员 + 身份对
   设置 → 桌宠 →「把桌宠对话写进记忆卡」可关；记忆卡总开关关掉时不写。
   桌宠记录 `platform=pet`、`scope=pet`，默认**不进 B站 注入块**；提示词里单独一段「## 桌宠（私下相处）」。
 - **插件宿主**（DSH 进程）启动 8 秒后整理一次，之后每 10 分钟一次：
-  摄取 inbox + `state/bili-memory.json` → **先归档全量卡** → 每日遗忘 → 超 100% 自动压缩 → 写输出 → 容量告警。
-  「立即整理」的提示会分别报告新增 QQ / 桌宠 / B站 条数。
+  按 `card.meta.inboxCursor` 字节水位增量读 inbox + `state/bili-memory.json` → **先归档全量卡 → 再按条数上限淘汰**
+  → 每日遗忘 → 超 100% 自动压缩 → 写输出 → 容量告警。水位在维护成功落盘后才推进，重读不会重复入库。
+  「立即整理」的提示会分别报告新增 QQ / 桌宠 / B站 / 淘汰条数。
+- **叙事层**由桥接进程每 45 分钟跑一次（`socialV2.memoryNarrative`，配置在仓库根 `config.json`）：
+  把 90 分钟前的零散记录交给 deepseek-flash 压成「我们一起经历过的」，写 `memory-card-narrative.json`；
+  插件只读该文件渲染（回忆里 `covers` 覆盖的原记录不再逐条出现）。叙事文件丢了/坏了只影响这一层，重新压即可。
+  注意：**这一层会把聊天记录发给模型**（脱敏规则外发前会再说明，见 §11 与 P2 修复项）。
 - **B站 调度器** 只读 `memory-card-prompt-bili.md`（mtime 缓存），不解析 JSON，也不读全量卡。
-- 只有插件写卡，所以不存在两个进程同时改 JSON 的覆盖问题；桥接只 append。
+- 只有插件写衰减卡，所以不存在两个进程同时改 JSON 的覆盖问题；桥接只 append inbox，并负责写叙事层。
 - 写盘是原子写（临时文件 + rename）；每日整理前备份衰减卡；全量卡是 append-only JSONL，**不整份备份**（只备份很小的 stats 文件）。
-- **归档时机**：`archiveDecayedToFull()` 在衰减/压缩/遗忘**之前**执行，只 append 新行到 `memory-card-full.jsonl`；
-  衰减卡记录追加成功后才写 `fullArchivedAt`，避免「标记了但没写进去」。全量卡只增不删。
+- **归档时机**：`archiveDecayedToFull()` 在衰减/压缩/遗忘/条数淘汰**之前**执行，只 append 新行到 `memory-card-full.jsonl`；
+  衰减卡记录追加成功后才写 `fullArchivedAt`，避免「标记了但没写进去」。全量卡只增不删；
+  `trimMemoryCard()` 只淘汰已归档记录，卡满时新记忆绝不会在归档前被删。
 - **QQ 对话记两边**：桥接既写主人/群友消息，也写她自己的出站消息（`isSelf`）。
   插件优先把她的回复并进最近一条主人记录（`botReply`，渲染成「主人：… → 她回：…」）；
   找不到对应主人记录时（例如群聊主动发言）才单独生成一条 `qq-self` 记忆。
@@ -183,9 +190,27 @@ retention = importance
 
 ---
 
+## 5.5 叙事层（「我们一起经历过的」，2026-10-30 在途）
+
+- **目的**：把逐条聊天记录压成回忆，让注入块读起来像「经历」而不是工单。真实卡上当前 91 条回忆覆盖约 81% 记录。
+- **所有权**：`memory-card-narrative.json` 由 QQ 桥接写（每 45 分钟一次、单轮最多 6 批、只压 90 分钟前的记录），
+  插件只读该文件渲染。单独一个文件，丢了/坏了重新压即可，不影响记忆本体与衰减。
+- **渲染**：最近 16 条回忆写全文、再 40 条只留标题，其余进入 hidden；回忆 `covers` 命中的原记录不再逐条出现。
+  ⚠️ 已知缺口（批次 B 修复）：hidden 段的 covers 还没参与抑制；预算紧张时叙事会挤掉「今天/桌宠」原始事实。
+  在修完前不要把这一层当稳定契约。
+- **成本/隐私**：每批压缩调用 deepseek-flash（默认 `maxTokens=4000`、`timeoutMs=120000`），会把记录文本（已脱敏）
+  发给模型；开关 `socialV2.memoryNarrative.enabled` 在**仓库根 `config.json`**，不是 `~/.dsh/surfcore/config.json`。
+- **上下文**：桥接只读现成的 `memory-card.md` / `prompt-qq.md`，不解析叙事 JSON；插件渲染时用
+  `coveredRecordIds()` 摘掉已被回忆覆盖的原记录。
+
+---
+
 ## 6. 容量与告警（80% / 90% / 100%）
 
-- **容量** = 完整 `memory-card.md` 的字符数（含标题、分区、记录行）。
+- **容量口径只有一个**：`memoryCardStatus().chars` = 完整 `memory-card.md` 的字符数（含标题、分区、记录行、**叙事层**）。
+  写盘、容量条、告警、自动压缩全部用同一份渲染（2026-10-30 修掉「状态 32,740 / 磁盘 16,243 / 注入 5,721」三本账）。
+- **注入量另看** `status.promptChars.qq / .bili`：它等于磁盘 `memory-card-prompt-*.md` 的实际字符数，
+  和模型真正看到的一致；不要拿 `chars` 去猜注入量。
 - 上限 `maxChars` 默认 **0 = 无上限**；正数只是软上限，不再限制到 100000。无上限时用 `warnChars`（默认 60000）在 80/90/100% 只告警。
 - 三档告警：`≥80%` 提醒、`≥90%` 严重、`≥100%` 已满。
 - `≥100%` 且 `autoCompact=true`：自动压缩到 90%，但**告警仍按 100% 保留**（用户仍能看到「刚满过」）。
@@ -193,7 +218,8 @@ retention = importance
   1. DSH 设置 → SurfCore：页面每 60 秒查一次，80% 以上直接弹窗（立即压缩 / 2 小时后再提醒 / 本次不再提醒）；
   2. 「记忆」页顶部永远有容量条与警告框；
   3. 可选：QQ 私聊管理员（`notifyOwner`，同一档 12 小时一次；桥接侧还有 10 分钟节流）。只发给 `ownerQQ`，不发群。
-- 压缩不会动 `pinned` 和主人重要记忆（≥ `minOwnerImportance`）；只把「不重要 → 老 → 已经模糊」的记录一档一档降级。
+- 压缩不会动 `pinned` 和主人重要记忆（≥ `minOwnerImportance`）；只把「不重要 → 老 → 已经模糊」的记录一档一档降级；
+  压缩的基准渲染和 capacity 同一口径（含叙事），所以不会因为「被回忆覆盖的记录其实不在可见卡里」而多删真记忆。
 - **全量卡另有一套上限**：`fullMaxBytes` 默认 10GB（0 = 不限制）、`fullMaxRecords` 默认 0（不限制）。
   超过只在控制台告警，**绝不自动删除、压缩或模糊**——全量卡是“全量”的，宁可提示导出/备份。
 - 全量卡存储是 **append-only `memory-card-full.jsonl`**（一行一条，只追加）+ `memory-card-full-stats.json`；
@@ -225,6 +251,7 @@ retention = importance
 | --- | --- | --- |
 | `enabled` | true | 关掉后不再摄取，并清空两份注入块（文件保留） |
 | `maxChars` | 0（无上限） | 整张卡字数软上限；0 = 不限制 |
+| `warnChars` | 60000 | 无硬上限时的告警参照（80/90/100%） |
 | `injectMaxChars.qq` | 2200 | 每条 QQ 提示词最多带多少记忆 |
 | `injectMaxChars.bili` | 2000 | B站 每次醒来最多带多少记忆 |
 | `recentDays` | 7 | 最近 N 天保持「清楚」 |
@@ -238,6 +265,10 @@ retention = importance
 | `maxRecords` | 600 | 衰减卡 JSON 记录条数上限 |
 | `fullMaxBytes` | 10GB | 全量卡硬上限（按 JSONL 字节数；0 = 不限制，超过只告警） |
 | `fullMaxRecords` | 0 | 全量卡记录条数上限（0 = 不限制） |
+| `fullMarkdownMaxBytes` | 5MB | 档案超过这个大小就不再生成全量 md 导出 |
+
+> 叙事层不在 `memoryCard` 段里：它配置在仓库根 `config.json` 的 `socialV2.memoryNarrative`
+> （`enabled` / `minAgeMinutes` / `maxEpisodes` / `maxEpisodesInPrompt` / `model` / `maxTokens` / `timeoutMs`）。
 
 控制台「记忆」页可直接改这些字段（保存后立刻重渲染注入块）：
 - **衰减卡字数上限**在容量条下方直接输入（0 = 无上限，正数 = 软上限）；旁边是**容量警告字数**（默认 60000，0 = 不告警）；
@@ -273,9 +304,13 @@ QQ 桥接侧还有：
 ## 10. 怎么验证
 
 ```bash
-npm run test:memory-card      # 规则引擎：评分 / 遗忘 / 压缩 / 容量 / 隐私 / 全量归档 / 幂等
+npm run test:memory-card      # 规则引擎 29 项：评分 / 遗忘 / 压缩 / 容量口径 / 归档顺序 / inbox 水位 / 隐私 / 幂等
 npm run test:memory-card-wiring
-npm run test:audit           # 含接线回归 test-memory-card-wiring.mjs
+npm run test:core-rev-sync    # 插件 → 核心 → 叙事层的 ?rev= 一致性（热重载正确性）
+node scripts/test-memcard-narrative.mjs        # 叙事层：文件容错 / 分档 / 覆盖 / 不可信模型输出
+node scripts/test-bili-memory-path.mjs         # B站→QQ 生成器输入目录（hermetic、不联网）
+node scripts/test-memory-sync-privacy.mjs      # QQ→B站 隐私闸（扫真身 / 调度器接线 / 读侧复检）
+npm run test:audit           # 全量门禁（含上述 + 接线回归）
 cd plugins/surfcore && npm test   # 含 test-memory-card-api.mjs（临时 DSH_HOME）
 ```
 
@@ -303,7 +338,10 @@ cd plugins/surfcore && npm test   # 含 test-memory-card-api.mjs（临时 DSH_HO
 - 全量存档里的「最初/初次相遇」标记反映**归档当时**的状态；之后重新指定初次相遇，只更新衰减卡，不会重写历史 JSONL。
 - 「第一次和主人说话」锚点从**启用记忆卡后的第一条主人消息**开始；更早的历史不会自动回溯
   （DSH 会话日志是压缩格式，且有隐私边界）。需要补更早的锚点，请在「记忆」页手动记一条并点「置顶」。
-- 模糊化是**确定性截断 + 标签归纳**，不调用模型做摘要（可控、免费、可测试）；以后若接模型摘要，必须保留原文备份与回滚。
+- 模糊化是**确定性截断 + 标签归纳**，不调用模型做摘要（可控、免费、可测试）。
+  例外是 2026-10-30 新增的**叙事层**：它调 deepseek-flash 把记录压成回忆，属于「会外发聊天内容」的独立成本，
+  开关/模型/预算见 §5.5 与 `socialV2.memoryNarrative`；关掉它不影响记忆卡本体的评分、遗忘与注入。
+  以后若把模型摘要接进衰减卡本体，必须保留原文备份与回滚。
 - B站 的 `bili-memory.json` 由桥接生成；桥接没跑时 B站 记忆不会更新，但已有记忆卡照常注入。
 - QQ 记忆默认不进 B站；如果用户打开 `includeQqInBili`，仍会脱敏数字，但仍建议只用于「公开群聊」场景。
 - **全量卡只从启用本功能之后开始归档**：之前已经被衰减卡忘掉的记忆无法凭空恢复；当前衰减卡里还存在的记录会在首次维护时全部补档。

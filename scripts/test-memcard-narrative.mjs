@@ -14,7 +14,7 @@ import path from 'node:path';
 import { after, test } from 'node:test';
 import {
   buildNarrationPrompt, coveredRecordIds, formatEpisodeLine, formatEpisodeTitleLine,
-  loadNarrative, mergeEpisodes, parseEpisodes, saveNarrative, splitEpisodesForPrompt,
+  loadNarrative, mergeEpisodes, parseEpisodes, resolveConvFallback, saveNarrative, splitEpisodesForPrompt,
 } from '../src/memcard-narrative.js';
 import {
   DAY_MS, addMemoryRecord, createEmptyCard, normalizeMemoryCardConfig, renderMemoryCard, resolveMemoryCardPaths,
@@ -217,3 +217,37 @@ test('叙事文件路径可解析（插件维护器会按角色目录读写）',
   assert.equal(fs.existsSync(path.join(paths.dir, 'memory-card-narrative.json')), true);
   assert.equal(loadNarrative(paths.dir).episodes.length, 1);
 });
+
+test('hidden 段的 covers 在渲染里也必须被抑制（P1-2 回归）', () => {
+  const card = createEmptyCard(NOW);
+  const ids = [];
+  for (let i = 0; i < 60; i += 1) {
+    const text = `第 ${i} 条原始记录：这是一条不该再逐条出现的聊天内容。`;
+    ids.push(addMemoryRecord(card, {
+      source: 'qq-group',
+      text,
+      createdAt: NOW - (60 - i) * DAY_MS,
+      lastSeenAt: NOW - (60 - i) * DAY_MS,
+    }, CFG, NOW).record.id);
+  }
+  const episodes = ids.map((id, i) => episode(i, {
+    date: '2026-08-01',
+    covers: [id],
+    title: `回忆标题 ${i}`,
+    text: `这是第 ${i} 条压缩后的回忆正文。`,
+  }));
+  const out = renderMemoryCard(card, { config: CFG, full: true, now: NOW, narrative: { episodes } });
+  // 60 条回忆 = 16 全文 + 40 标题 + 4 hidden；hidden 覆盖的 4 条原记录也绝不能逐条出现。
+  assert.doesNotMatch(out, /不该再逐条出现的聊天内容/, 'hidden 段覆盖的原记录冒回来了（P1-2）');
+  assert.match(out, /回忆标题 0/, '最新的全文回忆应正常渲染');
+});
+
+test('混合私聊/群里的回忆降级为无标签（P2-5）', () => {
+  const convById = new Map([['a', '私聊'], ['b', '群里'], ['c', '私聊']]);
+  assert.equal(resolveConvFallback(['a', 'b'], convById), '', '混合来源不标 [私聊]/[群里]');
+  assert.equal(resolveConvFallback(['c', 'a'], convById), '私聊');
+  assert.equal(resolveConvFallback(['b'], convById), '群里');
+  assert.equal(resolveConvFallback([], convById), '');
+  assert.equal(resolveConvFallback(['missing'], convById), '');
+});
+

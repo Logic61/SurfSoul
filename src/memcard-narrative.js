@@ -208,6 +208,23 @@ export function conversationOf(record) {
   return '';
 }
 
+/**
+ * 模型没写 conv 时的兜底（P2-5，2026-10-30）。
+ * 旧实现取「占比多的那边」，但一条回忆同时覆盖私聊和群里时，标错那一侧会把私事带进群里。
+ * 现在混合来源一律**降级为无标签**：不标总比标错安全。
+ */
+export function resolveConvFallback(covers, convById) {
+  const tally = { 私聊: 0, 群里: 0 };
+  for (const id of covers ?? []) {
+    const conv = convById instanceof Map ? convById.get(String(id)) : convById?.[String(id)];
+    if (conv === '私聊' || conv === '群里') tally[conv] += 1;
+  }
+  if (tally['私聊'] > 0 && tally['群里'] > 0) return '';
+  if (tally['群里'] > 0) return '群里';
+  if (tally['私聊'] > 0) return '私聊';
+  return '';
+}
+
 function recordForPrompt(record) {
   return {
     id: String(record.id),
@@ -354,6 +371,11 @@ export async function runNarration({ memoryDir, config = {}, now = Date.now(), d
   const card = readJson(path.join(String(memoryDir), 'memory-card.json'));
   if (!card) return { ok: true, skipped: 'no-card' };
   const narrative = loadNarrative(memoryDir);
+  // P2-1（2026-10-30）：到上限就明确返回 full，不再「压一批 → 挤掉最旧 → 原记录又能压」空转。
+  // 桥接看到 full 会立即停这一轮，避免每 tick 白烧最多 6 次 LLM 调用。
+  if (narrative.episodes.length >= Math.max(1, Number(cfg.maxEpisodes) || DEFAULT_NARRATIVE_CONFIG.maxEpisodes)) {
+    return { ok: true, skipped: 'full', total: narrative.episodes.length };
+  }
   const records = pickNarratableRecords(card, narrative, cfg, now);
   if (records.length < Math.max(1, Number(cfg.minRecords) || 1)) {
     return { ok: true, skipped: 'not-enough', picked: records.length };
@@ -373,16 +395,10 @@ export async function runNarration({ memoryDir, config = {}, now = Date.now(), d
   const dateById = new Map(records.map((record) => [String(record.id), dateKey(timeOf(record.createdAt, Date.now()))]));
   const convById = new Map(records.map((record) => [String(record.id), conversationOf(record)]));
   const episodes = parseEpisodes(result?.text, allowedIds, dateById);
-  // 模型没写 conv 的：按覆盖记录里占比多的那边补上。私聊和群里的事混成一条，
-  // 正是「该私聊的话跑到群里」的根源，所以这里必须有个归属。
+  // 模型没写 conv 的：按覆盖记录来源补上；私聊和群里混合的降级为无标签（P2-5）。
   for (const ep of episodes) {
     if (ep.conv) continue;
-    const tally = { 私聊: 0, 群里: 0 };
-    for (const id of ep.covers) {
-      const conv = convById.get(id);
-      if (conv) tally[conv] += 1;
-    }
-    ep.conv = tally['群里'] > tally['私聊'] ? '群里' : tally['私聊'] > 0 ? '私聊' : '';
+    ep.conv = resolveConvFallback(ep.covers, convById);
   }
   if (!episodes.length) {
     log('[叙事] 模型没给出可用的回忆（输出无法解析或 covers 全空）');

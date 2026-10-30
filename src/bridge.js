@@ -12287,6 +12287,11 @@ async function main() {
           if (result?.error && batches === 0) log(`[叙事] 跳过：${result.error}`);
           break;
         }
+        // P2-1（2026-10-30）：回忆到上限就明确停，不再「压一批 → 挤掉最旧 → 原记录又能压」空转。
+        if (result.skipped === 'full') {
+          if (batches === 0) log(`[叙事] 已达回忆上限（${result.total} 条），本轮不再压缩；等用户清理或扩容。`);
+          break;
+        }
         if (result.skipped === 'not-enough') break;
         picked += result.picked || 0;
         added += result.added || 0;

@@ -2675,3 +2675,67 @@ return list[0] ?? pool[0];
   控制字符校验；非法直接拒绝且**不启动 PowerShell**。
 - **验证**：`test-host-smoke.mjs` 4 个恶意标题（`$(calc)`/CRLF/81 字符/反引号）经真实路由断言拒绝，
   并静态断言脚本读 `$env:` 而不是拼接 title。
+
+## 记忆卡容量三本账：状态/压缩/写盘不是同一份渲染
+
+- **现象**：同一张卡同一时刻，记忆页显示 32,740 字（54.6%），磁盘 `memory-card.md` 只有 16,243 字，
+  真实注入 `prompt-qq.md` 5,721 字；设了 `maxChars` 的用户被**过度压缩、多删真记忆**，注入预览也不是模型看到的内容。
+- **根因**：`memoryCardStatus()` / `compactMemoryCard()` 渲染时不传叙事层，`saveMemoryCardOutputs()` 传 →
+  三套口径；叙事覆盖掉的原记录在「不含叙事」的渲染里仍然占字数。
+- **修法**（2026-10-30）：新增 `readMemoryNarrative()` 作为唯一读取入口；status/save/compact/maintain
+  统一传 `narrative`；`status.chars === 磁盘 md 字符数`、`promptChars === 注入文件字符数`。
+- **验证**：`test-memory-card.mjs`「容量口径唯一」：同一时刻三方相等 + 含叙事必须小于不含叙事。
+
+## 卡满时新记忆在衰减卡和全量档双双静默丢失（淘汰早于归档）
+
+- **现象**：`maxRecords=100` 满载 + 10 条新消息 → `addedQq=10, addedFull=0`，两处都查不到这 10 条。
+- **根因**：`addMemoryRecord()` 先把超限记录删掉，`maintainMemoryCard()` 之后才 `archiveDecayedToFull()`；
+  被删的记录还没进全量档。
+- **修法**（2026-10-30）：新增 `trimMemoryCard()`，只淘汰 `fullArchivedAt` 有值的记录；未归档的留到
+  maintain「归档 → trim」再删。两次维护之间允许暂时超限，**不允许丢数据**。
+- **验证**：`test-memory-card.mjs`「归档先于淘汰」：满载 +10 条新记忆全部留存，下一轮维护全量档 +10；
+  未归档超限的旧卡在 maintain 后条数收回上限且被删记录全在全量档。
+
+## inbox 无水位：积压丢最老一段 + 重读被当成「复习」
+
+- **现象**：4500 行 inbox 只摄入 4000 行（最老 500 行永久丢）；老记录每 10 分钟被重读一次，
+  `lastSeenAt` 被推到当前时间、`recallCount` 上涨，遗忘机制对老记忆失效。
+- **根因**：读取侧 `slice(-4000)`、去重侧只留 3000 个 hash，中间没有 offset；`addMemoryRecord` 的
+  duplicate 分支无条件 `lastSeenAt=now; recallCount+1`。
+- **修法**（2026-10-30）：新增 `readInboxSince()`（字节游标 + `.rotated` 轮转标记 + 半行不推进），
+  水位存 `card.meta.inboxCursor`，maintain 成功落盘后才推进；重复命中只按消息真实时间推进 lastSeen，
+  不再 +recall。
+- **验证**：`test-memory-card.mjs`「inbox 水位」：只消费新行 / 轮转不丢未读 / 重放不抬高 recall。
+
+## B站→QQ 记忆生成器读错目录：entries 恒空、prompt-bili 0B
+
+- **现象**：`bili-memory.json` 的 `entries=[]`、`prompt-bili.md` 0B、分享池空；bridge.log 每 10 分钟
+  「0 条/447 字」，持续 2 天无人发现。
+- **根因**：`collect()` 读旧全局 `~/.dsh/surfcore/bili/`（scores/favorites/quota/日记），角色账本已迁到
+  `characters/<id>/bili/`；写入侧却是 `stateDir`，读错了地方。
+- **修法**（2026-10-30）：输入全部改 `path.join(stateDir, ...)`；`biliToQqStatus()` 暴露
+  `dataDir/entries/indexError/generatedAt`，UI 能看出「读的是哪个目录、有没有产出」。
+- **验证**：`test-bili-memory-path.mjs`（hermetic，不联网）：当前角色账本 → entries>0；旧全局目录账本
+  不再进入当前角色记忆。
+
+## 隐私闸「扫错对象」+ 调度器绕过读侧复检
+
+- **现象**：UI 显示隐私闸 `blocked` 时，`qq-for-bili.md` 已经落盘（含 B站 mid 与原始 QQ 昵称）；
+  B站 调度器直读文件，注入链路完全不经过扫描。
+- **根因**：最后一道闸是 `assertSafeOutput(doc.replace(/\b\d{5,12}\b/g, ''))`——扫「删掉数字的副本」；
+  `readQqForBili()` 只被 UI 调用，`scheduler.js` 用 `readTextFile()` 直读。
+- **修法**（2026-10-30）：闸门扫真身且失败返回 `blocked` 不覆盖旧文件；调度器改调 `readQqForBili()`；
+  §四 身份对齐只保留「公开群别名 ↔ B站公开昵称」，删掉 mid 与原始 QQ 昵称。
+- **验证**：`test-memory-sync-privacy.mjs`：生成文档过真实闸门、源码不允许 `doc.replace` 闸门、
+  调度器必须调用 `readQqForBili`、读侧遇到严重命中返回空正文。
+
+## 叙事层是裸 import：`?rev=` 机制不覆盖传递依赖
+
+- **现象**：`test-core-rev-sync` 2 红（`?rev=` 两个取值、3 处里 2 处旧值）；插件热重载时
+  `memory-card.js` 换新了，它 import 的 `memcard-narrative.js` 仍是旧实例，叙事层改动不生效且无测试。
+- **根因**：`?rev=` 只挂在「插件 → 核心」这一跳；核心 → 叙事层的相对 import 没有 query，
+  Node 按 specifier 缓存，忽略父模块的 rev。
+- **修法**（2026-10-30）：三处插件引用统一 rev；`memory-card.js` 的叙事 import 挂同一个 rev；
+  `test-core-rev-sync` 增加第 3b 节校验传递依赖的 rev；新增 `test-memcard-narrative.mjs`（10 项）并登记。
+- **验证**：`node scripts/test-core-rev-sync.mjs` 与 `node scripts/test-memcard-narrative.mjs` 全绿。
+

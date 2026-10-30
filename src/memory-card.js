@@ -44,7 +44,7 @@ export const MEMORY_CAPACITY_THRESHOLDS = Object.freeze([0.8, 0.9, 1.0]);
  * 2026-10-30 红测 #25 钉住「桌宠被普通最近记忆挤掉」是真实回归；改用「保护集合」而不是
  * 只调 priority，避免以后加新分区时又把它挤下去。
  */
-const PROMPT_PROTECTED_SECTIONS = Object.freeze(new Set(['firstMet', 'anchors', 'pet']));
+const PROMPT_PROTECTED_SECTIONS = Object.freeze(new Set(['firstMet', 'anchors', 'pet', 'today']));
 
 /** 清晰度阶梯：只允许按这个顺序一格一格地变。 */
 export const CLARITY_ORDER = Object.freeze(['vivid', 'clear', 'fuzzy', 'trace', 'forgotten']);
@@ -1892,7 +1892,10 @@ export function renderMemoryCard(card, options = {}) {
   // 两档：最近的写全文，更早的只留标题（否则回忆一多，早期的被挤出预算，
   // 它们原来覆盖的记录又会变回逐条聊天记录）。两档都算「被覆盖」。
   const episodeSplit = platform === 'bili' ? { full: [], compact: [], hidden: 0 } : splitEpisodesForPrompt(narrative);
-  const covered = coveredRecordIds({ episodes: [...episodeSplit.full, ...episodeSplit.compact] });
+  // P1-2（2026-10-30 审计）：被回忆覆盖的记录要按**全部**回忆来抑制，包括 hidden 段
+  // （第 57 条以后、只渲染标题的那批）。旧实现只取 full+compact → hidden 的 106 条 covers
+  // 不抑制，原记录逐条冒回来，「从聊天记录变成经历」1–2 天内就失效。
+  const covered = coveredRecordIds(narrative);
   const vis = (list) => (Array.isArray(list) ? list : []).filter((record) => record && !covered.has(String(record.id)));
   const sections = sectionize(card, { platform, full, now, config: cfg });
   const limits = full
@@ -1903,11 +1906,9 @@ export function renderMemoryCard(card, options = {}) {
       // 放宽（8→14 / 8→10），并加一栏「今天聊过的」——按时间倒序取最近 24 小时里
       // 有信息量的往来，专门保当天的事；字数预算仍由 injectMaxChars.qq 兜住。
       : { firstMet: 1, anchors: 5, initial: 6, owner: 10, recent: 14, bili: 4, qq: 10, pet: 4, fuzzy: 4, today: 10 });
-  // 有叙事后，逐条记录让位：那些事已经（或即将）被压成「我们一起经历过的」，
-  // 再逐条搬一遍既占预算又把人拉回工单语感。锚点/初次相遇不动。
-  if (episodeSplit.full.length) {
-    for (const key of ['owner', 'recent', 'today', 'qq', 'initial']) limits[key] = Math.max(2, Math.round(limits[key] / 2));
-  }
+  // 2026-10-30（P1-3）：有叙事时不再把原始记录限额砍半。
+  // 旧实现「叙事一出现 → today/owner/recent 各砍一半」+ 覆盖抑制 → 当天 138 条记录只剩 5 行，
+  // 用户可感知「一天之内说的话她又忘了」。现在叙事自己限 40% 预算，原始事实保留完整名额。
   // 「今天聊过的」：最近 24 小时、非置顶、非碎句的 QQ 往来，按发生时间倒序。
   const todayCut = now - DAY_MS;
   const todayRecap = platform === 'bili' ? [] : (card.records ?? [])
@@ -1932,9 +1933,9 @@ export function renderMemoryCard(card, options = {}) {
     { key: 'today', title: '## 今天聊过的（最近 24 小时）', priority: 90, lines: todayRecap.map((record) => recordLine(record, { platform, full })) },
     { key: 'initial', title: '## 最初的日子（和主人）', priority: 45, lines: vis(sections.initial).slice(0, limits.initial).map((record) => recordLine(record, { platform, full })) },
     { key: 'owner', title: '## 和主人的记忆', priority: 40, lines: vis(sections.owner).slice(0, limits.owner).map((record) => recordLine(record, { platform, full })) },
-    { key: 'recent', title: '## 最近记得的', priority: 30, lines: vis(sections.recent).slice(0, limits.recent).map((record) => recordLine(record, { platform, full })) },
-    { key: 'bili', title: '## B站（冲浪）', priority: 22, lines: vis(sections.biliModule).slice(0, limits.bili).map((record) => recordLine(record, { platform, full })) },
-    { key: 'qq', title: '## QQ 与群里的记忆', priority: 20, lines: vis(sections.qqModule).slice(0, limits.qq).map((record) => recordLine(record, { platform, full })) },
+    { key: 'recent', title: '## 最近记得的', priority: 35, lines: vis(sections.recent).slice(0, limits.recent).map((record) => recordLine(record, { platform, full })) },
+    { key: 'qq', title: '## QQ 与群里的记忆', priority: 25, lines: vis(sections.qqModule).slice(0, limits.qq).map((record) => recordLine(record, { platform, full })) },
+    { key: 'bili', title: '## B站（冲浪）', priority: 20, lines: vis(sections.biliModule).slice(0, limits.bili).map((record) => recordLine(record, { platform, full })) },
     { key: 'fuzzy', title: '## 正在模糊的事', priority: 10, lines: vis(sections.fuzzy).slice(0, limits.fuzzy).map((record) => recordLine(record, { platform, full })) },
   ].filter((section) => section.lines.length);
 
@@ -1967,6 +1968,26 @@ export function renderMemoryCard(card, options = {}) {
     return full ? `${headerFull}\n\n（还没有记忆：B站 冲浪、QQ 聊天和桌宠对话会慢慢写进来。）` : '';
   }
   const active = calls.map((section) => ({ ...section, lines: [...section.lines] }));
+  // P1-3（2026-10-30）：叙事最多占注入预算 40%，剩下 60% 留给可核对的原始事实。
+  // 旧实现按单一 priority 排序，叙事(96) 天然压倒记录(30–45)，预算一紧先死的是「今天/主人」。
+  if (maxChars > 0 && !full && episodeSplit.full.length) {
+    const narrativeCap = Math.floor(maxChars * 0.4);
+    const trimLinesToChars = (lines, cap) => {
+      const kept = [];
+      let used = 0;
+      for (const line of lines) {
+        const len = line.length + 1;
+        if (used + len > cap) break;
+        kept.push(line);
+        used += len;
+      }
+      return kept;
+    };
+    const episodesSection = active.find((section) => section.key === 'episodes');
+    const earlierSection = active.find((section) => section.key === 'earlier');
+    if (episodesSection) episodesSection.lines = trimLinesToChars(episodesSection.lines, Math.floor(narrativeCap * 0.75));
+    if (earlierSection) earlierSection.lines = trimLinesToChars(earlierSection.lines, Math.floor(narrativeCap * 0.25));
+  }
   const assemble = () => {
     const parts = [header];
     for (const section of active) {
