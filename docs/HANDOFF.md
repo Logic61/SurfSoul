@@ -5,6 +5,53 @@
 
 ---
 
+## 快照：2026-10-30 15:28–16:15（扫描插件 → 修掉 P0 + 14 条 P1）
+
+### 用户原话
+
+> 「扫描surfcore插件，提出一些你觉得能够优化的地方」→ 看完报告后：「修掉P1」
+
+### 做到了什么（5 个并行修复组，写域互不重叠）
+
+| 区域 | 修复（编号对应 `state/agents/audit/REPORT.md`） | 落点 |
+| --- | --- | --- |
+| 宿主/安全 | **P0-1** 隐私闸私钥死循环；P1-1 browse 标题 PowerShell 注入；P1-2 4 处 detached spawn 无 error 监听；P1-11 备份失败/坏配置静默 | `lib/privacy.js`、`lib/index.js`、`lib/bridge.js`、`lib/store.js` + 4 个测试 |
+| 设置页 | P1-6 语音页 3 处后门写 `/config` 改走草稿；P1-7 切角色后人格卡写错角色；P1-12 保存成功却显示红字；P1-13 深色主题目的页不可读 | `lib/client.js` + 2 个测试 |
+| 桌宠 | P1-3 LLM 无超时（新增 `pet.chat.llmTimeoutMs`，默认 90s）；P1-4 对话历史并发丢更新 | `lib/pet-chat.js`、`lib/pet-purpose.js` + `test-pet-chat` 重写 |
+| 更新/调度 | P1-5 批量更新只落地最后一个（pending 改 jobs 队列，helper 逐 job 执行）；P1-8 `ensureSession` 创建失败缓存成 ready | `lib/updates.js`、`lib/scheduler.js`、根 `scripts/apply-update.mjs` + 2 个测试 |
+| B站 工具链 | P1-9 账本/状态 JSON 多进程读改写无锁（新增 `tools/lib/atomic-json.mjs`）；P1-10 出站身份闸补 4 个公开出口；P1-14 `bili.mjs`/高频 fetch 无超时（新增 `tools/lib/http-timeout.mjs`） | `tools/**` + 3 个新测试 |
+
+### 已验证（Lead 跑的最终门禁）
+
+- `cd plugins/surfcore && npm test` → **全绿**（42 个脚本；新增 `test-scheduler-session` /
+  `test-tools-ledger` / `test-tools-outbound` / `test-tools-timeout` 已登记进链）。
+- P0 复现脚本 `node state/agents/audit/_verify_privacy_loop.mjs` → `OK`（修复前实测 HUNG）。
+- `node --check`：全部改动文件通过；`git status` 确认只动了写域内文件（在途改动原样保留）。
+- 根目录 `npm run test:audit`：**当前 64/77**（13 项红）。对照 HEAD 基线 worktree（`d7f6b33`）为 **70/77**（7 项红）：
+  额外 7 项全部落在**在途未提交改动**（`src/bridge.js` / `src/memory-card.js` / `src/web-search.js` /
+  `src/conversation-closure.js` / `dsh/agent-presets` / `presets`），这些测试文件里 **0 处引用 plugins/surfcore**，
+  与本次 P1 修复无关。**不是本次修复引入的回归**；在途功能合入前需要先修它们（见下）。
+
+### 回滚
+
+逐项回滚命令在各 `state/agents/audit/FIX-*.md`。注意三个文件**不能整文件 `git checkout`**（含别人的在途改动）：
+`plugins/surfcore/lib/client.js`、`lib/index.js`、`qq-tool-restrict.mjs`（后者本次未动，仅在途）。
+其余改动文件均为本次从干净状态改的，可单文件 checkout；新增文件删除即可。
+
+### 没做 / 下一步（按建议顺序）
+
+1. **先给在途「记忆叙述」改动做检查点提交**，再处理那 7 项在途红：
+   `test-core-rev-sync`（`memory-card.js` 的 `?rev=` 只 bump 了 1 处，3 处要一致）、
+   presets 生成物（`npm run test:preset-patches` 重新生成）、`test-memory-card` / `test-media-search` /
+   `test-closure-wiring` / `test-voice-system`（都是 src 侧行为变化后测试没跟上）。
+2. HEAD 基线本来就红的 7 项（历史遗留）：`test-version`（README 还写 0.6.20）、
+   `test-self-identity` / `test-identity-guard` / `test-audit-regressions` /
+   `test-preset-local-tools` / `test-agent-preset-patches`（`test-stickers` 只在无 config 的 worktree 红）。
+3. 剩余 P2 与结构性优化（HTTP 层模板化、配置快照、publish 原语、更新器结果账本、
+   UI 表单原语、测试基建）见 `state/agents/audit/REPORT.md` §3/§4，未动。
+
+---
+
 ## 快照：2026-10-26 09:05–09:40（设置页「检查更新」：本体 + 语音包 + 桌宠 + 未来扩展）
 
 ### 用户原话

@@ -2619,3 +2619,59 @@ return list[0] ?? pool[0];
   bootstrap 造 `jieba_fast` 替身（转发 jieba）；装 imageio-ffmpeg 并写 `config.toml [ffmpeg] path`；
   requirements 补 torchmetrics/imageio-ffmpeg；pip 加包内缓存；UI 提示"改开关要重启 DSH"。
 - **验证**：布局用 file:// 归档实测通过；真机 import/ffmpeg 未验证。
+
+## 隐私闸对私钥文本死循环（正则漏 `g`）
+
+- **现象**：保存人格卡 / 记忆同步 / `/api/privacy/explain` 遇到 `-----BEGIN ... PRIVATE KEY-----` 时，
+  DSH 宿主整个卡死（事件循环被同步占死、内存持续上涨），只能杀进程。
+- **根因**：`plugins/surfcore/lib/privacy.js` 的 `private-key` 规则漏了 `g`；`collect()` 用
+  `while ((m = re.exec(text)))`。非 global 正则的 `exec()` 忽略 `lastIndex`，永远返回同一处匹配，
+  循环不前进 → `hits.push` 无限增长。
+- **修法**（2026-10-30）：补 `g`；`collect()` 加「`match.index` 不前进就 break」的永久兜底
+  （与具体正则无关，防止下次有人新增 pattern 又漏 `g`）。
+- **验证**：`node state/agents/audit/_verify_privacy_loop.mjs` 应输出 `OK`（修复前 HUNG）；
+  `test-privacy.mjs` 的 PEM 单段/多段断言。
+
+## 批量更新只落地最后一个：pending 单文件被逐个覆盖
+
+- **现象**：一次勾选 surfcore + 语音包两个组件，界面提示"已排队、退出后自动更新"；
+  重启后只有一个更新了，另一个永远停在旧版，而且提醒已被 dismiss、不会再提示。
+- **根因**：`updates-pending.json` 是单 job 文件；`apply()` 对每个组件循环 `stageDeferredApply()`，
+  后者直接整文件覆盖 → 前一个 job 丢失；随后把两行都记成"已处理"并记进 dismissed。
+- **修法**（2026-10-30）：pending 升级为 `{waitPid, jobs:[…]}`（旧单 job 形状自动归一）；
+  同一宿主进程只起一个 helper 并追加 job；helper 在宿主退出后**重读** pending、逐 job 执行，
+  分别写 `updates-applied/` / `.failed` 明细（部分失败保留失败项）。
+- **验证**：`test-updates-pending.mjs`（`apply([a,b])` → `jobs.length===2`、helper 多 job /
+  部分失败、旧形状归一、`resumePendingApply` 保留全部 job）。
+
+## 多进程读-改-写状态 JSON：丢记录 + 截断
+
+- **现象**：额度账本偶发少记（限额静默失效）、待审/钦定/鱼群状态互相覆盖；进程被 kill 后 JSON 截断。
+- **根因**：B站 工具链每条命令是独立进程，`load() → push → save()` 各自整文件写，无锁无原子写
+  （33 处 `writeFileSync` 只有 1 处 rename）。
+- **修法**（2026-10-30）：新增 `tools/lib/atomic-json.mjs`：`writeJsonAtomic`（同目录 tmp+rename）+
+  `updateJson`（`wx` 锁文件 + 退避重试 + 过期锁回收）；quota / attacks / pins / fish-guard / daily 接入。
+- **验证**：`test-tools-ledger.mjs`：并行 spawn 8 个 `quota.mjs record`，断言 log 正好 8 条；
+  账本损坏时 `quota check` 仍 fail-closed（退出码 2）。
+
+## 桌宠 LLM 流没有超时 = 主动搭话永久停摆
+
+- **现象**：provider 抽风 / 网络半开时，桌宠对话框一直转圈；更糟的是主动搭话的 `running`
+  永不复位，从此再也不主动说话，而且没有任何错误可见。
+- **根因**：`pet-chat.complete()` 只透传 `signal`、自己没有定时器；`pet-purpose.runOnce()` 靠
+  `finally` 复位 `running`，流不结束就永远 true。
+- **修法**（2026-10-30）：每次 attempt 独立 `AbortController` + 90s 定时器
+  （`pet.chat.llmTimeoutMs`，clamp 5~180s），signal 传进 `llm.stream`，超时抛 `code='timeout'`；
+  失败写 `lastError` + plugin.log；`finally` 复位 `running`。
+- **验证**：`test-pet-chat.mjs`：mock 永不结束的流 → 超时返回 `ok:false` 且 busy 复位；
+  并发 chat/proactive 后历史同含两条（变异验证：还原旧写法两用例分别变红）。
+
+## browse 选择框标题拼进 PowerShell
+
+- **现象/根因**：`/api/browse?title=…` 把 title 用 `JSON.stringify` 拼进
+  `powershell -Command` 的双引号字符串，`$(...)` 会被 PowerShell 当子表达式执行；该端点是 GET，
+  路由层不对 GET 做同源校验。
+- **修法**（2026-10-30）：标题改走 `env SURFCORE_BROWSE_TITLE`（不进入脚本源码）+ 白名单/长度/
+  控制字符校验；非法直接拒绝且**不启动 PowerShell**。
+- **验证**：`test-host-smoke.mjs` 4 个恶意标题（`$(calc)`/CRLF/81 字符/反引号）经真实路由断言拒绝，
+  并静态断言脚本读 `$env:` 而不是拼接 title。

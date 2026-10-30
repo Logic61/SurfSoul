@@ -58,7 +58,7 @@
 | R28 | `src/voice-packs.js` 把**语音包默认安装源**写死成本机绝对路径 | 换机器/换目录后默认安装源指向不存在的位置，现象只是"安装失败"（语音功能看似坏了） | 2026-10-26 改成相对仓库根解析（`<仓库上级>/voice/packages/<id>`）：本机解析结果与旧值**逐字相同**（`test-voice-packs-default.mjs` 比对），换目录也能用 | ✅ 已修（行为等价已验证） |
 | R29 | 桌宠 API 此前只有"字符串包含"级别的测试（`test-client-contract` 断言 index.js 里出现了 `createPetApiService`） | 路由注册了但鉴权/分支坏了没人发现（现象：桌宠连不上，或本机任意进程能连） | 2026-10-26 新增 `plugins/surfcore/scripts/test-pet-api.mjs`：假 chat/purpose + 假 req/res，覆盖令牌（无/错/空/header/query）、回环、同源、content-type、全部读写端点、音频与 `host.json` | ✅ 32 条断言，进 `npm test` |
 | R30 | **B站 侧三个"一跑就 ReferenceError"的脚本**（2026-10-26 写文档时逐行读出来的）：① `tools/commands/edit-dynamic.mjs` 调 `gate()` 却没 import（`dynamic.mjs` 早就修过同一个 bug）；② `tools/commands/danmaku-await.mjs` 用未定义的 `statePath` → 进程启动即崩，而 `scheduler.js` 的 `liveTick` 正靠它，**直播间监听实际起不来**；③ `tools/commands/notify.mjs` 的 `dm` 分支引用未定义 `p`、且从不调 `dm.mjs`，但设置页把"B站私信"当合法推送方式 | 对应功能静默不可用；②还会让调度器每分钟白跑一次 | **2026-10-26 已处理**：① 补 `import { gate }`（1 行）；② **标注未实现**——脚本启动即 `exit(3)` 并打印原因，调度器收到 3 后 `liveUnimplemented=true` 停止重试（真正实现需补状态文件 + 真机验证）；③ 设置页移除「B站私信」选项，老配置命中时抛可读错误而不是 `ReferenceError` | ✅ 已修（②按"未实现"处理，不假装能用） |
-| R31 | 出站身份闸只接了 4 个点（`comment` / `dm` / `dynamic` / `share-dynamic`） | `daily` 的转发卡片路径、`dynamic-image`（`--at` 主动写 mid）、`edit-dynamic`、`danmaku` 是同等公开暴露面但**不过闸** | 2026-10-26 记录（写文档时发现，未改代码） | 🟡 待评估：这些路径是否真的会带上主人/别人的身份标识 |
+| R31 | 出站身份闸只接了 4 个点（`comment` / `dm` / `dynamic` / `share-dynamic`） | `daily` 的转发卡片路径、`dynamic-image`（`--at` 主动写 mid）、`edit-dynamic`、`danmaku` 是同等公开暴露面但**不过闸** | 2026-10-26 记录（写文档时发现，未改代码） | 🟡 部分已修（2026-10-30 补 `daily` 转发 / `edit-dynamic` / `danmaku` / `dynamic-image` 四个出口 + `test-tools-outbound`；新增写通道仍需人工接线，结构上仍靠调用点纪律） |
 | R32 | 控制台「语音」页从导航点不进去：`console.html` 有 `data-view="voice"` 按钮与 `section-voice` 区块，但 `setConsolePage` 的白名单 `consolePages` **没有 `voice` 键**，未知页一律回退 `overview` | 语音包安装/启动/触发规则在控制台里实际不可达（真正可用的是 DSH 设置页的「语音」标签，两者不是同一个界面） | **2026-10-26 已修**：删掉控制台那个「♪ 语音」导航按钮（保留 `section-voice` 区块不删——页内还有 JS 绑定，删区块会连带坏掉控制台初始化） | ✅ 已修 |
 | R33 | `schedulerStatus.lastTickAt` 从未被写入真实时间：`lib/index.js` 里 5 处赋值全是 `null`（`:181/:244/:269/:361/:405`） | 任何依赖它判断"最近一次 tick"的界面/诊断只会拿到 `null`（误判为"从没跑过"） | 2026-10-26 写文档时发现；要么在 scheduler 的 tick 回调里回写，要么把字段删掉避免误导 | 🟡 待修 |
 | R34 | **桌宠安装目录"不可逆删除面"**：`lib/pet.js` 的 `resolveAppDir()` 只做 `path.resolve`，而 `install` / `unzip` / `remove` 三处对它 `rmSync(recursive, force)`。用户把「安装目录」填成别的目录 → 点安装/卸载会清空它；另外 `install()` 不先 `stop()` | 数据不可逆丢失 | **2026-10-26 已修**：新增 `checkAppDir()`（盘根/受保护目录本身或其上级/非空且无标记文件 一律拒绝）+ 安装成功写 `.surfcore-pet.json` 标记 + 三处删除前统一过闸 + 安装前先 `stop()`；`status()` 增 `appDirSafe`；18 条单测 `scripts/test-pet-dir-guard.mjs` | ✅ 已修（含回归） |
@@ -185,5 +185,32 @@
 **怎么验证**：`npm run test:audit`（75/75）、`cd plugins/surfcore && npm test`、
 `npm run test:preset-patches`、`npm run test:core-rev-sync`、`npm run test:privacy-scan`、
 `npm run privacy-scan:strict`（应 exit 0）。
+
+---
+
+## 五、2026-10-30 P0/P1 修复登记（扫描 → 修复）
+
+> 背景：用户要求「扫描 surfcore 插件并提出优化」，随后「修掉 P1」。14 条 P1 + 1 条 P0 已修，
+> 逐项证据/测试/回滚见本机 `state/agents/audit/FIX-*.md`；总报告 `state/agents/audit/REPORT.md`。
+
+| ID | 风险 | 影响 | 现有缓解 | 状态 |
+| --- | --- | --- | --- | --- |
+| R40 | 隐私闸 `private-key` 正则漏 `g` → `collect()` 死循环，用户粘 PEM 即触发 | DSH 宿主/设置页整进程卡死，只能杀进程 | 补 `g` + 位置不前进即 break；`test-privacy` PEM 断言；复现脚本 `_verify_privacy_loop.mjs` | ✅ 已修（2026-10-30；修复前实测 HUNG、修复后 OK） |
+| R41 | `updates-pending.json` 单文件被逐组件覆盖 → 批量更新只落地最后一个且 dismiss 提醒 | 静默的版本不更新，用户不再被提示 | pending 升级 `{waitPid, jobs:[]}`（旧形状归一）；helper 宿主退出后重读并逐 job 记录 applied/failed；`test-updates-pending` 覆盖 | ✅ 已修（2026-10-30） |
+| R42 | B站 工具链状态 JSON 多进程读-改-写无锁、无原子写 | 并发丢记录（额度闸静默失效）、kill 时 JSON 截断 | 新增 `tools/lib/atomic-json.mjs`（tmp+rename + `wx` 锁/重试/过期回收）；quota/attacks/pins/fish-guard/daily 接入；`test-tools-ledger` 8 进程并发断言 | ✅ 已修（2026-10-30） |
+| R31 | 出站身份闸覆盖面（见上表 R31） | 含主人/别人账号标识的公开内容可能发出去收不回 | 2026-10-30 补 `daily` 转发 / `edit-dynamic` / `danmaku` / `dynamic-image` 四个出口，新增 `test-tools-outbound` | 🟡 部分已修（新增写通道仍需人工接线；结构上应收敛成 publish 原语，见审计 S-3） |
+| R33 | `schedulerStatus.lastTickAt` 恒 null | 诊断误判"从没跑过" | 2026-10-30 审计再次确认（6 处赋值全 null），**未修**（不在本轮 P1 范围） | 🟡 待修 |
+
+---
+
+### 六、本轮未处理的遗留（供下一轮）
+
+- 根 `npm run test:audit` 当前 64/77：7 项来自**在途未提交改动**（记忆叙述：presets 生成物、
+  `src/memory-card.js` 的 `?rev=` 只 bump 1 处、`src/web-search.js`/`src/bridge.js`/
+  `src/conversation-closure.js` 行为变化后测试没跟上），7 项是 HEAD 基线就红的历史遗留
+  （`test-version` README 版本号、identity 相关、presets 守卫、`test-audit-regressions`）。
+  本次 P1 修复没有引入新红：插件自己的 42 个测试脚本全绿。
+- P2 与结构性优化（HTTP 层模板化、配置请求级快照、publish 原语、更新器结果账本、UI 表单原语、
+  测试基建）仍未做，清单见 `state/agents/audit/REPORT.md` §3/§4。
 
 

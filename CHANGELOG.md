@@ -4,6 +4,34 @@
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 发布规则见 [docs/guides/VERSIONS.md](docs/guides/VERSIONS.md)。
 
+## [未发布] - 2026-10-30（P0 + P1 修复，未发版）
+
+### 修复（P0，会卡死宿主）
+
+- **隐私闸对私钥文本死循环**：`plugins/surfcore/lib/privacy.js` 的 `private-key` 正则漏 `g`，
+  `collect()` 的 `while (exec)` 在命中处永不前进 → 用户粘一段 PEM 私钥进人格卡 / 记忆同步，
+  整个 DSH 宿主同步卡死。补 `g` + 「匹配位置不前进立即 break」兜底；`test-privacy.mjs` 加 PEM 断言；
+  复现脚本 `state/agents/audit/_verify_privacy_loop.mjs`（修复前 HUNG / 修复后 OK）。
+
+### 修复（P1，14 条）
+
+- **安全输入边界**：`/api/browse` 的标题改走环境变量 + 白名单校验（去掉 PowerShell 注入面）；
+  出站身份闸补 `daily` 转发 / `edit-dynamic` / `danmaku` / `dynamic-image` 四个公开出口；
+  4 处 detached spawn 补 `error` 监听；`bili.mjs` 子进程与 6 个高频网络读补超时。
+- **静默丢数据**：桌宠对话历史读改写串行化；批量更新 pending 改 jobs 队列（不再只落地最后一个，
+  helper 在宿主退出后重读并逐 job 记录结果）；语音页 3 处后门写 `/config` 改走全局草稿；
+  切角色后人格卡编辑器重读（不再写错角色）；配置备份失败/坏 JSON 不再静默
+  （保存前把坏文件隔离成 `.corrupt-<ts>`）；B站 账本/状态 JSON 改跨进程锁 + tmp+rename 原子写。
+- **静默停摆**：桌宠 LLM 调用加 90s 超时/取消（新配置 `pet.chat.llmTimeoutMs`，clamp 5~180s），
+  失败写 `lastError` + 日志；scheduler `ensureSession` 创建失败不再缓存成 ready（下一 tick 重试）。
+- **体验**：保存成功后的服务端提示不再显示成红色错误（新增 `warn` 通道）；深色主题「目的」页
+  9 处 inline 浅色改主题 token，`test-ui-contrast` 补扫 inline 样式。
+
+> 逐项证据 / 测试 / 回滚见本机审计产物 `state/agents/audit/FIX-*.md`（未入库）。
+> 验证：`cd plugins/surfcore && npm test`（42 个脚本全绿，含新增 12 项回归）。
+> 注意：工作树里有在途的「记忆叙述」改动，根 `npm run test:audit` 现有 13 项红全部落在
+> 在途改动/历史遗留（详见 `docs/HANDOFF.md` 顶部快照），与本次 P1 修复无关。
+
 ## [0.6.22] - 2026-10-28
 
 ### 修复（本地语音"装完还是不能用"）
