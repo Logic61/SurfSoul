@@ -413,7 +413,7 @@
 | `video`（`video-content`） | 不点开视频还原它讲什么（简介/标签/字幕/弹幕） | `<BV>` | ❌ | `tools/commands/video-content.mjs:30-83` |
 | `debrief` | 看懂一条视频：封面+简介+字幕+弹幕热区+热评+抽帧 | `<BV> [--bucket 30] [--top 5] [--grid 3x3] [--no-frames] [--substrip] [--comments 8] [--score] [--no-history]` | `watch-history.jsonl` + 截图 | `tools/commands/debrief.mjs:89-303` |
 | `watch-video`（`bili-watch`） | 真"看"视频：直链 → 下载 → 抽帧九宫格 / 字幕条 | `<BV> [3x3\|4x4] [outDir] [--uniform]` | 原片 + 图 + 历史 | `tools/commands/bili-watch.mjs:29-149` |
-| `watch-storyboard` | 可引用分镜：官方字幕对齐 + 编号格 + 音频条 + cell 清单（插件缺失自动退回九宫格） | `<BV> [--cells 1-16] [--from S] [--to S] [--detail low\|med\|high] [--lan] [--no-subs] [--out] [--subs-out] [--no-history]` | 原片 + 分镜图 + 清单 + 历史 | `tools/commands/watch-storyboard.mjs`、`tools/lib/watch-storyboard.mjs` |
+| `watch-storyboard` | 可引用分镜：官方字幕对齐 + 编号格 + 音频条 + cell 清单（插件缺失自动退回九宫格；`--download-only` 只备素材给原生工具） | `<BV> [--cells 1-16] [--from S] [--to S] [--detail low\|med\|high] [--lan] [--no-subs] [--download-only] [--out] [--subs-out] [--no-history]` | 原片 + 分镜图 + 清单 + 历史 | `tools/commands/watch-storyboard.mjs`、`tools/lib/watch-storyboard.mjs` |
 | `watch-history` | 她看过什么 + 之后做过什么 | `list [--limit --q --days --json]` | ❌ | `tools/commands/watch-history.mjs:26-66` |
 | `likes` | 「收到的赞」通知流（谁赞了她，含 mid/昵称） | `[--hours 24] [--owner] [--json]` | ❌ | `tools/commands/likes.mjs:34-74` |
 | `comment-digest` | 今天谁找过她（回复+@ 两个收件箱，正文回读核实） | `[--hours 24] [--pages 2] [--only-unread] [--max-resolve] [--raw]` | ❌ | `tools/commands/comment-digest.mjs:25-86` |
@@ -484,6 +484,18 @@
   ffmpeg 可从 `$FFMPEG / PATH / <repo>/bin / ~/.dsh/tools/ffmpeg/bin / ~/.dsh/surfcore/bili/bin` 任一处解析。
 - 图片成本（2026-10-30 实测）：旧深读 3 张 2160×1215 ≈ 2.4–2.8k token；分镜 1 张 1009×620 ≈ 392 + 清单 250–400。
 - 观看历史记 `mode:frames / source:watch-storyboard`（`--no-history` 可关；父进程调用时按 `SURFCORE_WATCH_PARENT` 防重复）。
+
+**本机推荐：两步走 = 原生工具直出（路线 A，2026-10-30 加；仅装了插件的机器可用）**：
+
+- `watch-storyboard <BV> --download-only` → 只下载 mp4 + 拉官方字幕，打印 `MP4:` / `SUBS:` 两个路径
+  （**不写观看历史**：这一步还没"看"，真正看是下一步工具调用）。
+- B站 会话直接调原生工具：`video_storyboard({ input: <MP4>, transcriptFile: <SUBS>, cells: 9, detail: "med" })`
+  —— 图作为 attachment **直接进上下文**（少一次 `read_image`）；`video_probe` 可先花 0 token 探元信息。
+- 回看细节：`video_zoom({ input: <MP4>, cellId: N, cells: 4 })`（宿主用格表把「第 N 格」还原成时间窗，不用重抽全片）。
+- 前提：desktop profile 装 `dsh-video-storyboard`（4 个工具，宿主级全局注册）。QQ 仿真会话的 schema 靠
+  `qq-tool-restrict.mjs` 的 `PLUGIN_PROVIDED_GLOBAL_TOOLS` 在注册期隐藏；这一组**故意不导出**到
+  `RESTRICTED_TOOL_NAMES`——第三方插件名不在 DSH 安装包里，导出会让 `test-preset-local-tools` 的假名对账误报。
+- 没有 `video_storyboard` 工具时，唤醒 prompt 自动退回 C-1（一条命令出图），所以其他机器不用改。
 
 `subtitles` 的三个硬知识（`tools/commands/subtitles.mjs:6-11`）：必须走 WBI 的 `/x/player/wbi/v2`、
 `subtitle_url` 里的 `auth_key` 是**分钟级**有效且**不能截断**、匿名拿不到 AI 字幕（必须带 cookie）。

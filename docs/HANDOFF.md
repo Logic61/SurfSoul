@@ -5,6 +5,44 @@
 
 ---
 
+## 快照：2026-10-30 20:12–20:45（路线 A：B站 会话直连原生分镜工具，本机专用）
+
+### 用户原话
+
+> 「路线A指什么」→ 解释 C-1/路线 A 区别后：「只在自己机器用，你动手吧」
+
+### 做到了什么
+
+| 改动 | 内容 |
+| --- | --- |
+| `watch-storyboard --download-only` | 只下载 720p mp4 + 拉官方字幕，打印 `MP4:` / `SUBS:` 两个路径后退出；**不写观看历史**（准备素材，真正"看"是下一步原生工具） |
+| 唤醒 prompt（`lib/scheduler.js` step 4） | 按工具面自适应：有 `video_storyboard` → ①`--download-only` ②`video_storyboard({input:<MP4>, transcriptFile:<SUBS>, cells:9})` ③细节 `video_zoom({input, cellId:N, cells:4})`；没有 → 退回 C-1 的 `watch-storyboard <BV>` 出图 |
+| QQ 守卫（`qq-tool-restrict.mjs`） | 新增 `PLUGIN_PROVIDED_GLOBAL_TOOLS`（video_storyboard/video_zoom/video_probe/video_locate），在 `apply()` 里照样 restrict；**故意不导出**到 `RESTRICTED_TOOL_NAMES` —— 第三方插件名不在 DSH 安装包里，导出会让 `test-preset-local-tools` 的「假名对账」误报 |
+| 测试 | `test-watch-storyboard.mjs` 增加 `--download-only` 解析 + `downloadOnlyLines` 断言 |
+
+### 已验证
+
+- 真机路线 A E2E：`watch-storyboard BV1w7HM6JEGa --download-only` → MP4/SUBS 两路径（exit 0）；
+  本会话（standard preset，与 bili-whale 同 preset）对同一 MP4 调 `video_storyboard(transcriptFile=官方字幕 JSON)`
+  → 9 格 1009×620 + 字幕对齐清单；`video_zoom({cellId:4})` → 正确 **30.00–34.60s**、2 格高清。
+  图 sha256 与 C-1 CLI 版一致（`d4616002…`）。
+- `test-watch-storyboard.mjs` 全绿；5 个改动文件 `node --check` 通过。
+- 门禁：`cd plugins/surfcore && npm test` → **exit 0**。
+- 全量 `npm run test:audit`：**改前/改后各跑一遍并逐脚本对账，10 项红完全一致（73/83）→ 零新增红**。
+  （中途一次 72/83 是并发跑 E2E 时的抖动；隔离重跑恢复 73/83。）
+
+### 回滚
+
+`git revert <本轮 commit>`（5 文件）；C-1 命令、`watch-video`、`debrief` 不受影响；prompt 回滚后自动回 C-1 流程。
+
+### 没做
+
+- **上游插件的两个 P0 未修**（窗口化 `winStart` 加两次 / zoom 覆盖分镜格表）：长片「按窗口读 + 按格 zoom」会静默错位；
+  本机先用 `--from/--to` 重出规避。要根治得给上游提 PR。
+- 没 push。
+
+---
+
 ## 快照：2026-10-30 19:20–20:15（把 dsh-video-storyboard 的分镜方法接进 B站「刷视频」→ C-1 落地）
 
 ### 用户原话

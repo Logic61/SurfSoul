@@ -14,6 +14,11 @@
   插件缺失时自动退回 `watch-video` 九宫格，**不新增硬依赖**。唤醒 prompt 改为
   「`debrief --no-frames` 文字五路 + `watch-storyboard` 分镜」两段式。
   新测试 `scripts/test-watch-storyboard.mjs` 进 `npm test` 链。
+- **路线 A（本机专用）**：`watch-storyboard <BV> --download-only` 只备素材（打印 `MP4:`/`SUBS:`、不写历史），
+  B站 会话直接调原生 `video_storyboard({input, transcriptFile, cells})`（图直接进上下文），
+  细节用 `video_zoom({cellId})`；唤醒 prompt 按工具面自适应，没有原生工具时退回上面的 C-1。
+  QQ 守卫新增 `PLUGIN_PROVIDED_GLOBAL_TOOLS`（第三方插件运行期工具照样 restrict，
+  但不进安装包对账导出，避免假名断言误报）。
 
 ### 修复（P0，会卡死宿主）
 
