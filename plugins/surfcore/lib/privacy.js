@@ -16,7 +16,9 @@ import path from 'node:path';
 export const PRIVACY_POLICY_VERSION = 3;
 
 const SEVERE_SECRET = [
-  { kind: 'private-key', re: /-----BEGIN (?:RSA |EC |OPENSSH |PGP )?PRIVATE KEY-----/i, label: '私钥' },
+  // 必须有 g：collect() 用 while(exec) 逐处收集；非 global 正则的 exec() 会忽略
+  // lastIndex 永远返回同一处匹配，导致死循环（2026-10-30 审计 P0-1）。
+  { kind: 'private-key', re: /-----BEGIN (?:RSA |EC |OPENSSH |PGP )?PRIVATE KEY-----/gi, label: '私钥' },
   { kind: 'openai-key', re: /\bsk-[A-Za-z0-9_-]{16,}\b/g, label: 'API Key' },
   { kind: 'github-token', re: /\bgh[pousr]_[A-Za-z0-9]{20,}\b/g, label: 'GitHub Token' },
   { kind: 'aws-key', re: /\bAKIA[0-9A-Z]{16}\b/g, label: 'AWS Key' },
@@ -58,9 +60,16 @@ const CONTROL = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g;
 function collect(text, patterns) {
   const hits = [];
   for (const pattern of patterns) {
-    pattern.re.lastIndex = 0;
+    const re = pattern.re;
+    re.lastIndex = 0;
     let match;
-    while ((match = pattern.re.exec(text)) !== null) {
+    // 防御（2026-10-30 审计 P0-1）：只要匹配位置没有前进就立刻退出。
+    // 非 global 正则（或将来有人新增 pattern 漏了 g）的 exec() 会永远返回同一处匹配，
+    // 旧代码会在这里无限 push 把事件循环锁死；这条检查与具体正则无关，是永久兜底。
+    let previousIndex = -1;
+    while ((match = re.exec(text)) !== null) {
+      if (match.index === previousIndex) break;
+      previousIndex = match.index;
       hits.push({ kind: pattern.kind, label: pattern.label, severe: pattern.severe !== false, index: match.index, raw: match[0] });
       if (match[0].length === 0) break;
     }

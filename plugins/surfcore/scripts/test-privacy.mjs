@@ -18,6 +18,16 @@ for (const item of cases) {
 }
 
 assert.equal(scanText('sk-1234567890abcdef1234567890abcdef').severe, true);
+
+// 2026-10-30 P0-1 回归：private-key 正则曾漏掉 g 标志 → collect() 的 while(exec)
+// 永不前进，一段 PEM 就能把宿主事件循环锁死（GET /privacy/explain 也能触发）。
+// 这里必须能正常返回、且命中次数正确（锚定 g 标志 + 位置不前进防御）。
+const pem = scanText('x -----BEGIN RSA PRIVATE KEY----- y');
+assert.equal(pem.secrets.length, 1, 'PEM 私钥必须命中且不能死循环');
+assert.equal(pem.severe, true);
+assert.equal(sanitizeText('x -----BEGIN RSA PRIVATE KEY----- y').ok, false, 'PEM 私钥必须被丢弃');
+const twoPem = scanText('-----BEGIN PRIVATE KEY----- a -----BEGIN PRIVATE KEY----- b');
+assert.equal(twoPem.secrets.length, 2, '含 g 标志时多段私钥都要命中');
 assert.throws(() => assertSafeOutput('password: hunter2'), /隐私闸门拒绝/);
 assert.doesNotThrow(() => assertSafeOutput('今天看了个视频，挺好笑的'));
 
