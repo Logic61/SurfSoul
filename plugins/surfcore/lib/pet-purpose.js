@@ -503,13 +503,18 @@ export function createPetPurposeService({ chat, tokenBudget = null, pluginLog = 
         chat.recordUsage(result.usage, result.model);
         text = String(result.text || '').trim();
       } catch (error) {
+        // F1（2026-10-30 审计）：失败必须留下可观测痕迹。`complete()` 自带超时后，
+        // 挂住的模型会让这里拿到 code='timeout' 的错误；以前只写 lastError 不写日志，
+        // 用户/排障者在 plugin.log 里看不到「她这一轮为什么没说话」。
         const message = String(error?.message ?? error).slice(0, 200);
+        const code = String(error?.code || '').slice(0, 24);
         lastError = message;
+        pluginLog(`[pet-purpose] 生成失败（本轮作废，下一轮会再试${code ? `，code=${code}` : ''}）：`, message);
         applyPurposeOutcome(state, {
           now: Date.now(), config: p.config, outcome: 'failed', text: '', planned: selection.purpose,
         });
         saveState(state);
-        return { ok: false, reason: 'llm-failed', error: message, selected: selection.purpose };
+        return { ok: false, reason: 'llm-failed', error: message, code: code || undefined, selected: selection.purpose };
       }
       // 模型偶尔会带引号/名字前缀/半句解释；气泡和语音都只要那句话。
       text = text.replace(/^["“「『]([\s\S]*)["”」』]$/, '$1').trim();
@@ -524,6 +529,8 @@ export function createPetPurposeService({ chat, tokenBudget = null, pluginLog = 
 
       const delivered = await chat.proactive({ text, modality: p.modality, purpose: selection.purpose });
       if (!delivered.ok) {
+        lastError = String(delivered.error || '投递失败').slice(0, 200);
+        pluginLog('[pet-purpose] 投递失败（本轮作废，下一轮会再试）：', lastError);
         applyPurposeOutcome(state, {
           now: Date.now(), config: p.config, outcome: 'failed', text: '', planned: selection.purpose,
         });
@@ -551,6 +558,8 @@ export function createPetPurposeService({ chat, tokenBudget = null, pluginLog = 
       pluginLog('[pet-purpose] 运行失败：', lastError);
       return { ok: false, reason: 'error', error: lastError };
     } finally {
+      // 硬不变量：不管生成/投递成功、失败、超时还是抛错，离场前一定释放 running，
+      // 否则 60s tick 之后每轮都会在入口 `if (running) return {reason:'busy'}` 静默停摆。
       running = false;
     }
   }

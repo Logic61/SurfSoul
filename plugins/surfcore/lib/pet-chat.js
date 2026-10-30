@@ -31,6 +31,36 @@ const ONE_SECOND = 1000;
 const MAX_INPUT_CHARS = 1200;
 const MAX_HISTORY_MESSAGES = 200;
 const EVENT_LIMIT = 200;
+// 模型调用超时（F1，2026-10-30 审计）：默认 90s，可在 config.json 的 pet.chat.llmTimeoutMs 调；
+// 太小会截断正常长回答（400–600 token 的桌宠回复 90s 足够），太大等于没有护栏。
+const DEFAULT_LLM_TIMEOUT_MS = 90 * ONE_SECOND;
+const MIN_LLM_TIMEOUT_MS = 5 * ONE_SECOND;
+const MAX_LLM_TIMEOUT_MS = 180 * ONE_SECOND;
+
+/**
+ * 对话历史的读-改-写串行链（F2，2026-10-30 审计）。
+ *
+ * `chat()` 与 60s tick 的 `proactive()` 可能同时走到「readHistory → append → saveHistory」：
+ * 各自读到同一份快照，后写者整份覆盖先写者 —— 丢一条消息，且事件/记忆 inbox/历史三份状态不一致。
+ * 这里用和 lib/memory-card.js:48-52 相同的 promise 串行链，**只包历史读写**；
+ * LLM / TTS 调用一律留在锁外（否则一次模型调用会把另一条消息堵在门外几十秒）。
+ * 链是 module 级的：一个插件进程只有一个桌宠服务实例，它天然安全；多实例（测试）只是多等一会儿。
+ */
+let historyChain = Promise.resolve();
+
+function serializeHistory(task) {
+  const next = historyChain.then(task, task);
+  historyChain = next.catch(() => {});
+  return next;
+}
+
+/** 流被超时掐断时抛的错：message 说人话（会原样进 status().lastError），code 给调用方分辨。 */
+function llmTimeoutError(timeoutMs) {
+  const seconds = Math.max(1, Math.round(Number(timeoutMs) / ONE_SECOND));
+  const error = new Error(`模型调用超时：${seconds} 秒没有返回结果（上游服务或网络卡住了），这次先不说了`);
+  error.code = 'timeout';
+  return error;
+}
 
 function readJson(file, fallback = null) {
   try {
@@ -150,13 +180,20 @@ function tokenHash(text) {
  * @param {string} opts.stateDir       ~/.dsh/surfcore
  * @param {(msg:string, ...args:any[])=>void} [opts.pluginLog]
  * @param {object} [opts.tokenBudget]  每日额度服务（可选，冒烟测试可不传）
+ * @param {number} [opts.llmTimeoutMs] 单测/排障注入：覆盖模型调用超时（毫秒）。
+ *   生产不传 —— 走 settings().chat.llmTimeoutMs（默认 90s，clamp 5s~180s）。
  */
-export function createPetChatService({ ctx, stateDir, pluginLog = () => {}, tokenBudget = null } = {}) {
+export function createPetChatService({ ctx, stateDir, pluginLog = () => {}, tokenBudget = null, llmTimeoutMs = null } = {}) {
   const root = path.join(stateDir, 'pet');
   const chatDir = path.join(root, 'chat');
   const voiceDir = path.join(root, 'voice');
   const tokenFile = path.join(root, 'host-token');
   const focusFile = path.join(root, 'focus.json');
+
+  // 只有显式传了正数才覆盖：让 test-pet-chat 能把超时压到 200ms，不必真等 90s。
+  const timeoutOverrideMs = Number.isFinite(Number(llmTimeoutMs)) && Number(llmTimeoutMs) > 0
+    ? Math.round(Number(llmTimeoutMs))
+    : null;
 
   const events = [];
   let eventSeq = 0;
@@ -242,6 +279,8 @@ export function createPetChatService({ ctx, stateDir, pluginLog = () => {}, toke
         reasoningEffort: ['off', 'low', 'high', 'max'].includes(String(chat.reasoningEffort))
           ? String(chat.reasoningEffort)
           : 'low',
+        // F1：一次模型调用最多等多久。默认 90s；太小会截断正常长回答，太大等于没有护栏。
+        llmTimeoutMs: clampInt(chat.llmTimeoutMs, DEFAULT_LLM_TIMEOUT_MS, MIN_LLM_TIMEOUT_MS, MAX_LLM_TIMEOUT_MS),
       },
       proactive: {
         carrier: purpose.carrier === 'pet' ? 'pet' : 'qq',
@@ -596,6 +635,13 @@ export function createPetChatService({ ctx, stateDir, pluginLog = () => {}, toke
   /**
    * 一次模型调用。返回 { text, usage, model }。
    * reasoningEffort 默认 low：桌宠聊天要快，不需要长思考；off/low/high/max 由配置控制。
+   *
+   * 超时/取消（F1，2026-10-30 审计）：以前完全依赖 DSH 的 llm 服务自己结束——上游半开/限流挂住时
+   * 流永远不结束，`inFlight` 只增不减、`status().chat.busy` 永久 true，主动搭话的 `running` 也永远
+   * true，且不抛错、`lastError` 为空，用户只看到「她还在、但再也不说话」。
+   * 现在每次尝试（reasoningEffort 换档各算一次）都带独立的 AbortController + 定时器：
+   * 到点 abort 流并抛 code='timeout'；定时器一定在 finally 里清掉。超时错误同样走
+   * 「一个字都没吐出来才换档重试」的既有规则，所以最坏是两次尝试各等一个超时。
    */
   async function complete({ system, user, maxTokens = 800, temperature = 1, signal = null } = {}) {
     const llm = ctx.get('llm');
@@ -603,6 +649,7 @@ export function createPetChatService({ ctx, stateDir, pluginLog = () => {}, toke
     const target = resolveModel();
     if (!target) throw new Error('读不到 DSH 的默认模型（设置 → 模型）');
     const s = settings();
+    const timeoutMs = timeoutOverrideMs ?? s.chat.llmTimeoutMs;
     const base = {
       provider: target.provider,
       model: target.model,
@@ -610,7 +657,6 @@ export function createPetChatService({ ctx, stateDir, pluginLog = () => {}, toke
       messages: [{ role: 'user', content: [{ type: 'text', text: String(user || '') }] }],
       maxTokens: clampInt(maxTokens, 800, 128, 4000),
       temperature: Math.min(2, Math.max(0, Number(temperature) || 1)),
-      ...(signal ? { signal } : {}),
     };
     const attempts = s.chat.reasoningEffort && s.chat.reasoningEffort !== 'off'
       ? [s.chat.reasoningEffort, undefined]
@@ -620,8 +666,20 @@ export function createPetChatService({ ctx, stateDir, pluginLog = () => {}, toke
       const options = effort ? { ...base, reasoningEffort: effort } : base;
       let text = '';
       let usage = null;
+      let timedOut = false;
+      let timer = null;
+      const controller = new AbortController();
+      const abortFromCaller = () => { try { controller.abort(); } catch {} };
       try {
-        const stream = llm.stream(options);
+        // 调用方（将来能传 signal 的地方）取消时，把本次的 controller 一起掐掉。
+        if (signal) {
+          if (signal.aborted) abortFromCaller();
+          else signal.addEventListener?.('abort', abortFromCaller, { once: true });
+        }
+        // 故意不 unref：一次进行中的模型调用是真实的未完成工作，进程不该在超时前退出；
+        // 无论成功/超时/取消，finally 都会把它清掉（最多活 timeoutMs）。
+        timer = setTimeout(() => { timedOut = true; abortFromCaller(); }, timeoutMs);
+        const stream = llm.stream({ ...options, signal: controller.signal });
         for await (const chunk of stream) {
           if (!chunk) continue;
           if (chunk.type === 'text-delta' && chunk.text) text += chunk.text;
@@ -636,12 +694,18 @@ export function createPetChatService({ ctx, stateDir, pluginLog = () => {}, toke
             }
           }
         }
+        // 流在超时之后才「正常」结束：数据已经不完整，按超时处理，不能当成功返回。
+        if (timedOut) throw llmTimeoutError(timeoutMs);
         return { text, usage, model: target.model };
       } catch (error) {
-        lastFailure = error;
+        const failure = timedOut ? llmTimeoutError(timeoutMs) : error;
+        lastFailure = failure;
         // 只有「一个字都没吐出来」才换档重试，避免重复计费/半截回复。
-        if (text) throw error;
-        pluginLog(`[pet-chat] 模型调用失败（effort=${effort || '默认'}）：`, String(error?.message ?? error).slice(0, 160));
+        if (text) throw failure;
+        pluginLog(`[pet-chat] 模型调用失败（effort=${effort || '默认'}）：`, String(failure?.message ?? failure).slice(0, 160));
+      } finally {
+        if (timer) clearTimeout(timer);
+        try { signal?.removeEventListener?.('abort', abortFromCaller); } catch {}
       }
     }
     throw lastFailure || new Error('模型调用失败');
@@ -765,18 +829,25 @@ export function createPetChatService({ ctx, stateDir, pluginLog = () => {}, toke
           aiMessage.spokenText = tts.text;
         }
       }
-      appendMessage(history, userMessage);
-      appendMessage(history, aiMessage);
-      history.lastUserAt = now;
-      history.lastAssistantAt = now;
-      saveHistory(history);
+      // F2：历史写回必须串行。上面读到的 `history` 只是拼提示词用的快照，可能已被并发的
+      // proactive() 整份写新；所以锁内重新 readHistory 再 append，两条消息都不会丢。
+      // LLM 与 TTS 都在锁外，锁内只有内存操作 + 一次原子写，不会互相堵几十秒。
+      await serializeHistory(() => {
+        const latest = readHistory();
+        appendMessage(latest, userMessage);
+        appendMessage(latest, aiMessage);
+        latest.lastUserAt = now;
+        latest.lastAssistantAt = now;
+        saveHistory(latest);
+        lastChatAt = now;
+        return latest;
+      });
       const remembered = rememberEvents(buildPetMemoryEvents({
         userText: say,
         replyText: reply,
         at: now,
         roleName: role.name,
       }));
-      lastChatAt = now;
       lastError = '';
       return {
         ok: true,
@@ -804,7 +875,6 @@ export function createPetChatService({ ctx, stateDir, pluginLog = () => {}, toke
       ? clipForVoice(stripStageDirections(raw), s.chat.voiceMaxChars)
       : clip(cleanReply(raw), s.chat.maxReplyChars);
     const now = Date.now();
-    const history = readHistory();
     const message = { id: `p-${now}-${tokenHash(body).slice(0, 6)}`, role: 'assistant', text: body, modality: mode, at: now, proactive: true };
     if (mode === 'voice') {
       const tts = await synthesize(body);
@@ -813,16 +883,22 @@ export function createPetChatService({ ctx, stateDir, pluginLog = () => {}, toke
         message.spokenText = tts.text;
       }
     }
-    appendMessage(history, message);
-    history.lastProactiveAt = now;
-    history.lastAssistantAt = now;
-    saveHistory(history);
+    // F2：和 chat() 共用同一条历史串行链；TTS 在锁外，锁内只做「读最新 → append → 原子写」，
+    // 并发的聊天消息与这条主动消息都会落进同一份历史（不再整份覆盖）。
+    await serializeHistory(() => {
+      const latest = readHistory();
+      appendMessage(latest, message);
+      latest.lastProactiveAt = now;
+      latest.lastAssistantAt = now;
+      saveHistory(latest);
+      lastProactiveAt = now;
+      return latest;
+    });
     const remembered = rememberEvents(buildPetMemoryEvents({
       replyText: body,
       at: now,
       roleName: roleInfo().name,
     }));
-    lastProactiveAt = now;
     emit({
       type: 'proactive',
       text: body,
@@ -866,6 +942,8 @@ export function createPetChatService({ ctx, stateDir, pluginLog = () => {}, toke
         voiceMaxChars: s.chat.voiceMaxChars,
         historyTurns: s.chat.historyTurns,
         reasoningEffort: s.chat.reasoningEffort,
+        // 实际生效的模型调用超时（测试注入会覆盖配置值），排障时能直接看到。
+        llmTimeoutMs: timeoutOverrideMs ?? s.chat.llmTimeoutMs,
         messages: history.messages.length,
         lastUserAt: history.lastUserAt,
         lastAssistantAt: history.lastAssistantAt,
