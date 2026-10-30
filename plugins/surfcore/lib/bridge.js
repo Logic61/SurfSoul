@@ -178,18 +178,40 @@ export async function start({ dshWebUrl = '' } = {}) {
   if (!/^node(\.exe)?$/i.test(path.basename(String(nodeExe)))) {
     return { ok: false, error: `找不到真正的 node.exe（当前解析到 ${nodeExe}）` };
   }
-  const child = spawn(nodeExe, [path.join(QQBOT_ROOT, 'src', 'bridge.js')], {
-    cwd: QQBOT_ROOT,
-    env,
-    detached: true,
-    stdio: 'ignore',
-    windowsHide: true,
-  });
+  let child = null;
+  let spawnError = null;
+  try {
+    child = spawn(nodeExe, [path.join(QQBOT_ROOT, 'src', 'bridge.js')], {
+      cwd: QQBOT_ROOT,
+      env,
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: true,
+    });
+  } catch (error) {
+    // Windows 上「文件存在但不是有效 Win32 程序」走的是**同步**抛错（spawn UNKNOWN）；
+    // 其它失败（ENOENT/EACCES）才异步 emit('error')。两条路都必须在返回值里体现，
+    // 不能让 start() 以异常结束 —— 设置页点「启动桥接」时这就是宿主 vs 一句报错的区别。
+    spawnError = error;
+  }
+  if (spawnError || !child) {
+    const detail = String(spawnError?.message ?? spawnError ?? '未知原因');
+    appendSupervisorLog(`bridge.js 进程启动失败：${detail}`);
+    return { ok: false, error: `桥接进程启动失败：${detail}`, log: BRIDGE_SUPERVISOR_LOG };
+  }
+  // 异步失败（ENOENT/EACCES 等）也必须监听：没有监听时 EventEmitter 会抛未捕获异常，
+  // 把宿主带崩。错误记进闭包，轮询第一轮就返回可读失败，不空等 12 秒（审计 P1-2）。
+  child.on('error', (error) => { spawnError = error; });
   child.unref();
   appendSupervisorLog(`已请求启动 bridge.js（无窗口，pid ${child.pid ?? '?'}，DSH=${env.DSH_WEB_URL ?? 'config'}）`);
   // 等最多 12 秒
   for (let i = 0; i < 24; i += 1) {
     await new Promise((resolve) => setTimeout(resolve, 500));
+    if (spawnError) {
+      const detail = String(spawnError?.message ?? spawnError);
+      appendSupervisorLog(`bridge.js 进程启动失败：${detail}`);
+      return { ok: false, error: `桥接进程启动失败：${detail}`, log: BRIDGE_SUPERVISOR_LOG };
+    }
     if (await portOpen()) return { ok: true, started: true, message: '桥接已启动' };
   }
   return { ok: false, error: '启动后 12 秒仍未监听控制台端口，请查看桥接日志', log: BRIDGE_SUPERVISOR_LOG };

@@ -7,6 +7,9 @@
  * 运行：node scripts/test-host-smoke.mjs
  */
 import { EventEmitter } from 'node:events';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 // 冒烟测试不启动真实桥接（即使本机 unified 配置开了 autoStart）。
 process.env.SURFCORE_SKIP_AUTOSTART = '1';
 process.env.SURFCORE_DISABLE_CHARACTER_MIGRATION = '1';
@@ -82,6 +85,24 @@ if (!apiRoute || !extRoute || !healthRoute) throw new Error('路由没有全部�
 const health = await invoke(healthRoute, 'GET', '/dsh-surfcore/health');
 console.log('health:', health.statusCode, health.body.slice(0, 200));
 
+// ── P1-2 回归（静态）：detached spawn 必须挂 'error' 监听 ─────────────────────
+// spawn 失败（node.exe 被删/被拦/不是有效 exe）是**异步** emit('error')；没有监听时
+// EventEmitter 会抛未捕获异常，设置页点一次「启动桥接/一键启动」就能把宿主带崩。
+// 行为回归在 test-bridge-status.mjs（坏 DSH_NODE → ok:false）；这里守住另外 3 处
+// 不好离线触发（会真弹窗/真起程序）的 detached spawn 不会漏监听。
+{
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  for (const relative of ['../lib/index.js', '../lib/bridge.js']) {
+    const src = fs.readFileSync(path.join(here, relative), 'utf8');
+    const detached = (src.match(/detached:\s*true/g) || []).length;
+    const guarded = (src.match(/\.on\('error'/g) || []).length;
+    if (detached === 0) throw new Error(`${relative} 里找不到 detached spawn，静态断言失效`);
+    if (guarded < detached) {
+      throw new Error(`${relative}: ${detached} 处 detached spawn 只有 ${guarded} 处 'error' 监听（spawn 失败会崩宿主）`);
+    }
+  }
+}
+
 for (const path of ['/dsh-surfcore/api/overview', '/dsh-surfcore/api/config', '/dsh-surfcore/api/persona', '/dsh-surfcore/api/memory', '/dsh-surfcore/api/memory-card', '/dsh-surfcore/api/memory-card/full', '/dsh-surfcore/api/align', '/dsh-surfcore/api/extensions', '/dsh-surfcore/api/platforms', '/dsh-surfcore/api/diagnostics', '/dsh-surfcore/api/bili/automation', '/dsh-surfcore/api/watch-history', '/dsh-surfcore/api/preferences/scan?sources=local&limit=5', '/dsh-surfcore/api/bili/fish-guard', '/dsh-surfcore/api/fish-guard/qq']) {
   const res = await invoke(apiRoute, 'GET', path);
   const data = JSON.parse(res.body || '{}');
@@ -152,6 +173,24 @@ for (const path of ['/dsh-surfcore/api/overview', '/dsh-surfcore/api/config', '/
     if (typeof data.active !== 'number') throw new Error('/fish-guard/qq 缺少 active');
     if (!data.config || typeof data.config.enabled !== 'boolean') throw new Error('/fish-guard/qq 缺少配置');
   }
+}
+
+// ── P1-1 回归：browse 的原生对话框标题注入 ───────────────────────────────────
+// title 过去被 JSON.stringify 后拼进 PowerShell 脚本，而 PowerShell 双引号字符串里
+// `$(...)` 会执行子表达式（本机 GET 即命令执行）。现在标题只走环境变量 + 白名单校验，
+// 非法标题在**启动 PowerShell 之前**就返回错误 —— 所以这条断言在无桌面/离线环境也安全。
+for (const title of ['$(calc)', 'a\r\nb', 'x'.repeat(81), '`whoami`']) {
+  const res = await invoke(apiRoute, 'GET', `/dsh-surfcore/api/browse?mode=dir&title=${encodeURIComponent(title)}`);
+  const data = JSON.parse(res.body || '{}');
+  if (res.statusCode !== 200 || data.ok !== false || data.error !== '标题含非法字符') {
+    throw new Error(`browse 非法标题未拒绝：${JSON.stringify(title)} -> ${res.statusCode} ${res.body.slice(0, 200)}`);
+  }
+}
+// 合法标题不能走 PowerShell 源码拼接：脚本里必须读环境变量，不能再出现插值。
+{
+  const src = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'lib', 'index.js'), 'utf8');
+  if (!src.includes('$env:SURFCORE_BROWSE_TITLE')) throw new Error('browse 脚本没有改为读 $env:SURFCORE_BROWSE_TITLE');
+  if (/\$d\.(?:Title|Description) = \$\{JSON\.stringify\(title\)\}/.test(src)) throw new Error('browse 仍把 title 拼进 PowerShell 字符串');
 }
 
 // 一键启动里的 SnowLuma 分支：测试环境跳过真实弹窗，只验证路由/鉴权/响应。

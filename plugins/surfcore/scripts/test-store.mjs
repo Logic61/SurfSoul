@@ -1,8 +1,34 @@
-/** 配置存储回归：脱敏/还原密钥、范围收敛、默认值合并。 */
+/** 配置存储回归：脱敏/还原密钥、范围收敛、默认值合并、备份失败/坏配置可观测（P1-11）。 */
 import assert from 'node:assert/strict';
-import {
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+
+// ── 隔离环境 ────────────────────────────────────────────────────────────────
+// store.js 的路径常量在 import 时从 env 解析，所以必须先设 env 再 import。
+// 目的：P1-11 的备份/坏配置断言必须真的写文件，但绝不允许写真实 ~/.dsh 或仓库里的
+// config.json —— 全部重定向到一个临时目录。
+const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'surfcore-store-test-'));
+const qqRoot = path.join(tmp, 'qqbot');
+const dshHome = path.join(tmp, 'dsh');
+const stateDir = path.join(dshHome, 'surfcore');
+const backupDir = path.join(stateDir, 'backups');
+const qqConfigFile = path.join(qqRoot, 'config.json');
+const unifiedFile = path.join(stateDir, 'config.json');
+fs.mkdirSync(path.join(qqRoot, 'src'), { recursive: true });
+fs.mkdirSync(stateDir, { recursive: true });
+// paths.js 的 QQBOT_ROOT 探针要求 config.json 与 src/bridge.js 同时存在。
+fs.writeFileSync(path.join(qqRoot, 'src', 'bridge.js'), '// test stub\n');
+fs.writeFileSync(qqConfigFile, JSON.stringify({ ownerQQ: '12345678' }));
+process.env.SURFCORE_ROOT = qqRoot;
+process.env.DSH_HOME = dshHome;
+process.on('exit', () => { try { fs.rmSync(tmp, { recursive: true, force: true }); } catch {} });
+
+const store = await import('../lib/store.js');
+const {
   MASK, normalizeBiliConfig, normalizeQqConfig, redactForUi, restoreMaskedSecrets,
-} from '../lib/store.js';
+  readBiliConfig, readQqConfig, readUnified, readAll, saveQqConfig, saveUnified,
+} = store;
 
 const sample = {
   dsh: { authToken: 'secret-token' },
@@ -88,5 +114,52 @@ assert.equal(biliTaste.preferences.weights.DeepSeek, 5, '权重越界收敛到 5
 assert.equal(biliTaste.preferences.weights['猫咪'], 0, '0 是合法的「停用」');
 assert.equal(biliTaste.preferences.weights['不存在'], undefined, '不在列表里的权重键要清掉');
 assert.equal(biliTaste.preferences.weights['手书'], 1, '非法权重回落到默认 1');
+
+// ── P1-11：备份失败 / 坏配置不能静默 ─────────────────────────────────────────
+// 1) 首次安装：文件不存在 = 正常（不是损坏，也没有可备份的旧文件）。行为必须和修复前一致。
+fs.rmSync(qqConfigFile, { force: true });
+const freshState = readQqConfig();
+assert.equal(freshState.corrupt, false, '文件不存在不是“损坏”（首次安装行为不能变）');
+assert.equal(freshState.hasUserFile, false);
+const freshSave = saveQqConfig({ ownerQQ: '12345678' });
+assert.equal(freshSave.backup, null, '首次保存没有旧文件可备份');
+assert.equal(freshSave.backupError, null, '首次保存不能报备份错误');
+assert.equal(freshSave.corrupt, false);
+assert.equal(freshSave.corruptFile, null);
+assert.equal(fs.readdirSync(qqRoot).filter((name) => name.includes('.corrupt-')).length, 0, '首次安装不能产生 .corrupt 文件');
+assert.equal(JSON.parse(fs.readFileSync(qqConfigFile, 'utf8')).ownerQQ, '12345678');
+
+// 2) 文件存在但 JSON 坏：读要报 corrupt（不能静默显示默认值），保存前把坏文件改名 .corrupt-<ts>。
+fs.writeFileSync(qqConfigFile, '{"ownerQQ": "123', 'utf8');
+assert.equal(readQqConfig().corrupt, true, '坏 JSON 必须以 corrupt 暴露');
+const corruptSave = saveQqConfig({ ownerQQ: '87654321' });
+assert.equal(corruptSave.corrupt, true);
+assert.ok(corruptSave.corruptFile, '坏文件必须被隔离并返回隔离路径');
+assert.ok(fs.existsSync(corruptSave.corruptFile), '隔离后的坏文件必须留在磁盘上（可人工抢救）');
+assert.ok(fs.readFileSync(corruptSave.corruptFile, 'utf8').includes('"123'), '隔离文件必须保留原始坏内容');
+assert.equal(fs.readdirSync(qqRoot).filter((name) => name.startsWith('config.json.corrupt-')).length, 1, '坏文件应改名为 .corrupt-<ts>');
+const afterCorrupt = readQqConfig();
+assert.equal(afterCorrupt.corrupt, false, '写入后配置文件必须恢复可解析');
+assert.equal(afterCorrupt.config.ownerQQ, '87654321', '本次保存的值必须落盘');
+
+// 3) 备份失败（backups 目录被一个普通文件占住）：save* 必须回传 backupError，且不能挡住保存。
+fs.rmSync(backupDir, { recursive: true, force: true });
+fs.writeFileSync(backupDir, 'not a directory');
+const blockedSave = saveQqConfig({ ownerQQ: '11112222' });
+assert.notEqual(blockedSave.backupError, null, '备份失败必须回传 error（旧版静默返回 null）');
+assert.match(String(blockedSave.backupError), /ENOTDIR|EEXIST|EPERM|EACCES|ENOENT/, '备份错误要带可读原因');
+assert.equal(blockedSave.backup, null);
+assert.equal(JSON.parse(fs.readFileSync(qqConfigFile, 'utf8')).ownerQQ, '11112222', '备份失败不能挡住保存');
+fs.rmSync(backupDir, { force: true });
+
+// 4) 合体层配置：corrupt 暴露 + saveUnified 隔离坏文件。
+fs.writeFileSync(unifiedFile, 'not-json-at-all', 'utf8');
+assert.equal(readUnified().corrupt, true, '合体层坏 JSON 也必须是 corrupt');
+const badUnified = saveUnified({ admin: { qq: '12345678' } });
+assert.equal(badUnified.corrupt, true);
+assert.ok(badUnified.corruptFile && fs.existsSync(badUnified.corruptFile), '合体层坏文件必须被隔离');
+assert.equal(readUnified().corrupt, false, 'saveUnified 之后合体层配置必须可解析');
+assert.equal(readAll().corrupt.qq, false);
+assert.equal(readBiliConfig().corrupt, false, 'B站配置文件不存在时不能误报损坏');
 
 console.log('store tests OK');

@@ -732,7 +732,14 @@ export function apply(ctx) {
   // ── 配置读写 ────────────────────────────────────────────────────────────
   async function handleConfig(req, res) {
     if (req.method === 'GET') {
-      json(res, 200, { ok: true, ...readAll(), paths: pathSummary(), backups: listBackups(20) });
+      const all = readAll();
+      const warnings = [];
+      // 2026-10-30 审计 P1-11：坏配置过去被静默显示成模板默认值，用户再点保存就把
+      // 默认值落盘、原文件不可回滚。GET 时就把“文件坏了”告诉设置页。
+      if (all.corrupt?.qq) warnings.push('QQ 配置（config.json）解析失败：文件已损坏。保存时会先把坏文件改名成 .corrupt-<时间戳> 再写入新配置。');
+      if (all.corrupt?.bili) warnings.push('B站配置（bili.config.json）解析失败：文件已损坏。保存时会先把坏文件改名成 .corrupt-<时间戳> 再写入新配置。');
+      if (all.corrupt?.unified) warnings.push('合体层配置（~/.dsh/surfcore/config.json）解析失败：文件已损坏。保存时会先把坏文件改名成 .corrupt-<时间戳> 再写入新配置。');
+      json(res, 200, { ok: true, ...all, warnings, paths: pathSummary(), backups: listBackups(20) });
       return;
     }
     const body = JSON.parse(await readBody(req) || '{}');
@@ -763,6 +770,11 @@ export function apply(ctx) {
       result.saved.qq = true;
       result.qq = saved.config;
       result.qqBackup = saved.backup;
+      result.qqBackupError = saved.backupError;
+      // 2026-10-30 审计 P1-11：备份失败不能再静默——否则用户以为“每次保存都有备份”，
+      // 真出事时回滚路径恰好不存在。
+      if (saved.backupError) result.warnings.push(`QQ 配置已保存，但备份失败：${saved.backupError}。本次改动没有备份可回滚，请检查磁盘空间与 backups 目录权限。`);
+      if (saved.corrupt) result.warnings.push(`config.json 之前已损坏，原文件已隔离为 ${saved.corruptFile ? maskPath(saved.corruptFile) : '（隔离失败，未改名）'}，本次已写入新配置。`);
       result.warnings.push('QQ 配置已保存；桥接只在启动时读 config.json，需要「重启桥接」才会生效。');
     }
     if (body.bili && typeof body.bili === 'object') {
@@ -770,6 +782,9 @@ export function apply(ctx) {
       result.saved.bili = true;
       result.bili = saved.config;
       result.biliBackup = saved.backup;
+      result.biliBackupError = saved.backupError;
+      if (saved.backupError) result.warnings.push(`B站配置已保存，但备份失败：${saved.backupError}。本次改动没有备份可回滚，请检查磁盘空间与 backups 目录权限。`);
+      if (saved.corrupt) result.warnings.push(`bili.config.json 之前已损坏，原文件已隔离为 ${saved.corruptFile ? maskPath(saved.corruptFile) : '（隔离失败，未改名）'}，本次已写入新配置。`);
       result.warnings.push('B站配置已保存；生物钟每轮重读配置，下一轮即生效。');
     }
     // 角色名校验：tts.character 必须是 [voice.characters] 里的名字，不能填音色 id。
@@ -787,6 +802,10 @@ export function apply(ctx) {
       const saved = saveUnified(body.unified);
       result.saved.unified = true;
       result.unified = saved.config;
+      result.unifiedBackup = saved.backup;
+      result.unifiedBackupError = saved.backupError;
+      if (saved.backupError) result.warnings.push(`合体层配置已保存，但备份失败：${saved.backupError}。本次改动没有备份可回滚，请检查磁盘空间与 backups 目录权限。`);
+      if (saved.corrupt) result.warnings.push(`合体层配置之前已损坏，原文件已隔离为 ${saved.corruptFile ? maskPath(saved.corruptFile) : '（隔离失败，未改名）'}，本次已写入新配置。`);
     }
     if (result.saved.unified) {
       // 切了语音路由就要当场告诉用户"目标服务没起"（否则现象是"切了没反应"）。
@@ -1005,7 +1024,7 @@ export function apply(ctx) {
     writeTextAtomic(resolvePersonaFile(), text.endsWith('\n') ? text : `${text}\n`);
     const cur = readCurrentCharacter();
     if (cur) touchCharacter(cur.id);
-    json(res, 200, { ok: true, chars: text.length, backup, path: resolvePersonaFile() });
+    json(res, 200, { ok: true, chars: text.length, backup: backup.dest, backupError: backup.error, path: resolvePersonaFile() });
   }
 
   // ── 记忆 ────────────────────────────────────────────────────────────────
@@ -1534,15 +1553,18 @@ export function apply(ctx) {
     }
     if (body.action === 'backup') {
       const created = [];
+      const failed = [];
       for (const [label, file] of [
         ['qq-config', QQ_CONFIG], ['bili-config', BILI_CONFIG], ['unified-config', path.join(STATE_DIR, 'config.json')],
         ['persona', resolvePersonaFile()], ['alignments', ALIGN_FILE],
         ['qq-memory', activeMemoryPaths().qqForBili], ['qq-alignment', QQ_ALIGNMENT_BRIEF], ['bili-alignment', BILI_ALIGNMENT_FILE],
       ]) {
         const out = backupFile(file, label);
-        if (out) created.push({ label, file: maskPath(out) });
+        // backupFile 现在回传 {dest,error}：文件不存在 = 两者皆空；失败必须让用户看见（P1-11）。
+        if (out.dest) created.push({ label, file: maskPath(out.dest) });
+        else if (out.error) failed.push({ label, error: maskPath(out.error) });
       }
-      json(res, 200, { ok: true, created });
+      json(res, 200, { ok: true, created, failed });
       return;
     }
     if (body.action === 'restore') {
@@ -1650,9 +1672,13 @@ export function apply(ctx) {
     if (process.env.SURFCORE_SKIP_AUTOSTART === '1') return false;
     if (!/^http:\/\/127\.0\.0\.1:\d{2,5}$/.test(String(url))) return false;
     try {
-      spawn(process.env.ComSpec || 'cmd.exe', ['/d', '/c', 'start', '""', `"${url}"`], {
+      const child = spawn(process.env.ComSpec || 'cmd.exe', ['/d', '/c', 'start', '""', `"${url}"`], {
         detached: true, stdio: 'ignore', windowsHide: true, windowsVerbatimArguments: true,
-      }).unref();
+      });
+      // spawn 失败（cmd.exe 被移走/被拦）是**异步** emit('error')；没有监听会抛
+      // 未捕获异常，把宿主带崩（2026-10-30 审计 P1-2）。
+      child.on('error', (error) => pluginLog('打开浏览器失败：', String(error?.message ?? error)));
+      child.unref();
       return true;
     } catch {
       return false;
@@ -1712,19 +1738,31 @@ export function apply(ctx) {
     try {
       const cwd = path.dirname(launcher);
       const lower = launcher.toLowerCase();
+      // spawn 失败是异步 emit('error')，try/catch 只包得住同步段。必须监听并把错误
+      // 带进下面的等待循环，否则会抛未捕获异常（2026-10-30 审计 P1-2）。
+      let spawnError = null;
+      const watchSpawn = (child) => {
+        child.on('error', (error) => {
+          spawnError = error;
+          pluginLog('SnowLuma 启动进程失败：', String(error?.message ?? error));
+        });
+        child.unref();
+        return child;
+      };
       if (lower.endsWith('.bat') || lower.endsWith('.cmd')) {
         // 2026-10-22 审计：旧写法把 basename 拼进 cmd 命令串，路径里带 `&` 可注入命令。
         // 现在整条路径作为「verbatim 参数」交给 cmd，并且拒绝含引号/换行的路径。
         if (/["\r\n]/.test(launcher)) return { ok: false, error: '启动脚本路径含引号或换行，拒绝执行' };
-        spawn(process.env.ComSpec || 'cmd.exe', ['/d', '/c', 'start', '""', `"${launcher}"`], {
+        watchSpawn(spawn(process.env.ComSpec || 'cmd.exe', ['/d', '/c', 'start', '""', `"${launcher}"`], {
           cwd, detached: true, stdio: 'ignore', windowsHide: false, windowsVerbatimArguments: true,
-        }).unref();
+        }));
       } else {
-        spawn(launcher, [], { cwd, detached: true, stdio: 'ignore', windowsHide: false }).unref();
+        watchSpawn(spawn(launcher, [], { cwd, detached: true, stdio: 'ignore', windowsHide: false }));
       }
       // 等 WebUI 端口起来（最多 10 秒）：起来了就打开浏览器；没起来也给出地址让用户自己点。
       const until = Date.now() + 10_000;
       while (Date.now() < until) {
+        if (spawnError) return { ok: false, error: `打开 SnowLuma 失败：${String(spawnError?.message ?? spawnError)}` };
         await new Promise((resolve) => setTimeout(resolve, 400));
         if (await portOpen(webui.port)) {
           const opened = openLocalUrl(webui.url);
@@ -1738,6 +1776,7 @@ export function apply(ctx) {
           };
         }
       }
+      if (spawnError) return { ok: false, error: `打开 SnowLuma 失败：${String(spawnError?.message ?? spawnError)}` };
       return { ok: true, started: true, pending: true, webui: webui.url, launcher, message: `已启动 SnowLuma，控制台稍后可访问：${webui.url}` };
     } catch (error) {
       return { ok: false, error: `打开 SnowLuma 失败：${error?.message ?? error}` };
@@ -1763,6 +1802,9 @@ export function apply(ctx) {
       // VBScript 在 wscript 下按 UTF-16LE + BOM 读最稳，中文不会乱码。
       fs.writeFileSync(file, Buffer.concat([Buffer.from([0xFF, 0xFE]), Buffer.from(vbs, 'utf16le')]));
       const child = spawn(wscript, ['//nologo', file], { detached: true, stdio: 'ignore', windowsHide: true });
+      // 同上：spawn 失败是异步 error 事件，不监听会让宿主崩溃。弹窗失败只影响提示，
+      // 记日志即可（不能因此打断启动流程）。
+      child.on('error', (error) => pluginLog('启动弹窗进程失败：', String(error?.message ?? error)));
       child.unref();
       pluginLog(`启动弹窗已请求：${title}（pid ${child.pid ?? '?'}，${seconds}s）`);
       setTimeout(() => { try { fs.unlinkSync(file); } catch {} }, 120000).unref?.();
@@ -1890,27 +1932,52 @@ export function apply(ctx) {
   // 桌宠：安装 / 卸载 / 启动 / 停止 / 状态（本机文件，不经过桥接）
   let electronJob = null;
 
-  // 原生「浏览目录 / 选择文件」——浏览器拿不到绝对路径，只能由宿主进程弹 Windows 对话框。
+  // 原生「浏览目录 / 选择文件」——浏览器拿不到绝对路径,只能由宿主进程弹 Windows 对话框。
   // 仅 Windows 且 DSH 跑在本机时有意义；其它情况返回可读错误，前端提示手动填。
+  //
+  // 安全（2026-10-30 审计 P1-1）：title 过去被 JSON.stringify 后拼进 PowerShell 脚本，
+  // 而 PowerShell 的双引号字符串是**可插值**的（$(...) / 反引号会执行子表达式），
+  // 等于一个本机 GET 就能命令注入。现在 title 只做两件事：
+  //   ① 白名单校验（非法字符/换行/超长直接拒绝，**不启动 PowerShell**，可离线回归）；
+  //   ② 通过环境变量 SURFCORE_BROWSE_TITLE 传给 PowerShell，脚本里读
+  //      $env:SURFCORE_BROWSE_TITLE —— 标题永远不进入脚本源码。
+  const BROWSE_TITLE_MAX = 80;
+  const BROWSE_TITLE_SAFE = /^[\w\u4e00-\u9fa5 ·（）()\-_./:：]+$/;
+  function browseTitleOrNull(rawTitle, fallback) {
+    const title = String(rawTitle ?? '').trim() || fallback;
+    if (/[\r\n\u0000-\u001f\u007f]/.test(title)) return null;
+    if (title.length > BROWSE_TITLE_MAX) return null;
+    if (!BROWSE_TITLE_SAFE.test(title)) return null;
+    return title;
+  }
+
   async function handleBrowse(req, res, url) {
     const mode = url.searchParams.get('mode') === 'file' ? 'file' : 'dir';
-    const title = url.searchParams.get('title') || (mode === 'file' ? '选择文件' : '选择目录');
     if (process.platform !== 'win32') {
       json(res, 200, { ok: false, error: '只有 Windows 支持原生选择框，请手动填路径' });
+      return;
+    }
+    const title = browseTitleOrNull(url.searchParams.get('title'), mode === 'file' ? '选择文件' : '选择目录');
+    if (!title) {
+      json(res, 200, { ok: false, error: '标题含非法字符' });
       return;
     }
     const ps = mode === 'file'
       ? `Add-Type -AssemblyName System.Windows.Forms;
 $d = New-Object System.Windows.Forms.OpenFileDialog;
-$d.Title = ${JSON.stringify(title)};
+$d.Title = $env:SURFCORE_BROWSE_TITLE;
 $d.Filter = '可执行文件 (*.exe)|*.exe|所有文件 (*.*)|*.*';
 if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $d.FileName }`
       : `Add-Type -AssemblyName System.Windows.Forms;
 $d = New-Object System.Windows.Forms.FolderBrowserDialog;
-$d.Description = ${JSON.stringify(title)};
+$d.Description = $env:SURFCORE_BROWSE_TITLE;
 $d.ShowNewFolderButton = $true;
 if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $d.SelectedPath }`;
-    const child = execFile('powershell.exe', ['-STA', '-NoProfile', '-Command', ps], { windowsHide: true, timeout: 180_000 }, (error, stdout) => {
+    const child = execFile('powershell.exe', ['-STA', '-NoProfile', '-Command', ps], {
+      windowsHide: true,
+      timeout: 180_000,
+      env: { ...process.env, SURFCORE_BROWSE_TITLE: title },
+    }, (error, stdout) => {
       const picked = String(stdout || '').trim().split(String.fromCharCode(10)).pop().trim();
       if (error && !picked) json(res, 200, { ok: false, error: `选择框打不开：${String(error.message || error).slice(0, 160)}` });
       else if (!picked) json(res, 200, { ok: false, cancelled: true, error: '已取消' });

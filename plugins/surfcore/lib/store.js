@@ -201,14 +201,35 @@ export function setPath(object, parts, value) {
   cur[parts[parts.length - 1]] = value;
 }
 
-export function readJson(file, fallback = null) {
+/**
+ * 详细读取 JSON：区分「文件不存在（首次安装）」和「文件存在但解析失败（损坏）」。
+ *
+ * 2026-10-30 审计 P1-11：readJson 过去把所有错误都当「没配置」，于是一个坏掉的
+ * config.json 会被静默显示成模板默认值，用户再点保存就把默认值落盘，原文件连
+ * 备份都不一定成功 —— 用户无法归因也无法回滚。配置类读取改用本函数把损坏暴露出去。
+ *
+ * @returns {{ value:any, exists:boolean, corrupt:boolean, missing:boolean, error:string|null }}
+ */
+export function readJsonDetailed(file, fallback = null) {
+  let text;
   try {
-    let text = fs.readFileSync(file, 'utf8');
-    if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
-    return JSON.parse(text);
-  } catch {
-    return fallback;
+    text = fs.readFileSync(file, 'utf8');
+  } catch (error) {
+    const missing = error?.code === 'ENOENT' || error?.code === 'ENOTDIR';
+    // 文件不存在是正常状态（首次安装/尚未保存），不是损坏。
+    return { value: fallback, exists: false, corrupt: false, missing, error: missing ? null : String(error?.message ?? error) };
   }
+  try {
+    if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
+    return { value: JSON.parse(text), exists: true, corrupt: false, missing: false, error: null };
+  } catch (error) {
+    // 读到了文件但解析不了 = 损坏。空文件同样落在这里。
+    return { value: fallback, exists: true, corrupt: true, missing: false, error: String(error?.message ?? error) };
+  }
+}
+
+export function readJson(file, fallback = null) {
+  return readJsonDetailed(file, fallback).value;
 }
 
 export function writeTextAtomic(file, text, { mode = 0o600 } = {}) {
@@ -229,18 +250,52 @@ export function writeJsonAtomic(file, value, options) {
   writeTextAtomic(file, `${JSON.stringify(value, null, 2)}\n`, options);
 }
 
+/**
+ * 备份文件。返回 `{ dest, error }`：
+ *   · 文件不存在（首次安装）→ `{ dest: null, error: null }`，不是错误；
+ *   · 成功 → `{ dest, error: null }`；
+ *   · 失败 → `{ dest: null, error: '<原因>' }`。
+ *
+ * 2026-10-30 审计 P1-11：旧版 `catch { return null }` 把「磁盘满/ACL 收紧/备份目录被占」
+ * 和「本来就没有文件」混成同一个 null，设置页因此从不提示“这次保存没有备份”，
+ * 用户以为随时能回滚。调用方（save*）必须把 error 透传到响应 warnings。
+ */
 export function backupFile(file, label) {
+  if (!fs.existsSync(file)) return { dest: null, error: null };
   try {
-    if (!fs.existsSync(file)) return null;
     ensureDirs();
     const stamp = new Date().toISOString().replace(/[:.]/g, '-');
     const safe = String(label || path.basename(file)).replace(/[^A-Za-z0-9_.\-\u4e00-\u9fa5]/g, '_');
     const dest = path.join(BACKUP_DIR, `${safe}-${stamp}${path.extname(file) || '.json'}`);
     fs.copyFileSync(file, dest);
     pruneBackups();
+    return { dest, error: null };
+  } catch (error) {
+    return { dest: null, error: String(error?.message ?? error) };
+  }
+}
+
+/**
+ * 把损坏的配置文件改名隔离（`.corrupt-<ts>`），给后续写入让路。
+ * 改名失败（占用/ACL）不阻塞保存：退回把坏内容复制进备份目录，仍失败就返回 null，
+ * 由调用方把“无法隔离”写进 warnings。
+ */
+function quarantineCorruptFile(file, label) {
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const dest = `${file}.corrupt-${stamp}`;
+  try {
+    fs.renameSync(file, dest);
     return dest;
-  } catch {
-    return null;
+  } catch (error) {
+    try {
+      fs.mkdirSync(BACKUP_DIR, { recursive: true });
+      const safe = String(label || path.basename(file)).replace(/[^A-Za-z0-9_.\-\u4e00-\u9fa5]/g, '_');
+      const fallback = path.join(BACKUP_DIR, `${safe}-corrupt-${stamp}.json`);
+      fs.copyFileSync(file, fallback);
+      return fallback;
+    } catch {
+      return null;
+    }
   }
 }
 
@@ -289,13 +344,27 @@ function exampleDefaults() {
 /** QQ 配置：模板默认值 + 用户文件。只用于展示/合并，不改文件。 */
 export function readQqConfig() {
   const defaults = exampleDefaults();
-  const user = readJson(QQ_CONFIG, {}) ?? {};
-  return { config: deepMerge(defaults, user), hasUserFile: Object.keys(user).length > 0 };
+  const userRead = readJsonDetailed(QQ_CONFIG, {});
+  const user = userRead.value ?? {};
+  return {
+    config: deepMerge(defaults, user),
+    hasUserFile: Object.keys(user).length > 0,
+    // 2026-10-30 P1-11：文件存在但 JSON 坏，不能静默显示成默认值。
+    // 调用方（/api/config 等）据此提示用户；saveQqConfig() 会先隔离坏文件再写。
+    corrupt: userRead.corrupt,
+    corruptError: userRead.error,
+  };
 }
 
 export function readBiliConfig() {
-  const user = readJson(BILI_CONFIG, {}) ?? {};
-  return { config: deepMerge(BIDI_DEFAULTS, user), hasUserFile: Object.keys(user).length > 0 };
+  const userRead = readJsonDetailed(BILI_CONFIG, {});
+  const user = userRead.value ?? {};
+  return {
+    config: deepMerge(BIDI_DEFAULTS, user),
+    hasUserFile: Object.keys(user).length > 0,
+    corrupt: userRead.corrupt,
+    corruptError: userRead.error,
+  };
 }
 
 /**
@@ -326,7 +395,8 @@ export function platformStartsFrom(user = {}) {
 }
 
 export function readUnified() {
-  const user = readJson(UNIFIED_FILE, {}) ?? {};
+  const userRead = readJsonDetailed(UNIFIED_FILE, {});
+  const user = userRead.value ?? {};
   const config = deepMerge(DEFAULT_UNIFIED, user);
   config.platforms = isPlainObject(config.platforms) ? config.platforms : {};
   config.platforms.start = platformStartsFrom(user);
@@ -337,6 +407,9 @@ export function readUnified() {
     // readUnified() 会合并 DEFAULT_UNIFIED，合并结果里 admin 永远存在（默认空串），
     // 只看合并值会把升级后的旧字段（ownerQQ / owner.mid）永远当不存在。
     hasAdmin: isPlainObject(user.admin),
+    // 2026-10-30 P1-11：合体层配置损坏要能看见（首次安装 = 文件不存在，corrupt=false）。
+    corrupt: userRead.corrupt,
+    corruptError: userRead.error,
   };
 }
 
@@ -560,29 +633,49 @@ export function readAll() {
     bili: redactForUi(bili.config),
     unified: unifiedWithAdmin,
     hasUserFile: { qq: qq.hasUserFile, bili: bili.hasUserFile, unified: unified.hasUserFile },
+    // 三份配置各自的损坏状态（文件不存在 ≠ 损坏）。/api/config 用它生成 warnings。
+    corrupt: { qq: qq.corrupt, bili: bili.corrupt, unified: unified.corrupt },
   };
 }
 
 export function saveQqConfig(incoming) {
-  const current = readQqConfig().config;
+  const currentState = readQqConfig();
+  const current = currentState.config;
   const restored = restoreMaskedSecrets(incoming, current);
   const next = normalizeQqConfig(deepMerge(current, restored));
+  // 先备份（坏文件也留一份事故现场），再把坏文件隔离成 .corrupt-<ts>，最后原子写。
   const backup = backupFile(QQ_CONFIG, 'qq-config');
+  const corruptFile = currentState.corrupt ? quarantineCorruptFile(QQ_CONFIG, 'qq-config') : null;
   writeJsonAtomic(QQ_CONFIG, next);
-  return { config: redactForUi(next), backup };
+  return {
+    config: redactForUi(next),
+    backup: backup.dest,
+    backupError: backup.error,
+    corrupt: currentState.corrupt,
+    corruptFile,
+  };
 }
 
 export function saveBiliConfig(incoming) {
-  const current = readBiliConfig().config;
+  const currentState = readBiliConfig();
+  const current = currentState.config;
   const restored = restoreMaskedSecrets(incoming, current);
   const next = normalizeBiliConfig(deepMerge(current, restored));
   const backup = backupFile(BILI_CONFIG, 'bili-config');
+  const corruptFile = currentState.corrupt ? quarantineCorruptFile(BILI_CONFIG, 'bili-config') : null;
   writeJsonAtomic(BILI_CONFIG, next);
-  return { config: redactForUi(next), backup };
+  return {
+    config: redactForUi(next),
+    backup: backup.dest,
+    backupError: backup.error,
+    corrupt: currentState.corrupt,
+    corruptFile,
+  };
 }
 
 export function saveUnified(incoming) {
-  const current = readUnified().config;
+  const currentState = readUnified();
+  const current = currentState.config;
   const next = deepMerge(current, clone(incoming ?? {}));
   next.version = 1;
   // 记忆卡上限必须按引擎的边界收敛：否则输入 999999 会原样落盘，界面显示 999999、
@@ -599,8 +692,15 @@ export function saveUnified(incoming) {
   next.bridge = isPlainObject(next.bridge) ? next.bridge : {};
   next.bridge.autoStart = next.platforms.start.qq;
   const backup = backupFile(UNIFIED_FILE, 'unified-config');
+  const corruptFile = currentState.corrupt ? quarantineCorruptFile(UNIFIED_FILE, 'unified-config') : null;
   writeJsonAtomic(UNIFIED_FILE, next);
-  return { config: next, backup };
+  return {
+    config: next,
+    backup: backup.dest,
+    backupError: backup.error,
+    corrupt: currentState.corrupt,
+    corruptFile,
+  };
 }
 
 export function pathSummary() {

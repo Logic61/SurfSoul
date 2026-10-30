@@ -1,13 +1,46 @@
 /**
- * 桥接状态映射回归：`dshReady` 必须原样透出。
+ * 桥接状态映射回归：`dshReady` 必须原样透出；spawn 失败必须快速变成 ok:false。
  *
  * 背景（真发生过）：`status()` 从 `/api/status` 里挑了 root/dshBaseUrl/mode/… 却漏了
  * `dshReady`，而启动完成弹窗的判据是 `bridge.dshReady === true`，于是判据恒为
  * undefined —— 弹窗永远等满 180 秒，再误报「DSH 已打开，但桥接还在鉴权/等待连接」。
  * 这种「字段漏传」不会报错、不会崩，只会在用户面前显示错误结论，必须有断言钉住。
+ *
+ * 2026-10-30 审计 P1-2：start() 里的 detached spawn 没有 'error' 监听，坏 node.exe 会
+ * 抛未捕获异常（宿主崩溃）/ 空等 12 秒。第 6 节用坏 DSH_NODE 做离线回归。
  */
 import assert from 'node:assert/strict';
-import { callBridge, mapStatusPayload } from '../lib/bridge.js';
+import fs from 'node:fs';
+import net from 'node:net';
+import os from 'node:os';
+import path from 'node:path';
+
+// ── 隔离环境 ────────────────────────────────────────────────────────────────
+// bridge.js 的路径常量在 import 时从 env 解析；这里把 QQBOT_ROOT 指向临时目录
+// （探针要求 config.json + src/bridge.js 同时存在）、DSH_HOME 指向临时目录，
+// 保证 start() 的 supervisor 日志不写真实 ~/.dsh，也不会去连真实桥接的端口。
+const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'surfcore-bridge-test-'));
+const qqRoot = path.join(tmp, 'qqbot');
+const dshHome = path.join(tmp, 'dsh');
+const stateDir = path.join(dshHome, 'surfcore');
+const supervisorLog = path.join(stateDir, 'bridge-supervisor.log');
+fs.mkdirSync(path.join(qqRoot, 'src'), { recursive: true });
+fs.writeFileSync(path.join(qqRoot, 'src', 'bridge.js'), '// test stub\n');
+// 找一个当前空闲的端口当控制台端口：start() 的第一步是 portOpen()，必须确定没人监听。
+const freePort = await new Promise((resolve, reject) => {
+  const srv = net.createServer();
+  srv.once('error', reject);
+  srv.listen(0, '127.0.0.1', () => {
+    const { port } = srv.address();
+    srv.close(() => resolve(port));
+  });
+});
+fs.writeFileSync(path.join(qqRoot, 'config.json'), JSON.stringify({ consolePort: freePort }));
+process.env.SURFCORE_ROOT = qqRoot;
+process.env.DSH_HOME = dshHome;
+process.on('exit', () => { try { fs.rmSync(tmp, { recursive: true, force: true }); } catch {} });
+
+const { callBridge, mapStatusPayload, start, portOpen } = await import('../lib/bridge.js');
 
 // 1) 桥接已就绪：dshReady 必须透出，且字段形状与设置页/弹窗约定一致。
 const ready = mapStatusPayload(
@@ -84,6 +117,36 @@ assert.equal(mapStatusPayload({}).closure, null);
   assert.equal(seen.init.body, undefined, 'GET 不应该带 body');
   assert.equal(seen.init.headers['content-type'], undefined, 'GET 不需要 content-type');
   globalThis.fetch = realFetch;
+}
+
+// 6) P1-2 回归：spawn 失败（坏 node.exe）必须快速返回 ok:false。
+//    修复前：没有 'error' 监听 → 未捕获异常直接杀掉宿主/测试进程；
+//    修复后：错误进闭包 → 第一轮轮询（~500ms）就返回可读失败，不空等 12 秒。
+assert.equal(await portOpen(freePort, '127.0.0.1', 500), false, '测试用控制台端口必须空闲（否则 start() 会走 already 分支）');
+{
+  const badDir = path.join(tmp, 'bad-node');
+  fs.mkdirSync(badDir, { recursive: true });
+  const badNode = path.join(badDir, 'node.exe');
+  fs.writeFileSync(badNode, 'this is not a PE executable');
+  const prevNode = process.env.DSH_NODE;
+  process.env.DSH_NODE = badNode;
+  const startedAt = Date.now();
+  let thrown = null;
+  let result = null;
+  try {
+    result = await start({});
+  } catch (error) {
+    thrown = error;
+  }
+  const elapsed = Date.now() - startedAt;
+  if (prevNode === undefined) delete process.env.DSH_NODE;
+  else process.env.DSH_NODE = prevNode;
+  assert.equal(thrown, null, `spawn 失败不能抛未捕获异常：${thrown?.message}`);
+  assert.equal(result?.ok, false, `坏 DSH_NODE 必须返回 ok:false（实际 ${JSON.stringify(result)}）`);
+  assert.match(String(result?.error ?? ''), /启动失败/, '错误要能说清是“进程启动失败”');
+  assert.ok(elapsed < 5000, `必须快速失败，不能等满 12 秒（实际 ${elapsed}ms）`);
+  assert.match(fs.readFileSync(supervisorLog, 'utf8'), /bridge\.js 进程启动失败/, '失败必须写进 supervisor 日志');
+  console.log('bridge.start 坏 node 快速失败:', result.error, `${elapsed}ms`);
 }
 
 console.log('bridge-status tests OK');
