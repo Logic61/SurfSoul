@@ -12,6 +12,8 @@ import path from 'node:path'
 import crypto from 'node:crypto'
 // 2026-10-21 补：line 144 用到 gate 却没 import，发动态会 ReferenceError
 import { gate } from '../lib/quota-gate.mjs'
+// 2026-10-30（P1-10）：图文动态是公开出口 —— 正文与 @ 的 mid 都不能是受保护身份。
+import { assertOutboundIdentitySafe, collectProtectedIdentities } from '../lib/outbound-guard.mjs'
 
 const argv = process.argv.slice(2)
 const args = new Map()
@@ -145,6 +147,16 @@ console.log(`     content.contents = ${JSON.stringify(contents)}`)
 const qs = await wbi({ csrf: String(cred.bili_jct) })
 // P0-5（Kimi 评审 #5）：写通道也要过限额闸；不通过就停手
 if (!gate({ type: 'dynamic', target: 'dynamic', auto: process.argv.includes('--auto') })) { console.error('拒绝：限额闸不通过（额度/白名单）'); process.exit(2) }
+// 2026-10-30（P1-10）：图文动态是公开出口 —— 正文与 @ 的 mid 都不能是受保护身份。
+try {
+  assertOutboundIdentitySafe(String(text ?? ''), { surface: 'B站 图文动态' })
+  if (atMid && collectProtectedIdentities().includes(String(atMid))) {
+    throw new Error(`@ 的 mid（${atMid}）是受保护身份，不能公开 @`)
+  }
+} catch (error) {
+  console.error(`\n✗ ${error.message}`)
+  process.exit(9)
+}
 const r = await fetch(`https://api.bilibili.com/x/dynamic/feed/create/dyn?${qs}`, {
   method: 'POST',
   headers: { 'user-agent': UA, referer: REF, origin: 'https://t.bilibili.com', 'content-type': 'application/json', cookie: cookieHeader },

@@ -17,6 +17,9 @@
 import { biliState } from './state-paths.mjs'
 import fs from 'node:fs'
 import path from 'node:path'
+// 2026-10-30（P1-9/P1-14）：状态原子写；抓评论/点赞的网络请求带超时。
+import { writeJsonAtomic } from './atomic-json.mjs'
+import { fetchWithTimeout } from './http-timeout.mjs'
 
 export const FISH_GUARD_FILE = biliState('fish-guard.json')
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
@@ -238,7 +241,8 @@ export function saveFishGuardState(state, file = FISH_GUARD_FILE) {
         .filter((item) => item && item.at && new Date(item.at).getTime() >= cutoff)
         .slice(-50)
     }
-    fs.writeFileSync(file, JSON.stringify(state, null, 2) + '\n')
+    // 2026-10-30（P1-9）：原子写（tmp+rename），并发点赞/抓取不会写出截断 JSON。
+    writeJsonAtomic(file, state)
     return true
   } catch {
     return false
@@ -262,10 +266,12 @@ function cookieHeader(cred = {}) {
   return parts.join('; ')
 }
 
-async function getJson(url, { referer = 'https://www.bilibili.com/', fetchImpl = fetch, cred = null } = {}) {
+async function getJson(url, { referer = 'https://www.bilibili.com/', fetchImpl = null, cred = null } = {}) {
   // 关键：必须带 cookie。游客态 /x/v2/reply 只给 0~3 条评论，40 条样本永远凑不齐。
   const cookie = cookieHeader(cred ?? {})
-  const response = await fetchImpl(url, {
+  // 2026-10-30（P1-14）：默认走带超时的 fetch；测试可注入 fetchImpl 覆盖。
+  const doFetch = typeof fetchImpl === 'function' ? fetchImpl : (u, o) => fetchWithTimeout(u, o)
+  const response = await doFetch(url, {
     headers: {
       'user-agent': UA,
       referer,

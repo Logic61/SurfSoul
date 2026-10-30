@@ -9,6 +9,8 @@
 
 // P0-7（Kimi 评审 #7）：这两个值改成从配置读（config.self.mid / config.owner.mid）
 import { config } from './config.mjs'
+// 2026-10-30（P1-14）：收件箱/楼层都是普通 JSON 读，统一带 15s 超时。
+import { fetchWithTimeout } from './http-timeout.mjs'
 export const ME = String(process.env.BILI_ME_MID ?? config().self?.mid ?? '')
 export const OWNER = String(process.env.BILI_OWNER_MID ?? config().owner?.mid ?? '')
 
@@ -44,7 +46,7 @@ export async function pullFeed(kind, { headers, pages = 1 }) {
   let lastView = 0
   for (let p = 0; p < pages; p += 1) {
     const url = `https://api.bilibili.com/x/msgfeed/${kind}?platform=web&build=0&mobi_app=web` + (cursor ? `&cursor=${encodeURIComponent(cursor)}` : '')
-    const j = await (await fetch(url, { headers })).json()
+    const j = await (await fetchWithTimeout(url, { headers })).json()
     if (j.code !== 0) throw new Error(`${kind} code=${j.code} ${j.message}`)
     if (p === 0) lastView = Number(j.data?.last_view_at ?? 0)
     const items = j.data?.items ?? []
@@ -84,7 +86,7 @@ export async function resolveLatestReply({ business, oid, root, mid, parentRpid,
   const reps = []
   for (let pn = 1; pn <= 6; pn += 1) {
     const u = `https://api.bilibili.com/x/v2/reply/reply?type=${type}&oid=${oid}&root=${root}&ps=20&pn=${pn}`
-    const j = await (await fetch(u, { headers })).json().catch(() => null)
+    const j = await (await fetchWithTimeout(u, { headers })).json().catch(() => null)
     if (!j || j.code !== 0) return null
     const page = j.data?.replies ?? []
     reps.push(...page)

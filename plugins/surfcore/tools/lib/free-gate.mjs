@@ -22,6 +22,8 @@ import path from 'node:path'
 import { config } from './config.mjs'
 import { DEFAULT_LIMITS, freeLimits } from './limits.mjs'
 import { biliState } from './state-paths.mjs'
+// 2026-10-30（P1-14）：查 UP 主是普通 JSON 读，带 15s 超时。
+import { fetchWithTimeout } from './http-timeout.mjs'
 
 const HOME = process.env.USERPROFILE || process.env.HOME || '.'
 // 尊重 DSH_HOME（测试/多实例）；避免把临时账本写到真实 ~/.dsh。
@@ -161,7 +163,7 @@ export function usageToday() {
 export async function upOf(bvid) {
   if (!bvid) return ''
   try {
-    const r = await fetch('https://api.bilibili.com/x/web-interface/view?bvid=' + bvid, {
+    const r = await fetchWithTimeout('https://api.bilibili.com/x/web-interface/view?bvid=' + bvid, {
       headers: { 'user-agent': 'Mozilla/5.0', referer: 'https://www.bilibili.com/' },
     })
     const j = await r.json()

@@ -12,11 +12,13 @@
 //   node quota.mjs allow "room:<房间号>"         往白名单加一项（也支持 --remove 删除）
 //
 // 约定：check 只挡"发言类"动作（comment / dynamic / danmaku）；读操作永远不受限。
-import { accountBili, biliState, biliStateDir } from '../lib/state-paths.mjs'
+import { biliState } from '../lib/state-paths.mjs'
 import fs from 'node:fs'
-import path from 'node:path'
 import { config } from '../lib/config.mjs'
 import { freeLimits } from '../lib/limits.mjs'
+// 2026-10-30（P1-9/P1-14）：账本原子写 + 跨进程锁；网络读带超时。
+import { writeJsonAtomic, updateJson } from '../lib/atomic-json.mjs'
+import { fetchWithTimeout } from '../lib/http-timeout.mjs'
 
 const FILE = biliState('quota.json')
 // 2026-10-22：四本账额度改成 bili.config.json 的 limits 段（设置页可改）。
@@ -36,7 +38,8 @@ const load = () => {
   //   以前 load 会把 quota.json 里固化的旧值盖在新配置上 → 设置页改了不生效且无提示 ✗
   return { ...DEFAULTS, log: Array.isArray(raw.log) ? raw.log : [] }
 }
-const save = (q) => { fs.mkdirSync(path.dirname(FILE), { recursive: true }); fs.writeFileSync(FILE, JSON.stringify({ log: q.log ?? [] }, null, 2) + '\n') }
+// 2026-10-30（P1-9）：并发 record 走下面的 updateJson 串行化（跨进程锁 + 原子写）。
+// 旧的整文件 save() 已删除（没有别的调用者）。
 // ── 沉默衰减（2026-10-18 加，主人定）────────────────────────────────
 // 反馈的定义：**任何表态都算**（回她的评论 / 点赞 / 在微信里说一句 / 让她做点事…）
 // 都没有 = 沉默。沉默 ≥ silentAfterDays(3) 天开始扣：每天 -decayPerDay(1)，
@@ -46,12 +49,12 @@ const loadFeedback = () => { try { return JSON.parse(fs.readFileSync(FEEDBACK, '
 // 2026-10-20：按 BV 取视频标题（带本地缓存）—— 模块级，供 react 记录时用
 const TITLE_CACHE = biliState('liked-videos.json')
 const loadTitleCache = () => { try { return JSON.parse(fs.readFileSync(TITLE_CACHE, 'utf8')) } catch { return {} } }
-const saveTitleCache = (m) => { try { fs.writeFileSync(TITLE_CACHE, JSON.stringify(m, null, 2)) } catch {} }
+const saveTitleCache = (m) => { try { writeJsonAtomic(TITLE_CACHE, m) } catch {} }
 async function titleOf(bv, cache) {
   if (!bv) return ''
   if (cache[bv]) return cache[bv]
   try {
-    const r = await fetch('https://api.bilibili.com/x/web-interface/view?bvid=' + bv, {
+    const r = await fetchWithTimeout('https://api.bilibili.com/x/web-interface/view?bvid=' + bv, {
       headers: { 'user-agent': 'Mozilla/5.0', referer: 'https://www.bilibili.com/' },
     })
     const j = await r.json()
@@ -61,7 +64,7 @@ async function titleOf(bv, cache) {
   } catch { return '' }
 }
 
-const saveFeedback = (f) => { fs.mkdirSync(path.dirname(FEEDBACK), { recursive: true }); fs.writeFileSync(FEEDBACK, JSON.stringify(f, null, 2) + '\n') }
+const saveFeedback = (f) => { try { writeJsonAtomic(FEEDBACK, f) } catch {} }
 /** 沉默天数：从来没反馈过就从"第一次分享"算；返回 { days, cap } */
 function silence() {
   const fb = loadFeedback()
@@ -175,7 +178,7 @@ if (cmd === 'check') {
 
 if (cmd === 'record') {
   const type = typeof opt.type === 'string' ? opt.type : 'unknown'
-  q.log.push({
+  const entry = {
     at: new Date().toISOString(), type,
     auto: !!opt.auto || !!opt.share, share: !!opt.share,
     target: opt.target ?? null, note: opt.note ?? null,
@@ -189,10 +192,23 @@ if (cmd === 'record') {
     ...(opt.mine ? { mine: ['game', 'anime', 'gaming'].includes(String(opt.mine)) ? String(opt.mine) : true } : {}),
     ...(opt['to-mid'] ? { toMid: String(opt['to-mid']) } : {}),
     ...(opt['parent-id'] ? { parent: String(opt['parent-id']) } : {}),
-  })
-  save(q)
-  const usedAuto = q.log.filter((x) => dayOf(x.at) === today() && x.auto && !x.share).length
-  const usedShare = q.log.filter((x) => dayOf(x.at) === today() && x.share).length
+  }
+  // 2026-10-30（P1-9）：agent 一回合里可能并发调多个工具，旧写法「各自 load → push → save」
+  //   后写者会覆盖先写者（静默少记 = 额度闸失效）。改成跨进程锁 + 原子读改写。
+  let merged
+  try {
+    merged = updateJson(FILE, (current) => {
+      const ledger = { log: Array.isArray(current?.log) ? current.log : [] }
+      ledger.log.push(entry)
+      return ledger
+    }, { fallback: { log: [] } })
+  } catch (error) {
+    console.error(`✗ 记账失败（等锁/写盘）：${String(error?.message ?? error)}`)
+    process.exit(1)
+  }
+  const usedAuto = merged.log.filter((x) => dayOf(x.at) === today() && x.auto && !x.share).length
+  const usedShare = merged.log.filter((x) => dayOf(x.at) === today() && x.share).length
+  void usedAuto
   console.log(`已记账：${type}${opt.share ? '（分享型·@主人）' : opt.auto ? '（自主）' : '（主人授权）'}${opt.target ? ' → ' + opt.target : ''}   今日分享 ${usedShare}/${q.shareDaily ?? 3}（自主发言不设上限 ✓）`)
   process.exit(0)
 }

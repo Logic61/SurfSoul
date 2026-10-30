@@ -31,6 +31,8 @@ import {
 } from '../lib/fish-guard.mjs'
 import { myDynamicKinds } from "../lib/my-dynamics.mjs"
 import { assertOutboundIdentitySafe } from '../lib/outbound-guard.mjs'
+// 2026-10-30（P1-14）：评论相关网络请求统一带 15s 超时，防网络黑洞挂住 agent 回合。
+import { fetchWithTimeout } from '../lib/http-timeout.mjs'
 import { findByParent as findAttack, setStatus as setAttackStatus } from '../lib/attacks.mjs'
 
 // ── 限额闸（B 档「限额自主」的代码强制部分，2026-10-14 主人选 B 档）────────────────
@@ -68,7 +70,7 @@ const saveReplied = (o) => { try { fs.mkdirSync(path.dirname(REPLIED), { recursi
 // 2026-10-21：type 参数化 —— 动态评论是 type=11，不能写死 1 ✗
 async function parentAuthor(aid, rootRpid, parentRpid, replyType = 1) {
   for (let pn = 1; pn <= 4; pn += 1) {
-    const j = await (await fetch(`https://api.bilibili.com/x/v2/reply/reply?type=${replyType}&oid=${aid}&root=${rootRpid}&pn=${pn}&ps=20`, {
+    const j = await (await fetchWithTimeout(`https://api.bilibili.com/x/v2/reply/reply?type=${replyType}&oid=${aid}&root=${rootRpid}&pn=${pn}&ps=20`, {
       headers: { 'user-agent': 'Mozilla/5.0', referer: 'https://www.bilibili.com/' },
     })).json()
     const list = j.data?.replies ?? []
@@ -219,7 +221,7 @@ const referer = refererArg !== '' ? refererArg : `https://www.bilibili.com/video
 const MIXIN_TAB = [46,47,18,2,53,8,23,32,15,50,10,31,58,3,45,35,27,43,5,49,33,9,42,19,29,28,14,39,12,38,41,13,37,48,7,16,24,55,40,61,26,17,0,1,60,51,30,4,22,25,54,21,56,59,6,63,57,62,11,36,20,34,44,52]
 const keyOf = (u) => u.slice(u.lastIndexOf('/') + 1, u.lastIndexOf('.'))
 async function wbiSign(params) {
-  const nav = await (await fetch('https://api.bilibili.com/x/web-interface/nav', {
+  const nav = await (await fetchWithTimeout('https://api.bilibili.com/x/web-interface/nav', {
     headers: { 'user-agent': UA, referer: 'https://www.bilibili.com/', cookie: cookieHeader },
   })).json()
   const img = nav?.data?.wbi_img?.img_url
@@ -238,7 +240,7 @@ async function wbiSign(params) {
 }
 
 // ---- who is behind this cookie? --------------------------------------------
-const nav = await (await fetch('https://api.bilibili.com/x/web-interface/nav', {
+const nav = await (await fetchWithTimeout('https://api.bilibili.com/x/web-interface/nav', {
   headers: { 'user-agent': UA, referer: 'https://www.bilibili.com/', cookie: cookieHeader },
 })).json()
 console.log('=== 登录态校验（只读） ===')
@@ -423,7 +425,7 @@ try {
 }
 // 判重（--once-per-person）已在入口处检查，这里直接发
 console.log('\n[go] 发送中…')
-const res = await fetch(url, {
+const res = await fetchWithTimeout(url, {
   method: 'POST',
   headers: {
     'user-agent': UA,

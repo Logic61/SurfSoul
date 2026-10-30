@@ -19,6 +19,8 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { config } from '../lib/config.mjs'
+// 2026-10-30（P1-14）：webhook 发送带超时（15s），网络半开时不再无限挂住。
+import { fetchWithTimeout } from '../lib/http-timeout.mjs'
 
 const argv = process.argv.slice(2)
 const DRY = argv.includes('--dry')
@@ -70,7 +72,7 @@ function buildWebhookBody(url, tpl) {
 async function sendWebhook(url, tpl) {
   const body = buildWebhookBody(url, tpl)
   if (DRY) { console.log('[dry] webhook 报文：\n' + JSON.stringify(body, null, 2)); return }
-  const r = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
+  const r = await fetchWithTimeout(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
   const raw = await r.text().catch(() => '')
   if (!r.ok) throw new Error(`webhook HTTP ${r.status} ${raw.slice(0, 160)}`)
   console.log(`webhook ${r.status} ✓ ${raw.slice(0, 120)}`)

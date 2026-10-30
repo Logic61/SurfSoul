@@ -6,6 +6,9 @@ import { accountBili, biliState, biliStateDir } from '../lib/state-paths.mjs'
 // 2026-10-26 补：line 50 用到 gate 却没 import，改动态会 ReferenceError。
 // 与 dynamic.mjs:11-12 是同一个坑（那份 2026-10-21 已修，这份是复制时漏的）。
 import { gate } from '../lib/quota-gate.mjs'
+// 2026-10-30（P1-10/P1-14）：公开出口过身份闸；网络请求带超时。
+import { assertOutboundIdentitySafe } from '../lib/outbound-guard.mjs'
+import { fetchWithTimeout } from '../lib/http-timeout.mjs'
 import fs from 'node:fs'
 import path from 'node:path'
 
@@ -25,7 +28,7 @@ const H = {
 const text = fs.readFileSync(textFile, 'utf8').replace(/\r\n/g, '\n')
 
 // 先把当前动态的图片原样取出来（编辑时带上，免得把图弄丢）
-const d = await (await fetch(`https://api.bilibili.com/x/polymer/web-dynamic/v1/detail?id=${dyn}&features=itemOpusStyle`, { headers: H })).json()
+const d = await (await fetchWithTimeout(`https://api.bilibili.com/x/polymer/web-dynamic/v1/detail?id=${dyn}&features=itemOpusStyle`, { headers: H })).json()
 const major = d.data?.item?.modules?.module_dynamic?.major
 const opus = major?.opus ?? major?.draw
 const pics = (opus?.pics ?? []).map((p) => ({ img_src: p.url, img_width: p.width, img_height: p.height }))
@@ -51,7 +54,14 @@ if (!go) { console.log('\n[预演] 未发送。确认无误加 --go。'); proces
 
 // P0-5（Kimi 评审 #5）：写通道也要过限额闸；不通过就停手
 if (!gate({ type: 'dynamic', target: 'dynamic', auto: process.argv.includes('--auto') })) { console.error('拒绝：限额闸不通过（额度/白名单）'); process.exit(2) }
-const r = await fetch(`https://api.bilibili.com/x/dynamic/feed/edit/dyn?csrf=${cred.bili_jct}&platform=web`, {
+// 2026-10-30（P1-10）：编辑动态是公开出口，正文也要过身份闸。
+try {
+  assertOutboundIdentitySafe(text, { surface: 'B站 动态编辑' })
+} catch (error) {
+  console.error(`\n✗ ${error.message}`)
+  process.exit(9)
+}
+const r = await fetchWithTimeout(`https://api.bilibili.com/x/dynamic/feed/edit/dyn?csrf=${cred.bili_jct}&platform=web`, {
   method: 'POST',
   headers: { ...H, 'content-type': 'application/json' },
   body: JSON.stringify(payload),

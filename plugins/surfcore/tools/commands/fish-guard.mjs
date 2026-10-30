@@ -13,6 +13,8 @@
  */
 import { accountBili } from '../lib/state-paths.mjs'
 import fs from 'node:fs'
+// 2026-10-30（P1-14）：读接口带超时，别让网络黑洞挂住 agent 回合。
+import { fetchWithTimeout } from '../lib/http-timeout.mjs'
 import { config } from '../lib/config.mjs'
 import {
   fishGuardStateSummary, fishGuardStatusText, likeFishComments, loadFishGuardState,
@@ -52,7 +54,7 @@ async function aidFromBvid(bv) {
   try {
     const headers = { 'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36', referer: `https://www.bilibili.com/video/${bv}/` }
     if (cred) headers.cookie = `SESSDATA=${cred.sessdata}; bili_jct=${cred.bili_jct}${cred.buvid3 ? `; buvid3=${cred.buvid3}` : ''}`
-    const res = await fetch(`https://api.bilibili.com/x/web-interface/view?bvid=${encodeURIComponent(bv)}`, { headers })
+    const res = await fetchWithTimeout(`https://api.bilibili.com/x/web-interface/view?bvid=${encodeURIComponent(bv)}`, { headers })
     const json = await res.json()
     if (json?.code !== 0 || !json?.data?.aid) throw new Error(`view code=${json?.code ?? '?'} ${json?.message ?? ''}`)
     return String(json.data.aid)

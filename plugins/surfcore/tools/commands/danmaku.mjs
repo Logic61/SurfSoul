@@ -13,6 +13,9 @@ import zlib from 'node:zlib'
 import crypto from 'node:crypto'
 // 2026-10-18 修：send 分支用了 `gate(...)` 但**从来没导入过** ✗（一跑到那儿就 ReferenceError）
 import { gate } from '../lib/quota-gate.mjs'
+// 2026-10-30（P1-10/P1-14）：弹幕是公开出口，正文过身份闸；网络请求带超时。
+import { assertOutboundIdentitySafe } from '../lib/outbound-guard.mjs'
+import { fetchWithTimeout } from '../lib/http-timeout.mjs'
 
 const argv = process.argv.slice(2)
 const mode = argv[0]
@@ -36,7 +39,7 @@ for (const k of ['sessdata', 'bili_jct', 'buvid3']) {
 const cookieHeader = `SESSDATA=${cred.sessdata}; bili_jct=${cred.bili_jct}; buvid3=${cred.buvid3}`
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
 const H = (shortId) => ({ 'user-agent': UA, referer: `https://live.bilibili.com/${shortId ?? roomArg}`, origin: 'https://live.bilibili.com', cookie: cookieHeader })
-const j = async (url, opts) => { const r = await fetch(url, opts); const t = await r.text(); try { return { status: r.status, body: JSON.parse(t) } } catch { return { status: r.status, body: { __raw: t.slice(0, 200) } } } }
+const j = async (url, opts) => { const r = await fetchWithTimeout(url, opts); const t = await r.text(); try { return { status: r.status, body: JSON.parse(t) } } catch { return { status: r.status, body: { __raw: t.slice(0, 200) } } } }
 
 // ---- resolve room -----------------------------------------------------------
 async function resolveRoom() {
@@ -129,6 +132,13 @@ if (mode === 'send') {
   console.log(`  cookie=SESSDATA=***; bili_jct=***; buvid3=***   csrf=***csrf***`)
   if (isDry) { console.log('\n[dry] 未发送。'); process.exit(0) }
 
+  // 2026-10-30（P1-10）：弹幕是公开出口，正文过身份闸（命中就中止，不发出去）。
+  try {
+    assertOutboundIdentitySafe(String(msg), { surface: 'B站 直播间弹幕' })
+  } catch (error) {
+    console.error(`\n✗ ${error.message}`)
+    process.exit(9)
+  }
   console.log('\n[go] 发送中…')
   const out = await j('https://api.live.bilibili.com/msg/send', {
     method: 'POST',

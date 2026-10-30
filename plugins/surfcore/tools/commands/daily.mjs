@@ -22,6 +22,9 @@ import { config } from '../lib/config.mjs'
 import { hasKindSignal } from '../lib/kind-signals.mjs'
 import { ownerOf, findVideoDynamic, createForward, verifyForward } from '../lib/forward.mjs'
 import { pinOf, clearPin } from '../lib/pins.mjs'
+// 2026-10-30（P1-10/P1-9）：转发动态也要过出站身份闸；状态文件改原子写。
+import { assertOutboundIdentitySafe } from '../lib/outbound-guard.mjs'
+import { writeJsonAtomic } from '../lib/atomic-json.mjs'
 
 // ── 自举：换用 DSH 自带的 node 24.21（PATH 的 24.19 有 libuv 崩溃）──
 {
@@ -332,6 +335,15 @@ if (DRY) {
 
 let out = ''
 if (avDyn) {
+  // 2026-10-30（P1-10）：转发是公开出口，正文必须过身份闸；命中就退回"文字 + 链接"（链接也能点）。
+  try {
+    assertOutboundIdentitySafe(TEXT, { surface: 'B站 动态转发' })
+  } catch (error) {
+    console.log(`  ⚠️ 转发正文未过身份闸：${error.message} → 退回文字 + 链接`)
+    avDyn = null
+  }
+}
+if (avDyn) {
   const r = await createForward(avDyn.id, TEXT)
   if (r.ok && r.id) {
     out = `dyn_id=${r.id}`
@@ -367,8 +379,8 @@ st[KIND] = {
   game: meta.game ?? null, score: meta.score ?? null, chars: n,
   image: image ? path.basename(image) : null, dynId,
 }
-fs.mkdirSync(path.dirname(STATE), { recursive: true })
-fs.writeFileSync(STATE, JSON.stringify(st, null, 2) + '\n')
+// 2026-10-30（P1-9）：原子写（tmp+rename），避免 kill/并发写出截断的状态文件。
+writeJsonAtomic(STATE, st)
 try { clearPin(KIND) } catch {}
 
 if (KIND === 'game') advanceRotation(meta.game)

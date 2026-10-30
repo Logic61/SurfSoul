@@ -74,5 +74,7 @@ if (!entry) {
   console.error(`未知命令: ${cmd}\n跑 "node bili.mjs help" 看清单。`)
   process.exit(2)
 }
-const r = spawnSync(process.execPath, [path.join(here, entry[0]), ...rest], { stdio: 'inherit' })
+// 2026-10-30（P1-14）：agent 直接调 bili.mjs 时没有外层超时 —— 子进程一旦卡在
+// 网络/交互上，整个工具调用会挂到 harness 超时。给 10 分钟总预算（debrief 抽帧够用）。
+const r = spawnSync(process.execPath, [path.join(here, entry[0]), ...rest], { stdio: 'inherit', timeout: 600_000 })
 process.exit(r.status ?? 1)

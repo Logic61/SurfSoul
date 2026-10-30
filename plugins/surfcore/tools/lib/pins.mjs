@@ -5,21 +5,28 @@
 //
 // 数据：~/.dsh/surfcore/bili/dynamic-pins.json
 //   { "2026-10-21": { "gaming": "BV1Menj62Eig", "game": "BV15Dng6rEPw" } }
-import { accountBili, biliState, biliStateDir } from './state-paths.mjs'
+import { biliState } from './state-paths.mjs'
 import fs from 'node:fs'
-import path from 'node:path'
+// 2026-10-30（P1-9）：跨进程锁 + 原子写，避免并发 setPin/clearPin 丢更新。
+import { writeJsonAtomic, updateJson } from './atomic-json.mjs'
 
-const HOME = process.env.USERPROFILE || process.env.HOME || '.'
 export const FILE = biliState('dynamic-pins.json')
 const today = () => new Date().toLocaleDateString('sv-SE')
 
 function load() {
   try { return JSON.parse(fs.readFileSync(FILE, 'utf8')) } catch { return {} }
 }
+
+function trimDays(all) {
+  const keys = Object.keys(all).sort().slice(-10)
+  const trimmed = {}
+  for (const k of keys) trimmed[k] = all[k]
+  return trimmed
+}
+
 function save(o) {
   try {
-    fs.mkdirSync(path.dirname(FILE), { recursive: true })
-    fs.writeFileSync(FILE, JSON.stringify(o, null, 2) + '\n')
+    writeJsonAtomic(FILE, o)
   } catch {}
 }
 
@@ -32,32 +39,39 @@ export function pinOf(kind, date = today()) {
 export function noteOf(kind, date = today()) {
   return String(load()?.[date]?.[`_note_${kind}`] ?? '')
 }
+
 export function setNote(kind, text, date = today()) {
-  const all = load()
-  all[date] = { ...(all[date] ?? {}), [`_note_${kind}`]: String(text ?? '') }
-  const keys = Object.keys(all).sort().slice(-10)
-  const trimmed = {}
-  for (const k of keys) trimmed[k] = all[k]
-  save(trimmed)
-  return trimmed[date]
+  let result = null
+  updateJson(FILE, (all) => {
+    all[date] = { ...(all[date] ?? {}), [`_note_${kind}`]: String(text ?? '') }
+    const trimmed = trimDays(all)
+    result = trimmed[date]
+    return trimmed
+  }, { fallback: {} })
+  return result
 }
 
 /** 钦定一条（kind = best|game|anime|gaming） */
 export function setPin(kind, bv, date = today()) {
-  const all = load()
-  all[date] = { ...(all[date] ?? {}), [kind]: String(bv) }
-  const keys = Object.keys(all).sort().slice(-10)
-  const trimmed = {}
-  for (const k of keys) trimmed[k] = all[k]
-  save(trimmed)
-  return trimmed[date]
+  let result = null
+  updateJson(FILE, (all) => {
+    all[date] = { ...(all[date] ?? {}), [kind]: String(bv) }
+    const trimmed = trimDays(all)
+    result = trimmed[date]
+    return trimmed
+  }, { fallback: {} })
+  return result
 }
 
 /** 清掉某类的钦定（发出去之后调，免得明天还认） */
 export function clearPin(kind, date = today()) {
-  const all = load()
-  let changed = false
-  if (all?.[date]?.[kind]) { delete all[date][kind]; changed = true }
-  if (all?.[date]?.[`_note_${kind}`]) { delete all[date][`_note_${kind}`]; changed = true }
-  if (changed) save(all)
+  updateJson(FILE, (all) => {
+    const day = all?.[date]
+    if (!day) return all
+    let changed = false
+    if (day[kind] !== undefined) { delete day[kind]; changed = true }
+    if (day[`_note_${kind}`] !== undefined) { delete day[`_note_${kind}`]; changed = true }
+    if (!changed) return all
+    return trimDays(all)
+  }, { fallback: {} })
 }
