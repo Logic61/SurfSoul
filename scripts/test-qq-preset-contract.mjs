@@ -22,7 +22,10 @@ test('reserved2 YAML resolves to the expected persona and template variables', (
 
 test('local/admin tool restrictions and existing compaction budgets stay intact', () => {
   assert.deepEqual(preset.map((row) => row.id), [
-    'persona', 'tool-web', 'tool-ask-user', 'tool-todo', 'qq-tool-restrict', 'compaction',
+    'persona', 'tool-web', 'tool-ask-user', 'tool-todo',
+    // 2026-10-29 加进来的本地工具行（仅主人私聊放行，执行期由 qq-tool-restrict 兜底）；当时测试没跟上
+    'tool-pwsh', 'tool-fs', 'tool-fs-search',
+    'qq-tool-restrict', 'compaction',
   ]);
   assert.deepEqual(preset.find((row) => row.id === 'tool-web').config, { search: false, fetch: false });
   assert.equal(preset.find((row) => row.id === 'qq-tool-restrict').name, './qq-tool-restrict.mjs');
@@ -31,7 +34,9 @@ test('local/admin tool restrictions and existing compaction budgets stay intact'
   assert.deepEqual(compaction.config.find((row) => row.id === 'tool-result-pruner').config, {
     thresholdChars: 50000, headChars: 45000, tailChars: 2000,
   });
-  for (const text of ['你没有本地工具', '群友没有管理权限', 'API 令牌', '角色由桥接注入']) {
+  // 2026-10-29 本地工具开放给主人私聊后，旧文案「你没有本地工具 / API 令牌」已不存在；
+  // 这里钉住当前的安全边界（本地工具仅主人私聊、群友无管理权限、角色由桥接注入）。
+  for (const text of ['本地工具（pwsh / read / write / edit / glob / grep）**只在主人私聊里可用**', '群友没有管理权限', '角色由桥接注入']) {
     assert.ok(prefix.includes(text), `missing safety rule: ${text}`);
   }
 });
@@ -84,7 +89,7 @@ test('social autonomy and visual, forwarding, sticker and web capabilities remai
     'qq_collect_sticker', 'qq_sticker_note', 'qq_get_self_image',
     'qq_set_sticker_remark', '只有管理端明确开启后才能用',
     'qq_list_voices', 'qq_send_voice', 'verified=true 才代表这条语音确实落地',
-    '语音**默认是关闭的**', '不要假装发了语音',
+    '【发语音（已开启）】', '不要假装发了语音',
     // text→本地 TTS：模型得知道能「说一句」并带语气标记，否则永远只发文字
     '传 text 把这句话**现场合成**成语音条', '语气标记', '[不耐烦]', '别每句都标',
     'mcp__web-search-safe__web_search', 'mcp__web-search-safe__web_fetch',
@@ -102,13 +107,18 @@ test('autonomy limits and the observation escape hatch stay described', () => {
     '【记忆卫生】', 'qq_memory_append', 'qq_memory_query', 'qq_memory_remove', 'qq_memory_clear',
     // 黑话面
     'qq_slang_query', 'qq_slang_submit', '不重复提交',
-    // 频率上限
-    '普通闲聊约 3~5 轮一张', '别刷屏', '每条只能一张，不能附带文字', '不要频繁拍',
+    // 软策略：频率交给模型审时度势；允许纯表情回复、鼓励盗图（2026-10-31 用户要求）
+    '频率自己审时度势', '可以单独作为一条回复', '鼓励盗图', '好图不偷白不偷',
+    '每条只能一张，不能附带文字', '不要频繁拍',
     // 会话令牌是硬前置，漏传会被拒绝。
     '作为 token 参数传入',
     // 指定成员唤醒
     'triggers.speakerIds', '不凭记忆乱填',
   ]) assert.ok(prefix.includes(text), `missing rule: ${text}`);
+  // 旧限制不能悄悄回来（用户 2026-10-31 明确要求删掉）
+  for (const gone of ['普通闲聊约 3~5 轮一张', '也别总拿表情作为唯一回复', '不要频繁收藏']) {
+    assert.ok(!prefix.includes(gone), `已移除的表情限制不应回到 preset: ${gone}`);
+  }
 });
 
 console.log(`reserved2 persona prefix: ${prefix.length} characters (not a model-token estimate)`);

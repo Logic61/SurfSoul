@@ -147,6 +147,8 @@ console.log('## 表情单气泡约束');
   const hint = buildStickerStrategyHint();
   ok(hint.includes('不能在同一气泡里附带文字'), '策略提示禁止同气泡混文字');
   ok(!hint.includes('先发一句话再发一张'), '策略提示不再引导“先发一句话再发一张”');
+  ok(hint.includes('可以单独作为一条回复'), '策略提示允许纯表情回复');
+  ok(!hint.includes('3~5 轮') && !hint.includes('别刷屏'), '策略提示不再限频/劝退');
 }
 
 console.log('## MCP 工具描述存在性');
@@ -158,6 +160,7 @@ console.log('## MCP 工具描述存在性');
   const collectTool = mcp.slice(mcp.indexOf("'qq_collect_sticker'"), mcp.indexOf("'qq_collect_sticker'") + 2000);
   ok(collectTool.includes('emotion: z.enum(EMOTION_LABELS)'), '收藏工具带情绪分类参数');
   ok(collectTool.includes('content: z.string()'), '收藏工具带内容描述参数');
+  ok(mcp.includes('鼓励盗图'), '收藏工具描述鼓励盗图（不再「不要频繁收藏」）');
 }
 
 console.log('## bridge 路由/函数存在性');

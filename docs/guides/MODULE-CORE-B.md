@@ -292,13 +292,13 @@ QQ 群「鱼群保护」纯函数层：只做判定，不碰网络/状态；冷�
 - 昵称匹配宁可误伤真人也不漏鱼，用户可配 `exemptNames/exemptIds` 兜底（`src/fish-guard.js:32-40`）。
 - **B站评论区是另一套实现**：默认样本 40 条、鱼顶层 ≥3、不同鱼账号 ≥3、占比 ≥0.4、样本 ≥8，另有聚拢/点赞/风控熔断（`plugins/surfcore/tools/lib/fish-guard.mjs:24-68`）。两套阈值不能互套。
 
-### 2.2 `sticker-lib.js`（356 行）
+### 2.2 `sticker-lib.js`（361 行）
 
 **职责**
 本地表情知识库：读写 `state/stickers.json`、合并 SnowLuma 返回的 QQ 收藏表情、按 id/md5/URL/编号查找、按备注/情绪/内容/标签搜索、生成注入提示词的表情摘要、记录 AI 理解与使用次数（`src/sticker-lib.js:1-12`）。
 
 **对外接口**
-`nowIso`（`src/sticker-lib.js:25-27`）、`sanitizeStickerText(value,max)`（`src/sticker-lib.js:44-54`）、`normalizeStickerEntry(raw)`（`src/sticker-lib.js:56-99`）、`loadStickerStore(file)`（`src/sticker-lib.js:113-129`）、`saveStickerStore(file,entries)`（`src/sticker-lib.js:131-144`）、`mergeStickerLibrary(existing,fetched,{complete})`（`src/sticker-lib.js:149-193`）、`findSticker(entries,ref)`（`src/sticker-lib.js:206-227`）、`formatStickerList(entries,query,limit)`（`src/sticker-lib.js:230-269`）、`buildStickerContext(entries,max)`（`src/sticker-lib.js:276-291`）、`buildStickerStrategyHint()`（`src/sticker-lib.js:295-306`）、`applyStickerNote(entries,id,patch)`（`src/sticker-lib.js:309-338`）、`markStickerUsed(entries,id,context)`（`src/sticker-lib.js:341-356`）。
+`nowIso`（`src/sticker-lib.js:25-27`）、`sanitizeStickerText(value,max)`（`src/sticker-lib.js:44-54`）、`normalizeStickerEntry(raw)`（`src/sticker-lib.js:56-99`）、`loadStickerStore(file)`（`src/sticker-lib.js:113-129`）、`saveStickerStore(file,entries)`（`src/sticker-lib.js:131-144`）、`mergeStickerLibrary(existing,fetched,{complete})`（`src/sticker-lib.js:149-193`）、`findSticker(entries,ref)`（`src/sticker-lib.js:206-227`）、`formatStickerList(entries,query,limit)`（`src/sticker-lib.js:230-269`）、`buildStickerContext(entries,max)`（`src/sticker-lib.js:276-296`）、`buildStickerStrategyHint()`（`src/sticker-lib.js:300-311`）、`applyStickerNote(entries,id,patch)`（`src/sticker-lib.js:314-343`）、`markStickerUsed(entries,id,context)`（`src/sticker-lib.js:346-361`）。
 
 **数据结构**
 条目字段 `id/no/resId/url/md5/desc/localNote/emotion/emotionAlt/content/keywords/tags/usage/source/useCount/lastUsedAt/lastContext/createdAt/updatedAt`（`src/sticker-lib.js:76-98`）。`no` 为 1–9999 稳定编号；`source` 只允许 `manual/ai/qq`；`emotionAlt` 最多 2 个且不等于主情绪（`src/sticker-lib.js:65-72`、`src/sticker-lib.js:92-93`）。

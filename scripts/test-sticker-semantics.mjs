@@ -236,6 +236,7 @@ test('高分推荐用强措辞，低分保留保守措辞（模型会自我审�
   assert.ok(strong.includes('0.83'), strong);
   assert.ok(strong.includes('很贴合'), '高分要说清「很贴合」');
   assert.ok(!strong.includes('真的贴合才发一张'), '高分不应再用「才发」这种保守话术');
+  assert.ok(strong.includes('也可以只发这张表情'), '高分措辞允许只发表情、不配文字');
 
   const weak = buildStickerMatchHint([
     { no: 5, emotionLabel: '委屈', content: '抱着空碗', score: 0.4 }

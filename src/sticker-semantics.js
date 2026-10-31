@@ -552,8 +552,8 @@ export function buildStickerMatchHint(ranked, opts = {}) {
   // 2026-10-24 实测：只写「真的贴合才发」，模型看到 0.83 的 #06 仍然自我审查
   // （日志原话「sending #06 might read as mocking/repeating」）→ 最后只发了文字。
   const tail = strong
-    ? `（${topRef} 和当前语境很贴合（${Number(top.score).toFixed(2)}）：发它用 qq_send_sticker stickerId="${topRef}"。接梗、被吐槽/撒娇时发这张本身就自然，不是只有文字才叫回复；严肃/敏感话题、对方真的在生气时才别发。）`
-    : '（真的贴合才发一张：qq_send_sticker stickerId="#编号"；情绪不对就别硬发，也不要每轮都发。）';
+    ? `（${topRef} 和当前语境很贴合（${Number(top.score).toFixed(2)}）：发它用 qq_send_sticker stickerId="${topRef}"。接梗、被吐槽/撒娇时发这张本身就自然，不是只有文字才叫回复——也可以只发这张表情、不配文字；严肃/敏感话题、对方真的在生气时才别发。）`
+    : '（真的贴合才发一张：qq_send_sticker stickerId="#编号"；情绪不对/贴不上就别硬发。）';
   return [
     `【表情匹配】${mood}本地语义索引最贴合：`,
     ...lines,

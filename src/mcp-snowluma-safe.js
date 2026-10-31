@@ -1223,7 +1223,7 @@ if (cfg.socialV2?.sticker?.enabled !== false && cfg.socialV2?.tools?.getStickerI
 if (cfg.socialV2?.sticker?.enabled !== false && cfg.socialV2?.tools?.sendSticker !== false) {
   server.tool(
     'qq_send_sticker',
-    '在指定会话发送一个 QQ 收藏表情包（自定义表情）。stickerId 直接写编号最省事（"#03" 或 "3"），也可以用 qq_list_stickers 返回的 id / md5 / url。注意：一条消息只能是一张表情，不能在同一气泡里附带文字；想说的话请先用 qq_send_message / qq_reply 作为单独气泡发送，再单独发这张表情。需要引用/点名时可用 replyToMessageId / atUserId（群聊）。真人偶尔用表情包很自然，但别刷屏。',
+    '在指定会话发送一个 QQ 收藏表情包（自定义表情）。stickerId 直接写编号最省事（"#03" 或 "3"），也可以用 qq_list_stickers 返回的 id / md5 / url。注意：一条消息只能是一张表情，不能在同一气泡里附带文字；想说的话请先用 qq_send_message / qq_reply 作为单独气泡发送，再单独发这张表情。需要引用/点名时可用 replyToMessageId / atUserId（群聊）。表情可以单独作为一条消息回复，不用非得配文字；发不发、发多密自己按语境判断，好玩就发。',
     {
       key: z.string().describe('会话 key，格式 group:群号 或 private:QQ号'),
       token: z.string().describe('会话令牌（见唤醒提示中的【会话令牌】）'),
@@ -1250,7 +1250,7 @@ if (cfg.socialV2?.sticker?.enabled !== false && cfg.socialV2?.tools?.sendSticker
 if (cfg.socialV2?.tools?.sendImage !== false) {
   server.tool(
     'qq_send_image',
-    '在指定会话发送一张普通图片（不是收藏表情）。三种来源任选其一：① image = http(s) 图片地址 / data:image/...;base64,... / base64://... / 本机图片文件路径（jpg/png/gif/webp，≤10MB）；② fromMessageId（可选 index，从 1 开始）把**别人发来那张图转发出去**，不用自己找地址；③ 转发自己的旧消息同理。一条消息只能是一张图，不能在同一气泡里附带文字；想说的话请先用 qq_send_message 单独发一句，再单独发图。需要引用/点名时可用 replyToMessageId / atUserId（群聊）。别刷屏，一次发一张就够了。',
+    '在指定会话发送一张普通图片（不是收藏表情）。三种来源任选其一：① image = http(s) 图片地址 / data:image/...;base64,... / base64://... / 本机图片文件路径（jpg/png/gif/webp，≤10MB）；② fromMessageId（可选 index，从 1 开始）把**别人发来那张图转发出去**，不用自己找地址；③ 转发自己的旧消息同理。一条消息只能是一张图，不能在同一气泡里附带文字；想说的话请先用 qq_send_message 单独发一句，再单独发图。需要引用/点名时可用 replyToMessageId / atUserId（群聊）。一条消息只能一张图；想发几张就分几条发，自己按语境判断。',
     {
       key: z.string().describe('会话 key，格式 group:群号 或 private:QQ号'),
       token: z.string().describe('会话令牌（见唤醒提示中的【会话令牌】）'),
@@ -1286,7 +1286,7 @@ if (cfg.socialV2?.tools?.sendImage !== false) {
 if (cfg.socialV2?.sticker?.enabled !== false && cfg.socialV2?.tools?.collectSticker !== false) {
   server.tool(
     'qq_collect_sticker',
-    '收藏当前会话里别人发的一张表情/图片到你的 QQ 收藏表情，并可写一句简短备注（如“好图偷了，兄弟”）。收藏时**顺手标好情绪和内容**：emotion 选最接近的情绪类别，content 写一句图里是什么/什么时候用（如“抱着碗眼泪汪汪，委屈要饭”）。messageId 用 qq_get_unread_messages / qq_get_recent_messages 返回的 messageId 或 seq。注意：不要频繁收藏，只在真的觉得有意思/好用/戳中你时才偷图；收藏后你可以在 qq_list_stickers 里看到并继续使用。',
+    '收藏当前会话里别人发的一张表情/图片到你的 QQ 收藏表情，并可写一句简短备注（如“好图偷了，兄弟”）。收藏时**顺手标好情绪和内容**：emotion 选最接近的情绪类别，content 写一句图里是什么/什么时候用（如“抱着碗眼泪汪汪，委屈要饭”）。messageId 用 qq_get_unread_messages / qq_get_recent_messages 返回的 messageId 或 seq。看到有意思/好用/戳中你的图就直接偷来收藏——鼓励盗图，好图不偷白不偷（桥接有频率上限，撞上限等一会儿再收）；收藏后你可以在 qq_list_stickers 里看到并继续使用。',
     {
       key: z.string().describe('会话 key，格式 group:群号 或 private:QQ号'),
       token: z.string().describe('会话令牌（见唤醒提示中的【会话令牌】）'),

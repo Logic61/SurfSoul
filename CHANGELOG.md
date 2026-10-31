@@ -4,6 +4,31 @@
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 发布规则见 [docs/guides/VERSIONS.md](docs/guides/VERSIONS.md)。
 
+## [未发布] - 2026-10-31（表情包软策略：允许纯表情回复，鼓励盗图与发表情）
+
+### 变更
+
+- **表情包不再限频劝退**：二代 preset 第 14/15 条、桥接每轮注入的【表情包策略】、MCP 工具描述
+  （`qq_send_sticker` / `qq_send_image` / `qq_collect_sticker`）统一改成正向鼓励：
+  频率「**自己审时度势**」（删「3~5 轮一张」「别刷屏」）、**允许只用一张表情作为一条回复**
+  （删「也别总拿表情作为唯一回复」）、**鼓励盗图收藏**（删「不要频繁收藏」，改成「好图不偷白不偷」）。
+- 高分【表情匹配】措辞补「也可以只发这张表情、不配文字」；低分措辞删「也不要每轮都发」。
+- 硬约束不变：一条消息只能一张表情/图片且不能带文字、每轮最多 8 条（tokenGuard）、
+  收藏限流 2/分钟 & 50/小时（`socialV2.sticker.collect.*`，防 QQ 侧限频）。
+- **顺带修复（preset 控制台）**：`src/preset-prompt.js` 的 v2 硬性不变量清单停在旧文案
+  （`你没有本地工具` / `API 令牌`，2026-10-29 本地工具开放后已不在预设里），导致控制台保存/还原
+  `qq-chat-v2` 提示词被误拒；清单改为当前真实安全边界（本地工具仅主人私聊 / 群友无管理权限 /
+  会话令牌协议 / 角色由桥接注入 / 输出不自动发送），`test-preset-prompt` 由 7/12 红转 **12/12 绿**。
+
+### 测试/文档
+
+- `scripts/test-qq-preset-contract.mjs`：钉住新措辞、断言旧限制不再出现；顺带对齐三条既有漂移
+  （本地工具行 `tool-pwsh/tool-fs/tool-fs-search`、语音「默认关闭」→「已开启」、安全规则文案），该测试由红转绿（8/8）。
+- `scripts/test-stickers.mjs`（74/0）/`scripts/test-sticker-semantics.mjs`（28/0）补纯表情回复/盗图/无频率话术断言。
+- `docs/PITFALLS.md` 新条目（软策略措辞同向叠加会抵消链路，同 #56）；
+  `docs/guides/AGENT-TOOLS-AND-PRESETS.md` §2.3 行说明；`plugins/surfcore/presets/qq-chat-v2.patch.yml` 已重建。
+  **重启桥接后策略提示生效；重启 DSH 后 preset 与 MCP 工具描述生效。**
+
 ## [未发布] - 2026-10-31（QQ 自身资料动作：改个性签名 / 发空间说说）
 
 ### 新增

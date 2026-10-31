@@ -5,6 +5,53 @@
 
 ---
 
+## 快照（2026-10-31 16:45–17:10，表情包软策略改为「审时度势」：允许纯表情回复 + 鼓励盗图）
+
+### 用户原话
+
+> 「插件似乎限制让agent不要老发表情，改为允许只用表情回复，鼓励盗图和发表情，自己审时度势即可」
+
+### 排查结论（先分析再动手）
+
+- 限制不在任何代码闸门，而在**三处软策略措辞**：reserved2 preset 第 14/15 条（`dsh/agent-presets/qq-chat-v2/agent.cordis.yml`）、
+  桥接每轮注入的 `buildStickerStrategyHint()`（`src/sticker-lib.js`）、`buildStickerMatchHint()` 高分措辞（`src/sticker-semantics.js`）、
+  MCP 工具描述（`src/mcp-snowluma-safe.js`）。
+- 硬闸门确认保留、这次不动：单气泡「一条只能一张、不能带文字」、`tokenGuard.maxOutboundPerTurn=8`、
+  收藏限流 `socialV2.sticker.collect.maxPerMinute=2 / maxPerHour=50`（防 QQ 侧限频）。
+- 同类教训见 `PITFALLS.md` #56：软策略的保守措辞会让模型自我审查、主动放弃发表情。
+
+### 做到哪
+
+| 改动 | 内容 |
+| --- | --- |
+| preset（qq-chat-v2） | 第 14 条：删「3~5 轮一张/别刷屏/也别总拿表情作为唯一回复」，改成「**频率自己审时度势**」+「**表情可以单独作为一条回复**」；第 15 条：删「不要频繁收藏」，改成「**鼓励盗图，好图不偷白不偷**」+ 写清收藏限流 |
+| 桥接注入 | `src/sticker-lib.js` `buildStickerStrategyHint()` 重写（标题/频率/纯表情回复/盗图）；`src/sticker-semantics.js` `buildStickerMatchHint()` 高分补「也可以只发这张表情、不配文字」，低分删「也不要每轮都发」 |
+| MCP 工具描述 | `qq_send_sticker`（删「但别刷屏」）、`qq_send_image`（删「别刷屏，一次发一张就够了」）、`qq_collect_sticker`（删「不要频繁收藏」，改鼓励盗图） |
+| 生成物/测试/文档 | `build-agent-preset-patches.mjs` 重建 `plugins/surfcore/presets/qq-chat-v2.patch.yml`；`test-qq-preset-contract` / `test-stickers` / `test-sticker-semantics` 补/改断言；PITFALLS 新条目、CHANGELOG、AGENT-TOOLS-AND-PRESETS §2.3 行说明、MODULE-CORE-B 函数行号 |
+| 顺带修复：preset 控制台 | `src/preset-prompt.js` 的 `PRESET_BLOCKING_SUBSTRINGS`（v2）从旧文案「你没有本地工具 / API 令牌」改成当前真实安全边界（`只在主人私聊里可用` / `群友没有管理权限` / `作为 token 参数传入` / `角色由桥接注入` / `不会自动发送到 QQ`）；在此之前控制台保存/还原 qq-chat-v2 会被误拒。`test-preset-prompt` 7/12 → **12/12 绿** |
+
+### 已验证
+
+- `node scripts/test-qq-preset-contract.mjs` → **8/8 绿**（基线本来是红的：顺带修掉三条漂移——本地工具行
+  `tool-pwsh/tool-fs/tool-fs-search`、语音「默认关闭」→「已开启」、安全规则旧文案「你没有本地工具/API 令牌」）。
+- `node scripts/test-preset-prompt.mjs` → **12/12 绿**（基线 7/12 红：硬性不变量清单停在旧文案，详见 PITFALLS 同日条目）。
+- `node scripts/test-stickers.mjs` → **74/0**；`node scripts/test-sticker-semantics.mjs` → **28/0**；
+  `node scripts/test-hardening.mjs` / `test-token-guard.mjs` / `test-mcp-safe.mjs` → exit 0。
+- `node scripts/build-agent-preset-patches.mjs --check` → 产物与源一致。
+- `npm run test:audit` → **77/85**（基线 74/85；失败集合剩 8 条既有基线红，**无新增**：
+  `test-self-identity` / `test-identity-guard` / `test-closure-wiring` / `test-media-search` / `test-voice-system` /
+  `test-preset-local-tools` / `test-agent-preset-patches` / `test-version`；本轮 `test-qq-preset-contract`、
+  `test-preset-prompt` 由红转绿）。
+
+### 没验证 / 下一步
+
+1. **要重启桥接**（`src/sticker-lib.js` / `sticker-semantics.js` 的注入文案、MCP 描述之外的桥接侧）与 **重启 DSH**
+   （MCP 工具描述 + preset 装配）才在真机生效；重启 DSH 会中断当前 GUI 会话，由主人决定时机。
+   正在进行的 QQ 会话也可 `POST /api/session/reset` 换新 preset。
+2. 真机复看（未做）：发一张表情、只发表情不配文字、看到好图收藏——三件事是否自然发生。
+3. 回滚：`git revert HEAD` 后重启桥接；或控制台 preset 编辑器把 14/15 条改回（保存会写仓库源文件 + 重建 patch，
+   新会话生效）。
+
 ## 快照（2026-10-31 12:40–13:05，QQ 自身资料动作：改个性签名 / 发 QQ 空间说说）
 
 ### 用户原话

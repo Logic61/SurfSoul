@@ -75,7 +75,7 @@
 | `qq_send_message` | **统一发送**：一条或多条、可引用、可自定义条间间隔 | `sendMessage` | 最多 8 条 |
 | `qq_send_burst` | 分多条发（随机真人间隔） | `sendBurst` | 最多 8 条 |
 | `qq_send_poke` | 拍一拍（群聊需 targetUserId） | `sendPoke` | 频率限制 |
-| `qq_send_sticker` | 发一张收藏表情（一条只能一张，不能带文字） | `sendSticker` | 同上 |
+| `qq_send_sticker` | 发一张收藏表情（一条只能一张，不能带文字；**可以单独作为一条回复**，不必配文字） | `sendSticker` | 每条只能一张；频率由模型按语境判断（只受每轮 8 条 / token 闸门约束） |
 | `qq_send_voice` | 发语音：`text` 现场合成 / `voice` 用语音库现成文件 | `sendVoice`（默认**关**） | 需引擎；120 字；2/分钟 |
 
 ### 2.4 她自己的资料与空间（只动她自己的账号）
