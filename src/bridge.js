@@ -1822,7 +1822,6 @@ async function main() {
   }
   const slangWindows = new Map();       // key -> [{sender,text,time}]：待学习消息窗口
   const slangExtractionCooldowns = new Map(); // key -> timestamp
-  const slangSubmitTimes = new Map();   // key -> [timestamp]：AI 提交黑话候选限频（内存态）
   const feedbackTimes = new Map();      // key -> [timestamp]：AI 反馈限频（内存态）
   const slangResearchingIds = new Set(); // 正在研究中的候选 id，防止重复排队
   const learnerSessions = new Set();    // sessionId -> 学习会话（不映射 QQ，不发送）
@@ -3002,19 +3001,6 @@ async function main() {
     maybeQueueSlangExtraction(key);
   }
 
-  // AI 提交黑话候选的限频：防止单个会话在短时间内刷大量候选。
-  function allowSlangSubmit(key) {
-    const now = Date.now();
-    const arr = (slangSubmitTimes.get(key) ?? []).filter((t) => now - t < 60 * 60 * 1000);
-    const recentMinute = arr.filter((t) => now - t < 60 * 1000).length;
-    const MAX_PER_MINUTE = 2;
-    const MAX_PER_HOUR = 10;
-    if (recentMinute >= MAX_PER_MINUTE || arr.length >= MAX_PER_HOUR) return false;
-    arr.push(now);
-    slangSubmitTimes.set(key, arr);
-    return true;
-  }
-
   // 返回给 AI 的“公开黑话条目”（只含安全展示字段，不泄露内部字段）。
   //
   // 刻意**不含 evidence**：证据行的形状是 `{ key, sender, text, time }`，
@@ -3519,7 +3505,6 @@ async function main() {
     lastSendFailed.delete(key);
     activeWaits.delete(key);
     queuedHintAt.delete(key);
-    slangSubmitTimes.delete(key);
     feedbackTimes.delete(key);
     wakeConfigMissCount.delete(key);
     wakeConfigUpdatedKeys.delete(key);
@@ -4701,7 +4686,6 @@ async function main() {
             // 清空所有时同步清掉待提取窗口和冷却，避免“删了又回来”
             slangWindows.clear();
             slangExtractionCooldowns.clear();
-            slangSubmitTimes.clear();
             slangResearchingIds.clear();
           }
           saveSlangStore();
@@ -8341,7 +8325,6 @@ async function main() {
           if (cfg.slang?.enabled === false) { sendJson({ ok: false, error: '黑话学习已关闭（slang.enabled=false）' }, 403); return; }
           if (!content) { sendJson({ ok: false, error: 'content 不能为空' }, 400); return; }
           if (content.length > 50) { sendJson({ ok: false, error: '黑话词条过长（最多 50 字）' }, 400); return; }
-          if (!allowSlangSubmit(key)) { sendJson({ ok: false, error: '黑话提交过于频繁，请稍后再试' }, 429); return; }
           const existing = slangEntries.find((e) => e.content === content);
           if (existing) {
             if (existing.status === SLANG_STATUS.CONFIRMED) {
@@ -8605,7 +8588,6 @@ async function main() {
           social.exitingSessions.delete(oldSessionId);
           slangWindows.delete(key);
           slangExtractionCooldowns.delete(key);
-          slangSubmitTimes.delete(key);
           cancelSocialTimers(key);
           clearSocialV2Timers(key);
           pendingWakeKeys.delete(key);
@@ -8669,7 +8651,6 @@ async function main() {
           social.exitingSessions.clear();
           slangWindows.clear();
           slangExtractionCooldowns.clear();
-          slangSubmitTimes.clear();
           cancelAllSocialTimers();
           clearAllSocialV2Timers();
           // 清空工作区 = 所有会话连同 token 一起作废，两张表整体清掉（比逐会话摘除更不容易漏）。
@@ -14429,7 +14410,6 @@ async function main() {
           social.silentContext.delete(key);
           slangWindows.delete(key);
           slangExtractionCooldowns.delete(key);
-          slangSubmitTimes.delete(key);
           cancelSocialTimers(key);
           clearSocialV2Timers(key);
           pendingWakeKeys.delete(key);

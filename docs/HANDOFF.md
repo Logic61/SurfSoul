@@ -5,6 +5,44 @@
 
 ---
 
+## 快照（2026-10-31 17:06–17:35，黑话提交去掉限制：遇到没把握的词就直接提）
+
+### 用户原话
+
+> 「把黑话提交的限制去掉」
+
+### 排查结论（先分析再动手）
+
+- 限制分三层：① preset 第 9 条「未收录且**多次出现才** qq_slang_submit，可附语境，**不重复提交**」；
+  ② 桥接 `allowSlangSubmit()` 每会话限流 **2/分钟、10/小时**，超了回 429「黑话提交过于频繁，请稍后再试」；
+  ③ MCP 工具描述写成「在群里**经常看到**但不确定含义的…提交」，等于告诉模型「偶尔看到的小词别提」。
+- 保留的闸门（不是频率限制）：模式/会话令牌/`socialV2.tools.slangSubmit`/`slang.enabled`、词条 ≤50 字、
+  同词重复提交合并计数、管理员拒绝过的词不再收、黑话学习会话的 token 额度闸。
+
+### 做到哪
+
+| 改动 | 内容 |
+| --- | --- |
+| preset（qq-chat-v2） | 第 9 条改成「看到/听到没把握的词先 qq_slang_query，查不到或不确定就**直接 qq_slang_submit 提交候选词**，可附原话语境——不用等它出现多次，也不用攒着」 |
+| MCP 工具描述 | `qq_slang_submit` 去掉「经常看到」前置条件，改成「看到/听到没把握的词就直接提交，不用等它反复出现」 |
+| 桥接 | 删除每会话提交限频：`slangSubmitTimes`（内存 map）、`allowSlangSubmit()`、路由 429 拦截，以及 5 处 map 清理调用 |
+| 测试/文档 | 新增 `scripts/test-slang-submit.mjs`（3 项：限频已删 / 闸门仍在 / preset+MCP 鼓励直接提交）并接进 `test:audit`；`test-qq-preset-contract` 补断言；patch 已重建；PITFALLS 新条目、CHANGELOG、`RULES.md`（含上一轮未同步的安全不变量清单）、`MODULE-BRIDGE`、`AGENT-TOOLS-AND-PRESETS` 同步 |
+
+### 已验证
+
+- `node scripts/test-slang-submit.mjs` → **3/3**；`node scripts/test-qq-preset-contract.mjs` → **8/8**；
+  `node --check src/bridge.js` 通过；`build-agent-preset-patches --check` 产物一致。
+- `npm run test:audit` → **78/86**（基线 74/85；新增 `test-slang-submit` 后脚本总数 86；
+  失败集合仍是那一组 8 条既有基线红：`test-self-identity` / `test-identity-guard` / `test-closure-wiring` /
+  `test-media-search` / `test-voice-system` / `test-preset-local-tools` / `test-agent-preset-patches` /
+  `test-version`，**无新增**）。
+
+### 没验证 / 下一步
+
+1. **要重启桥接**（限流/429 已删）与 **重启 DSH**（MCP 描述 + preset 装配）才在真机生效。
+2. 真机复看（未做）：群里出现新梗/缩写时她会不会直接提交；控制台「黑话词库」候选是否变多。
+3. 回滚：`git revert HEAD` 后重启桥接。
+
 ## 快照（2026-10-31 16:45–17:10，表情包软策略改为「审时度势」：允许纯表情回复 + 鼓励盗图）
 
 ### 用户原话

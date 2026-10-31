@@ -674,7 +674,7 @@ await pumpMux();      // DSH 事件流主循环（永不返回）
 | POST | `/api/socialV2/sticker-remark` | `setStickerRemark` | 改 QQ 官方备注 | `src/bridge.js:6388-6404` |
 | POST | `/api/socialV2/sticker-list` | `listStickers` | 强制刷新（AI 侧最小间隔 10 秒） | `src/bridge.js:6984-7009` |
 | POST | `/api/socialV2/memory-append` / `-update` / `-remove` / `-clear` | `memory` | 写会话记忆 | `src/bridge.js:7617-7768` |
-| POST | `/api/socialV2/slang/submit` | `slangSubmit` | 写黑话库（限频 2/分、10/时） | `src/bridge.js:7794-7849` |
+| POST | `/api/socialV2/slang/submit` | `slangSubmit` | 写黑话库（2026-10-31 起不再限频；同词重复提交合并计数） | `src/bridge.js:8315-8370` |
 | POST | `/api/socialV2/feedback` | `feedback` | 写 `state/feedback.json`（限频 5/分、20/时） | `src/bridge.js:7383-7412` |
 | POST | `/api/socialV2/feedback-clear` | — `A!` | 清空反馈 | `src/bridge.js:7376` |
 | POST | `/api/socialV2/tool-log/clear` | — `A!` | 清空工具日志 | `src/bridge.js:7364` |

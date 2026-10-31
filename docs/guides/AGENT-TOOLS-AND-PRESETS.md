@@ -107,7 +107,7 @@
 | 工具 | 作用 | 开关 |
 | --- | --- | --- |
 | `qq_memory_append` / `qq_memory_query` / `qq_memory_remove` / `qq_memory_clear` | 轻量记忆（进行中的话题 / 想说的话 / 对某人的印象） | `memory` |
-| `qq_slang_query` / `qq_slang_submit` | 查已确认的群聊黑话 / 提交候选词 | `slangQuery` / `slangSubmit` |
+| `qq_slang_query` / `qq_slang_submit` | 查已确认的群聊黑话 / 提交候选词（**看到没把握的词就直接提**，不再限频） | `slangQuery` / `slangSubmit` |
 | `qq_collect_sticker` | 收藏别人发的表情，并写情绪/内容/关键词 | `collectSticker` |
 | `qq_sticker_note` | 给自己的收藏表情写语义（本地记忆，不改 QQ 备注） | `stickerNote` |
 | `qq_get_sticker_image` | 看某个收藏表情长什么样 | `getStickerImage` |

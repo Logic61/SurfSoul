@@ -4,6 +4,23 @@
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 发布规则见 [docs/guides/VERSIONS.md](docs/guides/VERSIONS.md)。
 
+## [未发布] - 2026-10-31（黑话提交去掉限制：遇到没把握的词就直接提）
+
+### 变更
+
+- **AI 黑话提交不再限频**：删除桥接每个会话「2 次/分钟、10 次/小时」的提交限流与 429「黑话提交过于频繁」；
+  preset 第 9 条与 `qq_slang_submit` 工具描述同步去掉「多次出现才提交」「不重复提交」「经常看到」等前置条件，
+  改成「看到/听到没把握的词就直接提交，可附原话语境」。
+- 保留的技术/管理闸门不变：模式 + 会话令牌 + `socialV2.tools.slangSubmit` + `slang.enabled`；
+  词条 ≤50 字；同词重复提交合并为计数；管理员拒绝过的词仍不再收；黑话学习仍受 token 额度闸。
+
+### 测试/文档
+
+- 新增 `scripts/test-slang-submit.mjs`（限频已删 / 闸门仍在 / preset+MCP 鼓励直接提交），已接进 `test:audit`。
+- `test-qq-preset-contract` 补「不再要求多次出现/不重复提交」断言；patch 已重建；
+  `MODULE-BRIDGE` / `AGENT-TOOLS-AND-PRESETS` / `RULES.md` 同步；PITFALLS 新条目。
+  **重启桥接后限流移除生效；DSH 重启后 preset 与 MCP 描述生效。**
+
 ## [未发布] - 2026-10-31（表情包软策略：允许纯表情回复，鼓励盗图与发表情）
 
 ### 变更

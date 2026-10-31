@@ -14,7 +14,10 @@ const tests = [
   // 且只留下一行日志 —— 必须有登记期断言钉住（活 DSH 侧的实测见
   // scripts/test-dsh-session-retire.mjs）。
   'test-dsh-inbox-projection.mjs',
-  'test-md-to-plain.mjs', 'test-slang-learn.mjs', 'test-mux-reconnect.mjs',
+  'test-md-to-plain.mjs', 'test-slang-learn.mjs',
+  // 黑话提交限制移除（2026-10-31）：不再限频；鉴权/开关/长度/去重闸门仍在；
+  // preset 与 MCP 描述鼓励「遇到没把握的词就直接提」。
+  'test-slang-submit.mjs', 'test-mux-reconnect.mjs',
   // DSH 端口漂移兜底：401/200+SERVER 才算 DSH、别的 Web 服务不算、回环之外不覆盖。
   'test-dsh-port.mjs',
   // 鱼群保护：QQ 的鱼名/密度/连续刷屏判定 + B站的鱼楼层/聚拢/点赞纯逻辑（不发真请求）。

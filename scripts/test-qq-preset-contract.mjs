@@ -106,7 +106,7 @@ test('autonomy limits and the observation escape hatch stay described', () => {
     // 记忆面
     '【记忆卫生】', 'qq_memory_append', 'qq_memory_query', 'qq_memory_remove', 'qq_memory_clear',
     // 黑话面
-    'qq_slang_query', 'qq_slang_submit', '不重复提交',
+    'qq_slang_query', 'qq_slang_submit', '不用等它出现多次',
     // 软策略：频率交给模型审时度势；允许纯表情回复、鼓励盗图（2026-10-31 用户要求）
     '频率自己审时度势', '可以单独作为一条回复', '鼓励盗图', '好图不偷白不偷',
     '每条只能一张，不能附带文字', '不要频繁拍',
@@ -116,6 +116,10 @@ test('autonomy limits and the observation escape hatch stay described', () => {
     'triggers.speakerIds', '不凭记忆乱填',
   ]) assert.ok(prefix.includes(text), `missing rule: ${text}`);
   // 旧限制不能悄悄回来（用户 2026-10-31 明确要求删掉）
+  // 2026-10-31 用户要求「把黑话提交的限制去掉」：不再要求「多次出现才提交 / 不重复提交」
+  for (const gone of ['多次出现才 qq_slang_submit', '不重复提交']) {
+    assert.ok(!prefix.includes(gone), `已移除的黑话提交限制不应回到 preset: ${gone}`);
+  }
   for (const gone of ['普通闲聊约 3~5 轮一张', '也别总拿表情作为唯一回复', '不要频繁收藏']) {
     assert.ok(!prefix.includes(gone), `已移除的表情限制不应回到 preset: ${gone}`);
   }
