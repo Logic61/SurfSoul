@@ -1,9 +1,9 @@
 # 工具面与 preset（AGENT-TOOLS-AND-PRESETS）
 
-> 这份文档回答：**agent 的手从哪来**（三个 MCP server + 39 个 `qq_*` 工具）、**哪些手被绑住**
+> 这份文档回答：**agent 的手从哪来**（三个 MCP server + 41 个 `qq_*` 工具）、**哪些手被绑住**
 > （五层闸门 + fail-closed 守卫）、**她戴哪张面具**（`qq-chat` / `qq-chat-v2` 两代 preset）、
 > **这些是怎么装进 DSH 的**。
-> **最后核对**：2026-10-30（dsh-memewiki v2 的 4 个工具进 QQ 白名单）。配套阅读：总纲 [ARCHITECTURE.md](ARCHITECTURE.md) · 边界 [BOUNDARIES.md](BOUNDARIES.md) · 索引 [../README.md](../README.md)。
+> **最后核对**：2026-10-31（新增 `qq_set_signature` / `qq_send_qzone` 两个自身资料工具）。配套阅读：总纲 [ARCHITECTURE.md](ARCHITECTURE.md) · 边界 [BOUNDARIES.md](BOUNDARIES.md) · 索引 [../README.md](../README.md)。
 
 ---
 
@@ -11,7 +11,7 @@
 
 **两个 MCP 手 + 一张面具。**
 
-- `snowluma`（39 个 `qq_*` 工具）是主力手：读消息、发消息、等待、表情、语音、记忆。
+- `snowluma`（41 个 `qq_*` 工具）是主力手：读消息、发消息、等待、表情、语音、记忆、她自己的资料/空间。
 - `snowluma-host`（1 个）是探活手：只问 SnowLuma 在不在，**没有启停能力**（EULA）。
 - `web-search-safe`（2 个）是外部信息手：只读搜索与抓取，带 SSRF 防护。
 - preset 决定"她是谁、在哪说话"：`qq-chat`（一代/普通）与 `qq-chat-v2`（二代仿真）。
@@ -22,7 +22,7 @@
 
 | server | 入口 | 工具 | 挂载 | 边界 |
 | --- | --- | --- | --- | --- |
-| `snowluma` | `src/mcp-snowluma-safe.js`（1,410 行） | 39 个 `qq_*` | `~/.dsh/profiles/<profile>/cordis.patch.yml`（`setup-dsh.mjs` 写入） | 发送必须命中白名单；会话绑定 `x-agent-token`；工具开关逐项可控 |
+| `snowluma` | `src/mcp-snowluma-safe.js`（1,533 行） | 41 个 `qq_*` | `~/.dsh/profiles/<profile>/cordis.patch.yml`（`setup-dsh.mjs` 写入） | 发送必须命中白名单；会话绑定 `x-agent-token`；工具开关逐项可控 |
 | `snowluma-host` | `src/mcp-host-server.js`（93 行） | `snowluma_status` | 同上 | **只读探活**；v0.1.5 起移除了 `start_snowluma`/`stop_snowluma` |
 | `web-search-safe` | `src/mcp-web-search-safe.js`（92 行） | `web_search`、`web_fetch` | 同上 | 只读；禁内网/环回/CGNAT；DNS 解析后逐地址校验；重定向每跳复核 |
 
@@ -33,7 +33,7 @@
 
 ---
 
-## 2. `qq_*` 工具全表（39 个）
+## 2. `qq_*` 工具全表（41 个）
 
 **配置开关**列对应 `config.json` 的 `socialV2.tools.<key>`（`true` 才注册；默认只有
 `setStickerRemark` 与 `sendVoice` 是 `false`）。**需要令牌**列：二代模式下所有 `qq_*` 调用都要带
@@ -78,7 +78,19 @@
 | `qq_send_sticker` | 发一张收藏表情（一条只能一张，不能带文字） | `sendSticker` | 同上 |
 | `qq_send_voice` | 发语音：`text` 现场合成 / `voice` 用语音库现成文件 | `sendVoice`（默认**关**） | 需引擎；120 字；2/分钟 |
 
-### 2.4 等待与状态机
+### 2.4 她自己的资料与空间（只动她自己的账号）
+
+| 工具 | 作用 | 开关 | 硬约束 |
+| --- | --- | --- | --- |
+| `qq_set_signature` | 改**她自己**的 QQ 个性签名（空串=清除签名） | `setSignature`（默认开） | ≤120 字；敏感信息 / 身份泄露 403；只 reserved2 + 会话令牌 |
+| `qq_send_qzone` | 发一条 QQ 空间说说（`visibility` 默认 `friends`=好友可见，可选 `all`/`self`） | `sendQzone`（默认开） | 1~1000 字；不支持图片；敏感信息 / 身份泄露 403 |
+
+> 两个动作都只作用于机器人自己的 QQ 账号，不涉及他人；但它们是**公开面**（好友/所有人可见），
+> 所以除 `SENSITIVE_RE` 外还过 `src/identity-guard.js` 身份闸——主人 QQ、群号等账号标识写上去就收不回来。
+> 行为边界见 [`RULES.md`](../../RULES.md) 硬边界第 5 条，踩坑记录见 `PITFALLS.md`
+> 「SnowLuma 动作目录是 SDK 构建期快照」。
+
+### 2.5 等待与状态机
 
 | 工具 | 作用 | 开关 |
 | --- | --- | --- |
@@ -90,7 +102,7 @@
 > **沉睡前观察**是硬约束：决定潜水/收尾前必须先用 `qq_wait_for_messages(timeoutMs=300000)` 完成一次
 > 静默观察，桥接会校验；`purpose="reply"` 的短静默**不能**代替它。
 
-### 2.5 记忆、黑话、表情管理、反馈
+### 2.6 记忆、黑话、表情管理、反馈
 
 | 工具 | 作用 | 开关 |
 | --- | --- | --- |

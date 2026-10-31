@@ -21,6 +21,7 @@ import * as tokenLedger from '../src/token-ledger.js';
 import * as voiceLib from '../src/send-voice-lib.js';
 import { synthesizeToFile } from '../src/voice-tts.js';
 import * as presetPrompt from '../src/preset-prompt.js';
+import * as identityGuard from '../src/identity-guard.js';
 import * as fishGuard from '../src/fish-guard.js';
 import * as tokenGuard from '../src/token-guard.js';
 import * as tokenBudget from '../src/token-budget.js';
@@ -81,7 +82,7 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     fs.mkdirSync(path.dirname(target), { recursive: true });
     fs.writeFileSync(target, typeof content === 'string' ? content : JSON.stringify(content));
   }
-  const calls = { created: [], archived: [], sent: [], prompts: [], follows: [], cancelled: [], images: [], faces: [], http: [] };
+  const calls = { created: [], archived: [], sent: [], prompts: [], follows: [], cancelled: [], images: [], faces: [], http: [], longNick: '' };
   // 语音发送在桥接里是**直接 fetch 网关**（与文本/表情共用 sendChain，但要自己带 record 段），
   // 所以这里给 VM 注入一个记录型 fetch：既不让测试真的发 QQ 消息，又能断言发出的段内容。
   const fakeFetch = async (url, init = {}) => {
@@ -99,6 +100,38 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     }
     if (action === 'fetch_ptt_text') {
       return { ok: true, status: 200, json: async () => ({ status: 'ok', retcode: 0, data: { text: 'fixture-transcript' } }) };
+    }
+    // 她自己的资料/空间（qq_set_signature / qq_send_qzone）：只记录，不碰真 QQ。
+    // set_self_longnick 记下当前签名，get_stranger_info 回读同一份值，桥接的 verified 才能算对。
+    if (action === 'set_self_longnick') {
+      calls.longNick = String(body?.longNick ?? body?.long_nick ?? '');
+      return { ok: true, status: 200, json: async () => ({ status: 'ok', retcode: 0, data: {} }) };
+    }
+    if (action === 'get_stranger_info') {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ status: 'ok', retcode: 0, data: { user_id: body?.user_id, nickname: 'fixture-bot', long_nick: calls.longNick } })
+      };
+    }
+    if (action === 'send_qzone_msg') {
+      return { ok: true, status: 200, json: async () => ({ status: 'ok', retcode: 0, data: { tid: 'fixture-qzone-tid' } }) };
+    }
+    // 好友列表：目的机制投递前会先查「主人在不在好友里」（src/bridge.js 的 greetingFriendCheck）。
+    // 夹具里必须真的能查到：bot.raw 可用之后，若这里回空列表，强制投递会被判 not-friend，
+    // 把一件本来能成功的事误判成失败（2026-10-31 新增 FakeBot.raw 时暴露过）。
+    if (action === 'get_friend_list') {
+      const ids = [harnessConfig.ownerQQ, ...(harnessConfig.allow?.private ?? [])]
+        .map((id) => String(id ?? '').trim()).filter(Boolean);
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          status: 'ok',
+          retcode: 0,
+          data: [...new Set(ids)].map((id) => ({ user_id: Number(id), nickname: `fixture-${id}`, remark: '' }))
+        })
+      };
     }
     // get_msg：语音落地校验用 —— 回一个带 record 段的消息，模拟真实网关
     if (action === 'get_msg') {
@@ -143,6 +176,21 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     callUnary: async (method, params) => { calls.cancelled.push({ method, params }); return success({ accepted: true }); },
   };
   class FakeBot {
+    // 桥接里所有 OneBot 动作都走 bot.raw(action, params)（真实 SDK 的 ApiClient.raw 会
+    // 发 HTTP 并把 data 直接返回）。夹具里必须实现同名方法：否则 set_group_card /
+    // set_self_longnick / send_qzone_msg 这些「裸动作」路由在测试里直接 ReferenceError，
+    // 而且会把桥接代码的错误路径当成断言失败，误导成业务 bug。
+    async raw(action, params = {}) {
+      const res = await fakeFetch(`https://fixture.invalid/${action}`, {
+        method: 'POST',
+        body: JSON.stringify(params ?? {})
+      });
+      const body = await res.json();
+      if (body?.status !== 'ok' || body?.retcode !== 0) {
+        throw new Error(`OneBot ${action} 失败: retcode=${body?.retcode} ${body?.wording ?? ''}`);
+      }
+      return body.data;
+    }
     async sendPrivateMessage(id, text) { calls.sent.push({ kind: 'private', id, text }); }
     async sendGroupMessage(id, text) { calls.sent.push({ kind: 'group', id, text }); }
     async getImage({ file }) {
@@ -235,7 +283,7 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     probeDshBaseUrl: async () => true,
     discoverDshBaseUrl: async () => null,
     ...markdown, ...sensitive, ...wait, ...safeFetch, ...forward, ...selfIdentity, ...slang, ...sticker,
-    ...modelPrices, ...tokenLedger, ...voiceLib, ...stateAcl, ...presetPrompt, ...fishGuard, ...tokenGuard,
+    ...modelPrices, ...tokenLedger, ...voiceLib, ...stateAcl, ...presetPrompt, ...identityGuard, ...fishGuard, ...tokenGuard,
     synthesizeToFile,
     ...tokenBudget,
     ...adminIdentity, ...roleCard, ...memoryCard, ...biliCard, ...characterStore, ...historyCatchup,

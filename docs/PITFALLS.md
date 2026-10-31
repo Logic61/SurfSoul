@@ -2888,3 +2888,21 @@ return list[0] ?? pool[0];
 - **怎么办**：看到这句先等 30~40s，再查 `state/bridge.log` 是否出现「本地控制台已启动」与端口 3100；
   不要连点重启。根治方向（未做，独立小修）：ACL 收紧跳过 `voice-packs/` 等大目录、
   或把 supervisor 等待放宽到 40~60s、或把 `state/voice-packs` 移出统一步骤。
+
+
+## SnowLuma 动作目录是 SDK 构建期快照：别用 catalog 版本差 / 空说说列表判断「动作没实现」
+
+- **现象**：接「改个性签名 / 发 QQ 空间说说」时，`_snowluma-catalog.json` 与 `node_modules/@snowluma/mcp` 的 catalog 里都有 `set_self_longnick` / `send_qzone_msg`，但 catalog 来自 SDK **1.14.20**、本机运行时只有 **1.14.5-node**，看起来像「目录比运行时新，动作可能不存在」；真机调 `get_qzone_msg_list({})` 又稳定返回 `retcode 100「无法获取空间说说列表（响应结构异常）」`，更像动作缺失。
+- **根因**：catalog 是 **SDK 构建期快照**，不反映本机运行时注册表，版本号不能当能力判据。本机实测两个动作都在运行时：
+  `set_self_longnick` 见 `C:\Users\32372\SnowLuma\config-Bgjda8Pc.js:8038`，`send_qzone_msg` 见同文件 `:8826`。
+  `get_qzone_msg_list` 报 100 是因为账号当前**没有说说**、底层 `msglist` 为 `null`，响应结构自然拼不出来，跟动作实现无关。
+- **影响**：误判「动作没实现」会把需求无谓砍掉；拿 `get_qzone_msg_list` 做发布后校验更糟——空列表时必报 100，发布明明成功也会被判失败。
+- **修法（2026-10-31 接上两个 v2 工具）**：
+  - 判断动作在不在只看运行时：未知动作返回 `retcode 1404 "unknown action"`，这才是「没这个动作」的证据，不是 catalog 版本差。
+  - **不要**把 `get_qzone_msg_list` 当发布成功判据：空列表必报 `retcode 100`；有数据时返回 `{total, msglist}`，但 `total` 不一定是真实条数，别拿它做业务断言。它只用于「确实有说说时」读取 / 找 tid；`send_qzone_msg` 的成功回包是 `{tid, time}`，`tid` 可直接给 `delete_qzone_msg`。
+  - `set_self_longnick` 参数**严格 string**：`typeof longNick !== 'string'` → `retcode 100 invalid longNick`，数字/对象一律不收。
+  - `set_self_longnick({ longNick: '' })` **能清空**签名（回读 `long_nick` 变回空串）。但**紧接着连续改第二次**会返回 `retcode 100「OIDB error 999 on 0x112a_2: set longnick Fail」`——QQ 侧改动频率限制/瞬时失败，**等几秒重试就成功**（实测第二次重试通过）。桥接路由**不做自动重试**，把错误原样回给模型，由它隔一会儿再试。
+  - **改签名会自动同步生成一条空间说说**（实测：改成一段文本后 `get_qzone_msg_list` 多出一条 `is_private: true`、content 与新签名相同的条目）。所以改签名后的善后是**两步**：先用 `set_self_longnick({ longNick: '' })` 清签名，再用 `delete_qzone_msg(tid)` 删掉那条同步说说；只清签名会在空间里留一条仅自己可见的测试内容。
+  - `send_qzone_msg` 的 `ugc_right` 只接受 `1/4/16/64/128`（1=所有人、4=好友、16=部分好友可见、64=仅自己、128=部分好友不可见），且 `16/128` 必须带非空 `target_uins`；v1 只开放 1/4/64，16/128 明确拒绝（要名单）。
+  - 签名/说说都必须过**身份闸**（`src/identity-guard.js`）：它们是**公开面**（好友可见 / 所有人可见），主人 QQ、群号、对齐表里的账号写上去就收不回来。B站 侧 identity-guard 的结论同样适用于 QQ 空间——确定性拒绝优先于「靠提示词提醒」。
+- **验证**（2026-10-31 真机 E2E，已批准、已回滚）：`get_qzone_msg_list({})` 空列表 → `retcode 100`；`set_self_longnick({ longNick: '' })` 后 `get_stranger_info.long_nick` 回读为空串（清空有效）；紧接着第二次改签名 → `retcode 100 OIDB error 999…`，等几秒重试通过、回读与新值一致；改签名后 `get_qzone_msg_list` 出现 `is_private: true` 的同步条目，`delete_qzone_msg(tid)` 删除；`send_qzone_msg` 回 `{tid, time}`。发布后**不**用 `get_qzone_msg_list` 判成功。以后再见 catalog 与运行时版本差，先按上面的运行时行号复核，别直接判「不可用」。

@@ -221,6 +221,8 @@
       "stickerNote": true,
       "collectSticker": true,
       "getSelfImage": true,
+      "setSignature": true,
+      "sendQzone": true,
       "sendVoice": false
     },
     "wake": {

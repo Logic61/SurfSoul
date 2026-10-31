@@ -4,6 +4,26 @@
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 发布规则见 [docs/guides/VERSIONS.md](docs/guides/VERSIONS.md)。
 
+## [未发布] - 2026-10-31（QQ 自身资料动作：改个性签名 / 发空间说说）
+
+### 新增
+
+- **`qq_set_signature` / `qq_send_qzone` 两个 v2 工具**：接 SnowLuma 运行时的 `set_self_longnick` /
+  `send_qzone_msg`（本机 1.14.5-node 实测可用），只动**机器人自己的** QQ 账号。桥接新增
+  `POST /api/socialV2/set-signature`、`POST /api/socialV2/send-qzone`：权限链照 `set-group-card`
+  （仅 reserved2 + 会话令牌 + `socialV2.tools.setSignature/sendQzone` 开关 + 暂停），另过
+  `SENSITIVE_RE` 与 `src/identity-guard.js`（签名/说说都是公开面）；签名 ≤120 字、空串=清除；
+  说说 1~1000 字、`visibility` friends(4)/all(1)/self(64)（v1 不支持 16/128 与图片）。
+  控制台「二代仿真 → 工具开关」、`config.example.json`、插件设置页标签同步；MCP 工具受注册期开关控制。
+- **回归**：新增 `scripts/test-qq-self-expression.mjs`（22 项：两路由全部闸门 + 真实 OneBot 动作参数 +
+  bridge/MCP/控制台/配置/标签静态接线），进 `test:audit`。夹具补 `FakeBot.raw` 与
+  `set_self_longnick`/`get_stranger_info`/`send_qzone_msg`/`get_friend_list` 桩
+  （顺带修好被「夹具缺 bot.raw」掩盖的 `test-purpose-wiring`）。
+- **文档**：二代 preset 第 17 条「她自己的资料与空间」；`RULES.md` 硬边界第 5 条；`PITFALLS.md`
+  新增「SnowLuma 动作目录是 SDK 构建期快照」（含 OIDB 999 频率限制、改签名会自动同步空间说说等实测坑）；
+  `docs/guides/AGENT-TOOLS-AND-PRESETS.md` 39→41 个工具 + §2.4；`SECURITY_BASELINE.md` §3。
+  **真机 E2E 已验证并回滚，桥接已重启**；DSH 需重启后才出现新 MCP 工具。
+
 ## [未发布] - 2026-10-31（语音合成超时，P0）
 
 ### 修复

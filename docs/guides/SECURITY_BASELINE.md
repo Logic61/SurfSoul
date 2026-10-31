@@ -50,6 +50,7 @@
 | 机制 | 位置 | 行为 |
 | --- | --- | --- |
 | 敏感信息拦截 | `auditAndSend()` / `SENSITIVE_RE` / `assertOutboundAuditOk()` | 回复含本机路径、UNC、凭据赋值形态 → **整条拦截不发**；语音按文件名审计；错误文本、审批理由、工具名同样过审 |
+| 自身资料动作（签名/空间说说） | `/api/socialV2/set-signature` / `/api/socialV2/send-qzone` | 只动机器人**自己**的 QQ 账号；仅 `reserved2` + 会话令牌 + `socialV2.tools` 开关可用；除 `SENSITIVE_RE` 外再过 `src/identity-guard.js`（签名/说说都是公开面，主人 QQ/群号等账号标识不许出现）；签名 ≤120 字、说说 1~1000 字、不支持图片 |
 | 会话令牌防外发 | `redactKnownTokensOnly()` + `onebotSend()` | 所有已知 agent token 在发送前脱敏；文本里若仍出现已知令牌则**直接抛错不发** |
 | CQ 注入 | `onebotSend()` | 出站文本一律包成 `{type:'text'}` 段并做 `[CQ:` → `[CQ：` 转义，杜绝 CQ 码注入 |
 | @ 限制 | `onebotSend()` | `atUserId` 只接受正整数，禁止 `@all` |

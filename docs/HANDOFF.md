@@ -5,6 +5,60 @@
 
 ---
 
+## 快照（2026-10-31 12:40–13:05，QQ 自身资料动作：改个性签名 / 发 QQ 空间说说）
+
+### 用户原话
+
+> 「看看surfcore有没有改个性签名、发QQ动态的接口，如果没有，看看snowluma是否有，有就接上」
+
+### 排查结论（先分析再动手）
+
+- surfcore 原本**没有**这两个接口（全仓搜 `qzone|longNick|说说|个性签名` 只命中无关文案）。
+- SnowLuma **有**：本机运行时 `1.14.5-node` 里 `set_self_longnick`（`C:\Users\32372\SnowLuma\config-Bgjda8Pc.js:8038`）
+  与 `send_qzone_msg`（同文件 `:8826`）都实现了；`_snowluma-catalog.json` / `@snowluma/mcp` 的 catalog 是
+  SDK **1.14.20 构建期快照**（比运行时新，但这两个动作一致）。
+- 坑（已写进 `PITFALLS.md`）：`get_qzone_msg_list({})` 在账号没有说说时返回 `retcode 100「响应结构异常」`，
+  **不能**当「动作没实现」或「发布成功」的判据；`set_self_longnick` 严格 string，空串可以清空签名，
+  但紧接着连续改第二次会 OIDB 999（QQ 侧频率限制，隔几秒重试即可）；改签名会自动同步一条
+  `is_private: true` 的空间说说，善后要「清签名 + 删同步说说」两步。
+
+### 做到哪
+
+| 改动 | 内容 |
+| --- | --- |
+| `src/bridge.js` | 两个 POST 路由 `/api/socialV2/set-signature`、`/api/socialV2/send-qzone`；权限链照 `set-group-card`（仅 reserved2 + 会话 token + `socialV2.tools` 开关 + 暂停）；额外过 `SENSITIVE_RE` + `src/identity-guard.js` 两道闸；签名 ≤120 字（空串=清除）、说说 1~1000 字 + `visibility` friends/all/self→4/1/64（v1 不支持 16/128 与图片）；两处 `socialV2.tools` 默认表加 `setSignature` / `sendQzone`（默认 true）+ POST config 的 toolFlags 同步 |
+| `src/mcp-snowluma-safe.js` | 新工具 `qq_set_signature`、`qq_send_qzone`（`TOOL_CONFIG_FLAGS` 注册期开关 + 与 `qq_set_group_card` 同模式的注册块） |
+| 控制台/配置/插件 | `public/console.html` 两个 `data-v2-tool` 开关；`config.example.json` 两个 key；`plugins/surfcore/lib/client.js` 两个中文标签 |
+| `scripts/audit-bridge-harness.mjs` | 补 `FakeBot.raw`（原来夹具缺它，把「bot.raw 不存在」的 fail-open 路径掩盖了）+ `set_self_longnick` / `get_stranger_info` / `send_qzone_msg` / `get_friend_list` 桩 + `calls.longNick` |
+| 测试 | 新增 `scripts/test-qq-self-expression.mjs`（22 项：两路由全部闸门 + 静态接线），已接进 `scripts/test-audit.mjs` |
+| 文档/preset | 二代 preset 第 17 条「她自己的资料与空间」（`dsh/agent-presets/qq-chat-v2/agent.cordis.yml`，bundle patch 已重建）；`RULES.md` 硬边界第 5 条；`PITFALLS.md` 新条目；`docs/guides/AGENT-TOOLS-AND-PRESETS.md`（39→41 个工具 + §2.4）；`SECURITY_BASELINE.md` §3 一行 |
+
+### 已验证
+
+- `node scripts/test-qq-self-expression.mjs` → **22/22 绿**。
+- `npm run test:audit`（最终第 3 轮）→ **74/85**（改前 72/84）。失败集合与改动前基线**完全一致**（11 条既有基线红：
+  `test-self-identity` / `test-identity-guard` / `test-closure-wiring` / `test-qq-preset-contract` /
+  `test-preset-prompt` / `test-audit-regressions` / `test-media-search` / `test-voice-system` /
+  `test-preset-local-tools` / `test-agent-preset-patches` / `test-version`）。
+  本轮顺带把 `test-purpose-wiring` 由红转绿：补 `FakeBot.raw` 后暴露夹具缺 `get_friend_list`（目的机制投递前查好友），已补桩。
+- **真机 E2E（用户批准，已回滚）**：直连 SnowLuma——改签名→回读一致→清空（第二次立刻改会 OIDB 999，隔 5s 重试成功）；
+  发一条 `ugc_right=64`（仅自己可见）测试说说→拿 tid→删掉；改签名自动同步的那条私有说说也删掉；
+  最终签名回到空串、空间无残留。
+- **2026-10-31 13:01 已重启桥接并跑真实路由**（新 PID 46252；mode=reserved2、dshReady=true、SnowLuma connected）：
+  `POST /api/socialV2/set-signature` → `{ok:true, verified:true}`；`POST /api/socialV2/send-qzone` → `{ok:true, data:{tid,time}}`；
+  两者都已回滚。`state/bridge.log` 有「工具改个性签名 … verified=true」「工具发QQ空间说说 … ugc_right=64」两行。
+
+### 没验证 / 下一步
+
+1. **要重启 DSH**：QQ 会话里的模型才看得到新的 `mcp__snowluma__qq_set_signature` / `qq_send_qzone`
+   （MCP 进程由 DSH 启动时拉起）；同时把新 preset 第 17 条同步进 `~/.dsh/.agent-presets/qq-chat-v2/`
+   （设置页保存一次或跑 `scripts/setup-dsh.mjs`）。重启 DSH 会中断当前 GUI 会话，由主人决定时机。
+2. 控制台 UI 上两个新开关只做了静态断言，没肉眼点过（位置在「二代仿真 → 工具开关」里 `qq_set_group_card` 下面）。
+3. 重启桥接已见现象：插件 supervisor 报「12 秒未监听」是误报，实际约 30s（state/ 6.9GB + icacls 超时），别连点重启。
+4. 回滚：`git revert HEAD`（本轮 commit = `feat(qq): 接上改个性签名 / 发 QQ 空间说说`）+ 重启桥接；或只关控制台里 `setSignature` / `sendQzone` 两个开关（重启 DSH 生效）。
+
+---
+
 ## 快照（2026-10-31 09:30–10:30，语音「合成超时」修复：错误分类 + 150s 预算）
 
 ### 用户原话

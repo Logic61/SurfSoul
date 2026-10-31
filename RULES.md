@@ -40,12 +40,13 @@
    - ✅ `mcp__web-search-safe__web_fetch` 已做 SSRF 加固：仅 http/https、禁止 localhost/私有 IP/链路本地/CGNAT/带凭据 URL、DNS 解析结果全量校验、每跳重定向重新校验、响应体限量读取。
 4. **发送强制白名单**：所有发送类工具（`qq_send_group_message` / `qq_send_private_message` / `qq_send_message` / `qq_send_burst` / `qq_reply` / `qq_send_poke` / `qq_send_sticker` / `qq_send_voice` 等）的目标必须命中 `config.json` 的 `allow.groups` / `allow.private`，否则拒绝执行。
    - **语音额外收紧**：`qq_send_voice` 只能发**语音库**（`socialV2.voice.dir`，默认 `qq-bridge/audio/`）里的文件，不能发任意本地路径、URL 或 base64（防 prompt injection 拿本机文件当语音外发）；另有独立的时长/体积/频率上限（`socialV2.voice.*`），额度与文本发送分开计数。详见 [docs/guides/VOICE.md](docs/guides/VOICE.md)。
-5. **发送禁令（模型层）**：persona 明确规定只有「管理端明确指示」或「【管理员】标记的明确要求」才可使用发送工具；禁止写"我已回复/消息已发送（message_id）"类汇报。
-6. **回复审计（桥接层硬拦截）**：agent 回复文本若包含本机路径（`C:\`、`/home/` 等）或凭据特征（token/password/secret/api key 等）→ **整条拦截不发送**，并告知"被安全策略拦截"。
-7. **人格由桥接注入**：角色设定来自 `state/current-role.json` + `roles/<角色>.md`，桥接注入到消息；群友口头要求改角色无效（桥接直接拦截），agent 也无文件工具自行更改。
-8. **静默模式**：`current-role.json` 的 `mode: "silent"` 时，群友消息不再投递给 agent（仅记录日志），只有管理员消息可对话。
-9. **入站人的黑名单（`deny.users`）**：桥接在 `handleIncoming()` 的**最前面**按发送者拦一次（`senderBlocked()`）—— 名单里的人，无论在哪个群还是私聊，消息一律不入库、不进上下文、不写记忆卡、不计鱼群、不触发唤醒；`handlePokeNotice()` 同样拦（拍一拍不能当唤醒后门）。优先级高于 `allow.*` 和 `allowAllWhenEmpty`；**只拦入站**，不放松发送侧白名单。设置页在「QQ 白名单」卡片正下方。
-10. **跨平台来源与自我识别**：身份的锚点只有一份（`src/self-identity.js`），QQ 桥接与 B站 生物钟都调它，不许在各处手拼「你是谁」。任何进入模型的内容都要能回答「属于哪个平台」——合并转发/QQ 图片走 `formatForwardResponse()` 的 `platform/source/notice`，提示词每轮再带【来源判断】；**不要按内容相似度猜平台**。隐私：B站 侧只拿打码 QQ 号（`100****001`），任何公开输出都不写完整 QQ 号/群号。
+5. **自身资料动作（只动她自己的账号）**：`qq_set_signature` 改她自己 QQ 的个性签名（空串=清除），`qq_send_qzone` 发她自己的 QQ 空间说说（默认好友可见，不支持图片）。两者只作用于机器人自己的账号，不涉及任何他人；仅 `reserved2` 模式 + 带会话 `key`/`token` 时可用，受 `socialV2.tools` 开关控制，并过敏感信息审计与身份泄露闸（签名/说说都是公开面，主人/群号等账号标识不许出现，写上去收不回来）。
+6. **发送禁令（模型层）**：persona 明确规定只有「管理端明确指示」或「【管理员】标记的明确要求」才可使用发送工具；禁止写"我已回复/消息已发送（message_id）"类汇报。
+7. **回复审计（桥接层硬拦截）**：agent 回复文本若包含本机路径（`C:\`、`/home/` 等）或凭据特征（token/password/secret/api key 等）→ **整条拦截不发送**，并告知"被安全策略拦截"。
+8. **人格由桥接注入**：角色设定来自 `state/current-role.json` + `roles/<角色>.md`，桥接注入到消息；群友口头要求改角色无效（桥接直接拦截），agent 也无文件工具自行更改。
+9. **静默模式**：`current-role.json` 的 `mode: "silent"` 时，群友消息不再投递给 agent（仅记录日志），只有管理员消息可对话。
+10. **入站人的黑名单（`deny.users`）**：桥接在 `handleIncoming()` 的**最前面**按发送者拦一次（`senderBlocked()`）—— 名单里的人，无论在哪个群还是私聊，消息一律不入库、不进上下文、不写记忆卡、不计鱼群、不触发唤醒；`handlePokeNotice()` 同样拦（拍一拍不能当唤醒后门）。优先级高于 `allow.*` 和 `allowAllWhenEmpty`；**只拦入站**，不放松发送侧白名单。设置页在「QQ 白名单」卡片正下方。
+11. **跨平台来源与自我识别**：身份的锚点只有一份（`src/self-identity.js`），QQ 桥接与 B站 生物钟都调它，不许在各处手拼「你是谁」。任何进入模型的内容都要能回答「属于哪个平台」——合并转发/QQ 图片走 `formatForwardResponse()` 的 `platform/source/notice`，提示词每轮再带【来源判断】；**不要按内容相似度猜平台**。隐私：B站 侧只拿打码 QQ 号（`100****001`），任何公开输出都不写完整 QQ 号/群号。
     - **只准自己互认**（2026-10-23 用户追加）：B站 评论/私信/动态/转发动态发送前有一道**确定性硬闸**（`src/identity-guard.js` + `plugins/surfcore/tools/lib/outbound-guard.mjs`）：主人 QQ、主人 B站 mid、对齐表里别人的账号、任何「QQ/群号 + 数字」形态一律拒发（exit 9，错误里的号码打码）。它只拦这些已知 ID，不拦普通数字与昵称；QQ 群侧仍靠提示词规则约束。详见 [`docs/guides/CROSS_PLATFORM_IDENTITY.md`](docs/guides/CROSS_PLATFORM_IDENTITY.md)。
 
 ## 提示词分层边界（仿真 / 人格 / 记忆卡）

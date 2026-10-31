@@ -19,6 +19,7 @@ import { SnowLumaWebSocketClient, text } from '@snowluma/sdk';
 import { NodeApiClient, unwrap, createTurnCollector, discoverDshLaunchToken } from './dsh-client.js';
 import { mdToPlain, splitForQQ, truncateText, truncateTextTail } from './md-to-plain.js';
 import { SENSITIVE_RE } from './sensitive.js';
+import { findIdentityLeaks, formatIdentityLeakError } from './identity-guard.js';
 import { looksLikeUnfinished } from './v2-wait.js';
 import { compactModelMessage } from './qq-model-view.js';
 import {
@@ -924,6 +925,10 @@ function loadConfig() {
         sendSticker: true,
         sendImage: true,
         setGroupCard: true,
+        // 她自己的资料/空间（2026-10-31 主人要求）：改个性签名、发 QQ 空间说说。
+        // 只动机器人自己的 QQ 账号，由 MCP 工具 qq_set_signature / qq_send_qzone 触发。
+        setSignature: true,
+        sendQzone: true,
         setStickerRemark: false,
         stickerNote: true,
         collectSticker: true,
@@ -1074,6 +1079,9 @@ function loadConfig() {
     getForwardMsg: true,
     sendPoke: true,
     setGroupCard: true,
+    // 她自己的资料/空间（2026-10-31）：改个性签名、发 QQ 空间说说（默认开）。
+    setSignature: true,
+    sendQzone: true,
     listStickers: true,
     getStickerImage: true,
     sendSticker: true,
@@ -5397,7 +5405,7 @@ async function main() {
             merged.autoReplyCheckMs = Number.isFinite(n) ? Math.max(1000, Math.round(n)) : (current.autoReplyCheckMs ?? 30000);
           }
           // tools：只接受布尔开关
-          const toolFlags = ['getPrompt', 'getUnread', 'getRecent', 'socialState', 'sendGroup', 'sendPrivate', 'reply', 'sendBurst', 'sendMessage', 'waitMessages', 'feedback', 'getMyRecent', 'getMessageDetail', 'getActiveMembers', 'setWakeConfig', 'markRead', 'memory', 'slangQuery', 'slangSubmit', 'getImages', 'getForwardMsg', 'sendPoke', 'setGroupCard', 'listStickers', 'getStickerImage', 'sendSticker', 'setStickerRemark', 'stickerNote', 'collectSticker', 'getSelfImage', 'sendVoice'];
+          const toolFlags = ['getPrompt', 'getUnread', 'getRecent', 'socialState', 'sendGroup', 'sendPrivate', 'reply', 'sendBurst', 'sendMessage', 'waitMessages', 'feedback', 'getMyRecent', 'getMessageDetail', 'getActiveMembers', 'setWakeConfig', 'markRead', 'memory', 'slangQuery', 'slangSubmit', 'getImages', 'getForwardMsg', 'sendPoke', 'setGroupCard', 'setSignature', 'sendQzone', 'listStickers', 'getStickerImage', 'sendSticker', 'setStickerRemark', 'stickerNote', 'collectSticker', 'getSelfImage', 'sendVoice'];
           if (body.tools && typeof body.tools === 'object') {
             merged.tools = { ...(current.tools ?? {}), ...body.tools };
             for (const k of toolFlags) {
@@ -6603,6 +6611,117 @@ async function main() {
           } catch (error) {
             log(`[reserved2] 工具改群名片失败 ${key}:`, error?.message ?? error);
             sendJson({ ok: false, error: `改群名片失败：${error?.message ?? error}` }, 500);
+          }
+          return;
+        }
+        // ── 她自己的资料与空间（reserved2，2026-10-31）────────────────────
+        // 改个性签名 / 发 QQ 空间说说：两个动作都只动机器人**自己的** QQ 账号。
+        // 为什么走桥接而不让 MCP 直接打 OneBot：空间说说和个性签名都是公开面，
+        // 必须过敏感信息正则 + 身份泄露闸（已知账号标识一律不许写上去），
+        // 并受 socialV2.tools 开关 / reserved2 / 暂停状态约束。
+        const selfExpressionDeny = (key, flag) => {
+          if (!key) return { error: 'key 不能为空', status: 400 };
+          if (currentMode !== 'reserved2') return { error: '该接口仅 reserved2 模式可用', status: 403 };
+          const agentToken = req.headers['x-agent-token'];
+          if (agentToken) {
+            if (!agentTokenOk(key, agentToken)) return { error: 'agent token 无效', status: 403 };
+            if (!v2SessionAllowed(key)) return { error: '目标不在当前模式允许范围内', status: 403 };
+            if (!v2ToolEnabled(flag)) return { error: `工具未启用：${flag}`, status: 403 };
+            if (socialV2.paused) return { error: '二代 AI 已暂停，不能改她的资料/空间', status: 403 };
+          }
+          const keyMatch = /^(group|private):(\d+)$/.exec(key);
+          if (!keyMatch) return { error: 'key 格式应为 group:群号 或 private:QQ号', status: 400 };
+          if (!modeAllowed(key, keyMatch[1], Number(keyMatch[2]), cfg, currentMode)) {
+            return { error: '当前模式不允许操作该会话', status: 403 };
+          }
+          return null;
+        };
+        // 公开面不许出现已知账号标识（主人 QQ / 群号等）。只认配置里已知的 ID，
+        // 不拦普通数字（边界说明见 src/identity-guard.js 文件头）。
+        const selfExpressionProtectedIds = () => {
+          const out = [];
+          for (const raw of [cfg.ownerQQ, cfg.admin, ...(cfg.allow?.groups ?? []), ...(cfg.allow?.private ?? []), ...(cfg.deny?.groups ?? []), ...(cfg.deny?.private ?? [])]) {
+            const id = String(raw ?? '').trim();
+            if (/^\d{4,15}$/.test(id) && !out.includes(id)) out.push(id);
+          }
+          return out;
+        };
+        if (req.method === 'POST' && url.pathname === '/api/socialV2/set-signature') {
+          const body = await readBody();
+          const key = String(body.key ?? '').trim();
+          const deny = selfExpressionDeny(key, 'setSignature');
+          if (deny) { sendJson({ ok: false, error: deny.error }, deny.status); return; }
+          const rawSignature = body.signature ?? body.longNick ?? body.long_nick ?? '';
+          if (typeof rawSignature !== 'string') {
+            sendJson({ ok: false, error: 'signature 必须是字符串（空字符串=清除签名）' }, 400);
+            return;
+          }
+          const signature = rawSignature.replace(/[\u0000-\u001f\u007f]/g, '').trim();
+          if (signature.length > 120) { sendJson({ ok: false, error: '个性签名最多 120 个字' }, 400); return; }
+          if (signature && SENSITIVE_RE.test(signature)) {
+            sendJson({ ok: false, error: '签名含敏感信息（路径/凭据等），已阻止' }, 403);
+            return;
+          }
+          const leaks = findIdentityLeaks(signature, { ids: selfExpressionProtectedIds() });
+          if (leaks.length) { sendJson({ ok: false, error: formatIdentityLeakError(leaks, '个性签名') }, 403); return; }
+          try {
+            await withTimeout(bot.raw('set_self_longnick', { longNick: signature }), 15000, 'set_self_longnick');
+            // 回读校验（SnowLuma 的 get_stranger_info 会带 long_nick）：成功但不一致时告诉模型。
+            let verified = null;
+            if (selfUserId) {
+              try {
+                const info = await withTimeout(bot.raw('get_stranger_info', { user_id: Number(selfUserId) }), 8000, 'get_stranger_info');
+                verified = String(info?.long_nick ?? '') === signature;
+              } catch {}
+            }
+            log(`[reserved2] 工具改个性签名 ${key} → ${JSON.stringify(signature)} verified=${verified}`);
+            appendActivity(`${key} [reserved2] 工具改个性签名 → 「${signature || '（清除）'}」`);
+            sendJson({ ok: true, key, signature, verified });
+          } catch (error) {
+            log(`[reserved2] 工具改个性签名失败 ${key}:`, error?.message ?? error);
+            sendJson({ ok: false, error: `改个性签名失败：${error?.message ?? error}` }, 500);
+          }
+          return;
+        }
+        if (req.method === 'POST' && url.pathname === '/api/socialV2/send-qzone') {
+          const body = await readBody();
+          const key = String(body.key ?? '').trim();
+          const deny = selfExpressionDeny(key, 'sendQzone');
+          if (deny) { sendJson({ ok: false, error: deny.error }, deny.status); return; }
+          const content = String(body.content ?? '').replace(/[\u0000-\u0009\u000b-\u001f\u007f]/g, '').trim();
+          if (!content) { sendJson({ ok: false, error: '说说正文不能为空' }, 400); return; }
+          if (content.length > 1000) { sendJson({ ok: false, error: '说说最多 1000 个字' }, 400); return; }
+          if (SENSITIVE_RE.test(content)) { sendJson({ ok: false, error: '说说含敏感信息（路径/凭据等），已阻止' }, 403); return; }
+          const leaks = findIdentityLeaks(content, { ids: selfExpressionProtectedIds() });
+          if (leaks.length) { sendJson({ ok: false, error: formatIdentityLeakError(leaks, 'QQ空间说说') }, 403); return; }
+          // 可见性：v1 只放开 1/4/64。16/128 要带名单，等真的需要再接（不把 target_uins 暴露给模型）。
+          const QZONE_VISIBILITY = { all: 1, friends: 4, self: 64 };
+          let ugcRight = 4; // 默认好友可见（比运行时默认的 1=所有人可见更收）
+          if (body.visibility !== undefined) {
+            const wanted = String(body.visibility).trim();
+            if (!Object.prototype.hasOwnProperty.call(QZONE_VISIBILITY, wanted)) {
+              sendJson({ ok: false, error: 'visibility 只能是 friends / all / self' }, 400);
+              return;
+            }
+            ugcRight = QZONE_VISIBILITY[wanted];
+          }
+          if (body.ugcRight !== undefined || body.ugc_right !== undefined) {
+            const explicit = Number(body.ugcRight ?? body.ugc_right);
+            if (![1, 4, 64].includes(explicit)) {
+              sendJson({ ok: false, error: 'ugcRight 目前只支持 1（所有人）/4（好友）/64（仅自己）；16/128 需要名单，暂不支持' }, 400);
+              return;
+            }
+            ugcRight = explicit;
+          }
+          try {
+            const data = await withTimeout(bot.raw('send_qzone_msg', { content, ugc_right: ugcRight }), 20000, 'send_qzone_msg');
+            const visibilityText = ugcRight === 64 ? '仅自己可见' : (ugcRight === 4 ? '好友可见' : '所有人可见');
+            log(`[reserved2] 工具发QQ空间说说 ${key} ugc_right=${ugcRight} 字数=${content.length}`);
+            appendActivity(`${key} [reserved2] 工具发QQ空间说说（${visibilityText}，${content.length} 字）`);
+            sendJson({ ok: true, key, content, ugcRight, data: data ?? null });
+          } catch (error) {
+            log(`[reserved2] 工具发QQ空间说说失败 ${key}:`, error?.message ?? error);
+            sendJson({ ok: false, error: `发说说失败：${error?.message ?? error}` }, 500);
           }
           return;
         }
