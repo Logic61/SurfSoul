@@ -1,6 +1,6 @@
 # 工具面与 preset（AGENT-TOOLS-AND-PRESETS）
 
-> 这份文档回答：**agent 的手从哪来**（三个 MCP server + 41 个 `qq_*` 工具）、**哪些手被绑住**
+> 这份文档回答：**agent 的手从哪来**（三个 MCP server + 42 个 `qq_*` 工具）、**哪些手被绑住**
 > （五层闸门 + fail-closed 守卫）、**她戴哪张面具**（`qq-chat` / `qq-chat-v2` 两代 preset）、
 > **这些是怎么装进 DSH 的**。
 > **最后核对**：2026-10-31（新增 `qq_set_signature` / `qq_send_qzone` 两个自身资料工具）。配套阅读：总纲 [ARCHITECTURE.md](ARCHITECTURE.md) · 边界 [BOUNDARIES.md](BOUNDARIES.md) · 索引 [../README.md](../README.md)。
@@ -11,7 +11,7 @@
 
 **两个 MCP 手 + 一张面具。**
 
-- `snowluma`（41 个 `qq_*` 工具）是主力手：读消息、发消息、等待、表情、语音、记忆、她自己的资料/空间。
+- `snowluma`（42 个 `qq_*` 工具）是主力手：读消息、发消息、等待、表情、语音、记忆、她自己的资料/空间。
 - `snowluma-host`（1 个）是探活手：只问 SnowLuma 在不在，**没有启停能力**（EULA）。
 - `web-search-safe`（2 个）是外部信息手：只读搜索与抓取，带 SSRF 防护。
 - preset 决定"她是谁、在哪说话"：`qq-chat`（一代/普通）与 `qq-chat-v2`（二代仿真）。
@@ -22,7 +22,7 @@
 
 | server | 入口 | 工具 | 挂载 | 边界 |
 | --- | --- | --- | --- | --- |
-| `snowluma` | `src/mcp-snowluma-safe.js`（1,533 行） | 41 个 `qq_*` | `~/.dsh/profiles/<profile>/cordis.patch.yml`（`setup-dsh.mjs` 写入） | 发送必须命中白名单；会话绑定 `x-agent-token`；工具开关逐项可控 |
+| `snowluma` | `src/mcp-snowluma-safe.js`（约 1,600 行） | 42 个 `qq_*` | `~/.dsh/profiles/<profile>/cordis.patch.yml`（`setup-dsh.mjs` 写入） | 发送必须命中白名单；会话绑定 `x-agent-token`；工具开关逐项可控 |
 | `snowluma-host` | `src/mcp-host-server.js`（93 行） | `snowluma_status` | 同上 | **只读探活**；v0.1.5 起移除了 `start_snowluma`/`stop_snowluma` |
 | `web-search-safe` | `src/mcp-web-search-safe.js`（92 行） | `web_search`、`web_fetch` | 同上 | 只读；禁内网/环回/CGNAT；DNS 解析后逐地址校验；重定向每跳复核 |
 
@@ -33,7 +33,7 @@
 
 ---
 
-## 2. `qq_*` 工具全表（41 个）
+## 2. `qq_*` 工具全表（42 个）
 
 **配置开关**列对应 `config.json` 的 `socialV2.tools.<key>`（`true` 才注册；默认只有
 `setStickerRemark` 与 `sendVoice` 是 `false`）。**需要令牌**列：二代模式下所有 `qq_*` 调用都要带
@@ -74,6 +74,7 @@
 | `qq_reply` | 引用某条消息发送 | `reply` | 必须给出真实 messageId |
 | `qq_send_message` | **统一发送**：一条或多条、可引用、可自定义条间间隔 | `sendMessage` | 最多 8 条 |
 | `qq_send_burst` | 分多条发（随机真人间隔） | `sendBurst` | 最多 8 条 |
+| `qq_send_cross_scene` | **受控跨场合投递**：主人私聊 → 显式白名单群 | `crossSceneSend` | 默认关（`socialV2.crossSceneSend.enabled=false`）；仅 `private:<ownerQQ>` 发起；目标须同时进 `allow.groups` 与 `allowTargets`；一条纯文本；敏感/身份/长度/频率/静默/鱼群全闸；桥接代投，不向模型发目标 token |
 | `qq_send_poke` | 拍一拍（群聊需 targetUserId） | `sendPoke` | 频率限制 |
 | `qq_send_sticker` | 发一张收藏表情（一条只能一张，不能带文字；**可以单独作为一条回复**，不必配文字） | `sendSticker` | 每条只能一张；频率由模型按语境判断（只受每轮 8 条 / token 闸门约束） |
 | `qq_send_voice` | 发语音：`text` 现场合成 / `voice` 用语音库现成文件 | `sendVoice`（默认**关**） | 需引擎；120 字；2/分钟 |
@@ -106,7 +107,7 @@
 
 | 工具 | 作用 | 开关 |
 | --- | --- | --- |
-| `qq_memory_append` / `qq_memory_query` / `qq_memory_remove` / `qq_memory_clear` | 轻量记忆（进行中的话题 / 想说的话 / 对某人的印象） | `memory` |
+| `qq_memory_append` / `qq_memory_query` / `qq_memory_remove` / `qq_memory_clear` | 轻量记忆（进行中的话题 / 想说的话 / 对某人的印象 / **规矩 rule**）。`rule` 是带作用域的指令性记忆：`extra.scope = global/private/group/group:<群号>/here`（默认 global），注入按当前场合过滤，私聊里定的 global 规矩群里也认 | `memory` |
 | `qq_slang_query` / `qq_slang_submit` | 查已确认的群聊黑话 / 提交候选词（**看到没把握的词就直接提**，不再限频） | `slangQuery` / `slangSubmit` |
 | `qq_collect_sticker` | 收藏别人发的表情，并写情绪/内容/关键词 | `collectSticker` |
 | `qq_sticker_note` | 给自己的收藏表情写语义（本地记忆，不改 QQ 备注） | `stickerNote` |

@@ -76,6 +76,9 @@ const tests = [
   'test-admin-identity.mjs', 'test-admin-prompt-wiring.mjs',
   // 记忆卡：重要度评分 / 主人锚点 / 每日模糊与遗忘 / 80·90·100% 容量 / 提示词裁剪 / 隐私 scope。
   'test-memory-card.mjs', 'test-memory-card-wiring.mjs',
+  // 场合作用域（2026-10-31 路线 A）：规矩 scope / style-notes 作用域 / 场合档位 /
+  // 记忆卡 audience 过滤 / 受控跨场合投递（私聊→白名单群）的纯函数与真实桥接接线。
+  'test-scene-scope.mjs', 'test-scene-wiring.mjs',
   // 备份 / 恢复 / 轮转 / stats 重建（P1-10 / P2-7 / P2-8 / P2-9）。
   'test-memory-card-backup.mjs',
   // 叙事层的可见 / 可操作 / 开关（B4）。

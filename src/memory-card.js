@@ -31,7 +31,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 // `?rev=` 和插件 lib 的引用保持同一取值：插件热重载时，只有 specifier 变了才会
 // 重新求值；本模块 import 的叙事层也必须挂同一个 rev，否则「引擎新、叙事旧」。
-import { coveredRecordIds, formatEpisodeLine, formatEpisodeTitleLine, loadNarrative, splitEpisodesForPrompt, resolveNarrativePath, saveNarrative, memoryNarrativeSummary } from './memcard-narrative.js?rev=memfix-bf81dfb676';
+import { coveredRecordIds, formatEpisodeLine, formatEpisodeTitleLine, loadNarrative, splitEpisodesForPrompt, resolveNarrativePath, saveNarrative, memoryNarrativeSummary } from './memcard-narrative.js?rev=memfix-f0b02c2270';
+// 场合作用域的标记字面量只维护一份（src/scene-scope.js）。渲染侧把标记写进行首，
+// 桥接注入时按当前场合整行过滤；这里用常量而不是再抄一遍字符串，避免两边漂移。
+import { AUDIENCE_GROUP_ONLY_TAG, AUDIENCE_PRIVATE_ONLY_TAG } from './scene-scope.js';
 
 export const MEMORY_CARD_VERSION = 1;
 export const DAY_MS = 24 * 60 * 60 * 1000;
@@ -397,6 +400,11 @@ export function normalizeCard(raw) {
   return card;
 }
 
+/** 记录级场合可见性：默认 any（记忆共同）；只接受两个收窄值，其它一律回落默认。 */
+function normalizeAudience(value) {
+  return value === 'private-only' || value === 'group-only' ? value : 'any';
+}
+
 function normalizeRecord(item) {
   const raw = asObject(item);
   const text = String(raw.text ?? '').trim();
@@ -434,6 +442,10 @@ function normalizeRecord(item) {
     botReply: safeSlice(String(raw.botReply ?? ''), 600),
     isSelf: raw.isSelf === true,
     conversationKey: String(raw.conversationKey ?? ''),
+    // 场合可见性（2026-10-31 路线 A）：any=私聊/群里都可见（默认，记忆共同）；
+    // private-only=只在私聊提示词里出现；group-only=只在群聊提示词里出现。
+    // 渲染时写成 [仅私聊可见]/[仅群可见] 标记，桥接按当前场合过滤整行。
+    audience: normalizeAudience(raw.audience),
     // 「最初」是独立于「重要」的判定：仅和主人的互动，按首次接触的 30 天窗口分档。
     initialTier: ['first10', 'mid10', 'late10', 'after', 'first-meet'].includes(raw.initialTier) ? raw.initialTier : '',
     initialProbability: Number.isFinite(Number(raw.initialProbability)) ? Math.max(0, Math.min(1, Number(raw.initialProbability))) : 0,
@@ -1275,6 +1287,7 @@ function makeRecord(input, config, now) {
     botReply: safeSlice(String(input.botReply ?? ''), 600),
     isSelf: input.isSelf === true,
     conversationKey: String(input.conversationKey ?? ''),
+    audience: normalizeAudience(input.audience),
     initialTier: '',
     initialProbability: 0,
     isInitial: false,
@@ -1504,6 +1517,7 @@ export function ingestInboxLines(card, lines, config = {}, now = Date.now(), opt
         groupId: item.groupId ?? '',
         private: isPrivate,
         conversationKey,
+        audience: normalizeAudience(item.audience),
         tags: ['qq', 'self'],
         manualImportance: 35,
       }, cfg, now);
@@ -1549,6 +1563,7 @@ export function ingestInboxLines(card, lines, config = {}, now = Date.now(), opt
       groupId: item.groupId ?? '',
       private: isPrivate,
       conversationKey,
+      audience: normalizeAudience(item.audience),
       tags: isOwner ? ['owner'] : [],
     }, cfg, now);
     if (result.added) {
@@ -1812,7 +1827,12 @@ function recordLine(record, { platform = 'qq', full = false } = {}) {
     const reply = redactForMemory(record.botReply, { scope, maxChars: 160 });
     body += ` → 我回：${short(reply, record.clarity === 'vivid' ? 160 : 100)}`;
   }
-  const head = `- ${dateOnly(record.createdAt)} [${CLARITY_LABEL[record.clarity] ?? '清楚'}]${conversationTag(record, platform)} `;
+  const audienceTag = (platform === 'bili' || (record.scope !== 'qq' && record.platform !== 'qq'))
+    ? ''
+    : record.audience === 'private-only' ? ` ${AUDIENCE_PRIVATE_ONLY_TAG}`
+      : record.audience === 'group-only' ? ` ${AUDIENCE_GROUP_ONLY_TAG}`
+        : '';
+  const head = `- ${dateOnly(record.createdAt)} [${CLARITY_LABEL[record.clarity] ?? '清楚'}]${conversationTag(record, platform)}${audienceTag} `;
   return full ? `${head}${body}（重要 ${record.importance}）` : `${head}${body}`;
 }
 

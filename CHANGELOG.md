@@ -4,6 +4,35 @@
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 发布规则见 [docs/guides/VERSIONS.md](docs/guides/VERSIONS.md)。
 
+## [未发布] - 2026-10-31（场合作用域路线 A：记忆共同 + 分清场合 + 受控跨场合投递）
+
+### 变更
+
+- **「记忆共同、分清场合」落地为结构化作用域**：新增纯函数模块 `src/scene-scope.js`（唯一实现）。
+  长期记忆卡 + 摘要仍在群聊/私聊之间共享；「场合」不再只靠一段提示词自律：
+  - 轻记忆新增 `rule`（规矩）类别：`extra.scope = global / private / group / group:<id> / here`，
+    写入去重、上限 50、`here` 落成具体场合；注入按当前场合过滤，**私聊里定的 global 规矩群里也认**。
+  - `style-notes` 支持行首作用域 `[全局]/[私聊]/[群]/[群:123]`（旧行无前缀 = 全局），API 可带 `scope`，
+    注入/查询按当前场合过滤；`memctl style add` 支持 `--scope`。
+  - 记忆卡记录新增可选 `audience`（any / private-only / group-only，默认 any）→ 渲染成
+    `[仅私聊可见]/[仅群可见]`，桥接注入时按场合过滤；`socialV2.memoryScene.groupExcludePrivate`
+    可在群聊里连 `[私聊]` 记录也过滤（硬开关，默认关 = 记忆共同）。
+  - 新增**场合档位** `socialV2.scenes`（defaultPrivate/defaultGroup/overrides）：唤醒提示词顶部注入【场合】卡
+    （哪种场合 + 群名缓存 + 语气提示 + 私聊边界守卫）；`qq_get_prompt` 同步返回。
+- **受控跨场合投递**：新端点 `POST /api/socialV2/send-cross` + MCP 工具 `qq_send_cross_scene`。
+  默认关闭；开启后仅允许「主人私聊 → `allowTargets` 显式白名单群」，目标还须命中 QQ 发送白名单；
+  桥接代投、不向模型下发目标 token；每次一条纯文本，过敏感信息/身份闸/长度/每小时频率/token 回合额度/静默/鱼群。
+- 配置模板新增 `socialV2.scenes` / `memoryScene` / `crossSceneSend` / `tools.crossSceneSend`；旧配置不配时全部安全默认。
+
+### 测试/文档
+
+- 新增 `scripts/test-scene-scope.mjs`（12 项纯函数）与 `scripts/test-scene-wiring.mjs`（7 项真实桥接 + 夹具网关），
+  已接进 `test:audit`。
+- `test-memory-card-wiring` 更新记忆卡注入函数的断言（现在带 `key` 做场合过滤）；`test-audit-harness` 支持
+  `scene-scope` 与 fixture 化的 style-notes 路径。
+- RULES / MEMORY_CARD / DATA-AND-CONFIG / MODULE-BRIDGE / ARCHITECTURE / AGENT-TOOLS-AND-PRESETS / PITFALLS 同步；
+  HANDOFF 记当日快照与「要重启桥接 + DSH 才生效」。**重启后：桥接换新逻辑，DSH 重装 MCP 描述与插件 rev。**
+
 ## [未发布] - 2026-10-31（黑话提交去掉限制：遇到没把握的词就直接提）
 
 ### 变更

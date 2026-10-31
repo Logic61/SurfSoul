@@ -5,6 +5,59 @@
 
 ---
 
+## 快照（2026-10-31 21:20–22:05，场合作用域路线 A：记忆共同 + 分清场合 + 受控跨场合投递）
+
+### 用户原话
+
+> 「群聊和私聊的记忆、对话什么的似乎完全分隔？……我的理想设计是记忆共同，但是分清场合，也即明确发送会话，选择不同模式。」
+> 之后拍板：「A吧，然后 style-notes 什么叫没有作用域，我觉得这个还挺重要的。记忆共通，长期卡+摘要应该完全足够了。
+> 在私聊里主动往群里发做一个受控。按场合档位即可。补文档+测试。」
+
+### 排查结论（先分析再动手）
+
+- 对话（DSH 会话、未读、唤醒/收尾）严格按 QQ 会话 key 分开；**记忆不是**：人格卡、衰减记忆卡、style-notes、
+  B站简报、表情/黑话是整角色/整账号一份；三代轻记忆按 key 各存一份，注入时做读侧合并。
+- 真正的缺口：① 场合只有 `[私聊]/[群里]` 渲染标签 + 一段软提示，不是可见性边界；② 没有「规矩」通道与作用域
+  （私聊立的规矩只能变一条会遗忘的记忆，或全局 style-notes）；③ 发送被 agentToken 绑死当前会话，无法「明确发送会话」；
+  ④ 模式是全局四档位，没有「场合档位」；⑤ style-notes 不分场合、只进 reserved2 首屏。
+- 分清场合的硬要求被确定为：**记忆共同（长期卡+摘要共享，不共享另一端原始对话）**，但「规矩/说话习惯/记录可见性」
+  必须结构化作用域；跨场合只开放「私聊 → 白名单群」一条受控通道。
+
+### 做到哪
+
+| 改动 | 内容 |
+| --- | --- |
+| 新增 `src/scene-scope.js` | 纯函数唯一实现：规矩 scope（global/private/group/group:<id>/here）、style-notes 作用域解析/过滤、场合档位解析与场合卡、记忆卡 audience 过滤、跨场合发送配置/目标/频率 |
+| 轻记忆 `rule` 类别 | `qq_memory_append(category='rule', extra.scope=…)`；写入去重、上限 50、here 落成具体场合；`formatMemoryV2` 按当前场合注入；`formatSharedMemoryV2`/memory 查询只跨场合共享 global；update/remove/clear 同步支持 |
+| style-notes 作用域 | 行格式 `- 日期 [全局|私聊|群|群:123] 文本`（旧行无前缀=全局）；API POST 加 `scope`；GET `?key=` 返回过滤后注入块；唤醒提示词/qq_get_prompt 按场合过滤；`memctl` 支持 `--scope` |
+| 记忆卡 audience | 记录新增可选 `audience: any/private-only/group-only`（默认 any）；渲染成 `[仅私聊可见]/[仅群可见]`；桥接注入时按场合过滤；`socialV2.memoryScene.groupExcludePrivate=true` 可让群聊连 `[私聊]` 记录也过滤（默认关=记忆共同） |
+| 场合档位 | `socialV2.scenes.defaultPrivate/defaultGroup/overrides`；唤醒提示词顶部注入【场合】卡（含群名缓存、语气提示、私聊边界守卫）；`qq_get_prompt` 也返回 scene 卡 |
+| 受控跨场合投递 | 新端点 `POST /api/socialV2/send-cross` + MCP 工具 `qq_send_cross_scene`：仅 reserved2、仅主人私聊发起、目标必须同时命中 `allow.groups` 与 `socialV2.crossSceneSend.allowTargets`、开关默认关；过敏感信息/身份闸/长度/每小时频率/token 回合额度/静默/鱼群；回执记进目标会话 recentMessages，桥接代投不向模型发目标 token |
+| 配置/文档 | `config.example.json` 加 `socialV2.scenes` / `memoryScene` / `crossSceneSend` / `tools.crossSceneSend`；RULES/MEMORY_CARD/DATA-AND-CONFIG/MODULE-BRIDGE/ARCHITECTURE/AGENT-TOOLS-AND-PRESETS/PITFALLS/ROADMAP/CHANGELOG 同步 |
+| 测试 | 新增 `scripts/test-scene-scope.mjs`（纯函数 12 项）与 `scripts/test-scene-wiring.mjs`（真实 bridge + 夹具网关 7 项：场合卡/style-notes/规矩/记忆卡过滤/跨场合投递全闸门/静态接线），已接进 `test:audit` |
+
+### 已验证
+
+- `node scripts/test-scene-scope.mjs` → **12/12**；`node scripts/test-scene-wiring.mjs` → **7/7**；
+  `node --check src/{scene-scope,bridge,memory-card,mcp-snowluma-safe}.js` 通过；`npm run sync:engine-rev` 已 bump，
+  `node scripts/test-core-rev-sync.mjs` 通过。
+- 相关既有回归：`test-memory-card` 32/32、`test-memcard-narrative` 14/14、`test-v2-initial-prompt` 全过、
+  `test-audit-regressions` 全过、`test-qq-self-expression` 22/22、`test-mcp-servers-stdio` 全过、`test-qq-preset-contract` 8/8。
+- `npm run test:audit` → **80/88**（基线 78/86；新增 2 个测试后脚本总数 88；失败集合仍是同一组 8 条既有基线红：
+  `test-self-identity` / `test-identity-guard` / `test-closure-wiring` / `test-media-search` / `test-voice-system` /
+  `test-preset-local-tools` / `test-agent-preset-patches` / `test-version`，**无新增**）。
+
+### 没验证 / 下一步
+
+1. **要重启桥接 + DSH** 才在真机生效：`src/bridge.js` / `memory-card.js`（插件侧走 `?rev=`，需重启 DSH 或热重载插件）、
+   MCP 工具描述（DSH 重启后模型才看到 `qq_send_cross_scene`）、`config.example.json` 的新键（仓库 config.json 可手动补）。
+2. 真机复看（未做）：私聊里说「记住：群里别发路径」→ `qq_memory_append(category='rule', extra={scope:'group'})` 是否自然；
+   群里是否不再提私聊私事；把 `crossSceneSend.enabled=true` + allowTargets 配上后，让她带一句话到群是否只发一条。
+3. 回滚：桥接侧全是**新增/加参数**，旧 config 不配新段时默认关闭/不过滤；`git revert` 本提交 + 重启桥接/DSH 即可。
+4. 记忆卡记录级 audience 目前只有「手工编辑 memory-card.json / 后续控制台」能赋值；模型侧场合约束走 rule，不要在
+   自动 ingest 里加启发式（误判会把该共享的记忆藏掉）。
+
+
 ## 快照（2026-10-31 17:06–17:35，黑话提交去掉限制：遇到没把握的词就直接提）
 
 ### 用户原话

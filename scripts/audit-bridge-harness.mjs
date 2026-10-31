@@ -33,6 +33,7 @@ import * as biliCard from '../src/bili-card.js';
 import * as historyCatchup from '../src/history-catchup.js';
 import * as purposeEngine from '../src/purpose-engine.js';
 import * as conversationClosure from '../src/conversation-closure.js';
+import * as sceneScope from '../src/scene-scope.js';
 import { fetchVideoInfo } from '../src/bili-api.js';
 import * as stateAcl from '../src/state-acl.mjs';
 import { createBiliMemory } from '../src/bili-memory.js';
@@ -230,6 +231,7 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     buildWakePromptV2, buildWakeSnapshotV2, wakeFoldedNoticeV2, sendWakePromptV2, socialV2,
     currentRoleHint, currentRoleHintV2, adminPromptLine, ownerMessageTag,
     memoryCardPromptBlock, recordMemoryInboxEvent, recordSelfMemoryEvent,
+    formatMemoryV2, formatSharedMemoryV2, appendMemoryV2, styleNotesBlock, groupNameForSceneV2,
     refreshMode, modeAllowed, trackTurnEvent, replayPendingWakeReasonsV2,
     // 人的黑名单（deny.users）：入站按发送者拦截，见 test-blacklist.mjs
     senderBlocked, handlePokeNotice,
@@ -289,10 +291,14 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     ...adminIdentity, ...roleCard, ...memoryCard, ...biliCard, ...characterStore, ...historyCatchup,
     ...purposeEngine,
     ...conversationClosure,
+    // 场合作用域（规矩 scope / style-notes 作用域 / 场合档位 / 记忆卡 audience 过滤）
+    ...sceneScope,
     // 角色系统在 fixture 里等价于「没有角色」：当前角色 null，记忆卡指向 temp/dsh/surfcore/memory。
     // 不能直接用真实 character-store 的 DSH_HOME（它在主进程 import 时已固定）。
     readCurrentCharacter: () => null,
-    activePersonaFile: () => '',
+    // 指向 fixture 里一个不存在的 persona 文件（不是 ''）：'' 会让 `path.dirname('')` 变成 '.'
+    // 并把 style-notes.md 写到仓库根目录 —— 测试必须只碰临时目录。
+    activePersonaFile: () => path.join(temp, 'dsh', 'surfcore', 'persona.md'),
     activeBiliDir: () => path.join(temp, 'dsh', 'surfcore', 'bili'),
     activePlatformStateDir: (legacyDir) => legacyDir,
     activeMemoryPaths: () => {

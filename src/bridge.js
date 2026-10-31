@@ -67,6 +67,13 @@ import { createBiliMemory } from './bili-memory.js';
 import {
   appendMemoryInboxEvent, looksNoteworthyMessage, resolveMemoryCardPaths,
 } from './memory-card.js';
+import {
+  RULE_MAX_COUNT, RULE_MAX_CHARS,
+  collectRulesForScene, crossSceneRateBlocked, filterMemoryCardPromptForScene,
+  filterStyleNotesForScene, formatSceneCard, formatStyleNoteLine,
+  isCrossSceneTargetAllowed, normalizeCrossSceneSendConfig, normalizeCrossSceneTarget,
+  normalizeRuleScope, normalizeRuleText, parseStyleNoteLine, resolveSceneProfile,
+} from './scene-scope.js';
 import { loadNarrative, renderEpisodeLines, runNarration } from './memcard-narrative.js';
 import {
   activeMemoryPaths, activePersonaFile, activePlatformStateDir, characterPaths, readCurrentCharacter,
@@ -1091,6 +1098,9 @@ function loadConfig() {
     getSelfImage: true,
     closeConversation: true,
     sendVoice: false,
+    // 受控跨场景投递（私聊 → 白名单群）。工具默认注册，功能本身由
+    // socialV2.crossSceneSend.enabled（默认 false）+ allowTargets 双重把关。
+    crossSceneSend: true,
     ...(cfg.socialV2.tools ?? {})
   };
 
@@ -1156,6 +1166,27 @@ function loadConfig() {
     maxPixels: 64_000_000,
     maxCount: 5,
     ...((cfg.socialV2?.media && typeof cfg.socialV2.media === 'object' && !Array.isArray(cfg.socialV2.media)) ? cfg.socialV2.media : {})
+  };
+
+  // ── 场合作用域（2026-10-31 路线 A）──────────────────────────────────────
+  // 记忆共同 + 分清场合：规矩（rule）带 scope、style-notes 支持作用域前缀、
+  // 每场景一个「场合档位」。旧 config.json 没有这些段时全部落安全默认：
+  //   · scenes：私聊=私聊、群=群聊、群聊守私聊边界；
+  //   · crossSceneSend：默认关（受控通道，开启后还必须显式配 allowTargets）；
+  //   · memoryScene：默认不过滤（记忆共同），只按记录级 audience 标记过滤。
+  cfg.socialV2.scenes = {
+    defaultPrivate: { label: '私聊', toneHint: '', ...((cfg.socialV2?.scenes?.defaultPrivate) ?? {}) },
+    defaultGroup: { label: '群聊', toneHint: '', memoryGuard: true, ...((cfg.socialV2?.scenes?.defaultGroup) ?? {}) },
+    overrides: {
+      ...((cfg.socialV2?.scenes?.overrides && typeof cfg.socialV2.scenes.overrides === 'object' && !Array.isArray(cfg.socialV2.scenes.overrides))
+        ? cfg.socialV2.scenes.overrides : {})
+    }
+  };
+  cfg.socialV2.crossSceneSend = normalizeCrossSceneSendConfig(cfg.socialV2?.crossSceneSend);
+  cfg.socialV2.memoryScene = {
+    groupExcludePrivate: cfg.socialV2?.memoryScene?.groupExcludePrivate === true,
+    honorAudience: cfg.socialV2?.memoryScene?.honorAudience !== false,
+    ...((cfg.socialV2?.memoryScene && typeof cfg.socialV2.memoryScene === 'object') ? cfg.socialV2.memoryScene : {})
   };
 
   // socialV2.history：上线补历史消息。旧 config.json 没有这一段时必须落默认值（默认开启），
@@ -5687,7 +5718,8 @@ async function main() {
             stickerNote: 'qq_sticker_note',
             collectSticker: 'qq_collect_sticker',
             getSelfImage: 'qq_get_self_image',
-            sendVoice: 'qq_send_voice / qq_list_voices'
+            sendVoice: 'qq_send_voice / qq_list_voices',
+            crossSceneSend: 'qq_send_cross_scene'
           };
           const tools = cfg.socialV2?.tools ?? {};
           const stickerToolFlags = new Set(['listStickers', 'getStickerImage', 'sendSticker', 'setStickerRemark', 'stickerNote', 'collectSticker']);
@@ -5706,7 +5738,13 @@ async function main() {
               line: selfIdentityTextV2().trim() || null
             },
             role: { name: roleState.role ?? null, hint: currentMode === 'reserved2' ? currentRoleHintV2() : currentRoleHint() },
-            memoryCard: memoryCardPromptBlock(),
+            memoryCard: memoryCardPromptBlock(key),
+            // 场合档位：让模型中途自查时也知道「自己在哪种场合」。
+            scene: (() => {
+              const profile = resolveSceneProfile(key, cfg.socialV2?.scenes);
+              return { ...profile, card: formatSceneCard(profile, { groupName: groupNameForSceneV2(key) }) };
+            })(),
+            styleNotes: styleNotesBlock(key),
             recommended: cfg.socialV2?.provideRecommendations === false ? null : {
               wake: cfg.socialV2?.wake ?? {},
               send: cfg.socialV2?.send ?? {},
@@ -5719,7 +5757,7 @@ async function main() {
             recentCount: st.recentMessages.length,
             currentWakeConfig: st.wakeConfig,
             wakeSafety: computeWakeSafetyV2(st.wakeConfig),
-            memory: [formatMemoryV2(st), formatSharedMemoryV2(key)].filter(Boolean).join('\n\n'),
+            memory: [formatMemoryV2(st, key), formatSharedMemoryV2(key)].filter(Boolean).join('\n\n'),
             // 私聊不返回群聊参与度：getPrompt 是她在聊天中途会来查的东西，
             // 一对一时看到「群友发言 8 条 / 这轮可以少说」只会把她拽回值班视角。
             participation: String(key).startsWith('private:') ? null : formatParticipationV2(st),
@@ -6402,6 +6440,90 @@ async function main() {
             if (st.sendTimes.length > 500) st.sendTimes = st.sendTimes.slice(-500);
             saveSocialV2State();
             sendJson({ ok: false, error: error?.message ?? String(error) }, 500);
+          }
+          return;
+        }
+        // ── 受控跨场景投递：私聊 → 白名单群（2026-10-31 路线 A）────────────────
+        //
+        // 主人明确要求「在私聊里主动往群里发」做成**受控**通道，而不是放开 token 绑定
+        // （那等于让模型拿着别的会话的令牌随便发）。这里是桥接代投：模型只给目标 key，
+        // 桥接用自己的发送流水线发，回执记进目标会话状态。
+        //
+        // 硬条件缺一不可：
+        //   ① 仅 reserved2、AI 未暂停；
+        //   ② 来源必须是主人私聊（唯一的合法发起方；群友/群内容无法触发）；
+        //   ③ socialV2.crossSceneSend.enabled=true，且目标必须在 allowTargets 显式白名单；
+        //   ④ 目标群仍命中 QQ 发送白名单（allow.groups / deny.groups 复用 allowed()）；
+        //   ⑤ 文本过敏感信息闸、身份闸、长度/频率限制；静默模式/鱼群保护同样拦。
+        // 不提供「群 → 别处」：跨场合只开放私聊里被主人明确要求的那一条路。
+        if (req.method === 'POST' && url.pathname === '/api/socialV2/send-cross') {
+          const body = await readBody();
+          const key = String(body.key ?? '').trim();
+          const token = String(body.token ?? req.headers['x-agent-token'] ?? '').trim();
+          const target = normalizeCrossSceneTarget(body.target);
+          const message = unquoteJsonString(String(body.message ?? '').trim());
+          if (!key || !target || !message) { sendJson({ ok: false, error: 'key/target/message 不能为空' }, 400); return; }
+          if (currentMode !== 'reserved2') { sendJson({ ok: false, error: '该接口仅 reserved2 模式可用' }, 403); return; }
+          if (socialV2.paused) { sendJson({ ok: false, error: 'AI 已暂停，当前不允许执行发送工具' }, 403); return; }
+          if (!token || !agentTokenOk(key, token)) { sendJson({ ok: false, error: 'agent token 无效' }, 403); return; }
+          if (!v2SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
+          if (!v2ToolEnabled('crossSceneSend')) { sendJson({ ok: false, error: '工具未启用：qq_send_cross_scene' }, 403); return; }
+          const ownerKey = cfg.ownerQQ ? `private:${String(cfg.ownerQQ)}` : '';
+          if (!ownerKey || key !== ownerKey) { sendJson({ ok: false, error: '跨场合投递只允许从主人私聊发起' }, 403); return; }
+          const csCfg = cfg.socialV2?.crossSceneSend ?? normalizeCrossSceneSendConfig();
+          if (!csCfg.enabled) { sendJson({ ok: false, error: '跨场合投递未开启（socialV2.crossSceneSend.enabled=false）' }, 403); return; }
+          if (!isCrossSceneTargetAllowed(csCfg, target)) { sendJson({ ok: false, error: `目标 ${target} 不在跨场合投递白名单（socialV2.crossSceneSend.allowTargets）里` }, 403); return; }
+          const targetId = Number(target.slice('group:'.length));
+          if (!Number.isSafeInteger(targetId) || targetId <= 0 || !modeAllowed(target, 'group', targetId, cfg, currentMode)) {
+            sendJson({ ok: false, error: '目标群不在 QQ 发送白名单 / 当前模式允许范围内' }, 403);
+            return;
+          }
+          if (shouldBlockSilentReply(target)) { sendJson({ ok: false, error: '静默模式已开启，当前不允许跨场合投递' }, 403); return; }
+          if (message.length > csCfg.maxChars) { sendJson({ ok: false, error: `跨场合投递单条不能超过 ${csCfg.maxChars} 字` }, 400); return; }
+          if (SENSITIVE_RE.test(message)) { sendJson({ ok: false, error: '消息含敏感信息（路径/凭据等），已阻止发送' }, 403); return; }
+          // 公开面不许出现已知账号标识。这里**不能**复用下面 set-signature 分支里的
+          // selfExpressionProtectedIds()：那是同一个请求回调函数体内更靠后声明的 const，
+          // 从更早的分支调用会命中 TDZ（ReferenceError）。所以就地算一份只读名单。
+          const protectedIds = [];
+          for (const raw of [cfg.ownerQQ, cfg.admin, ...(cfg.allow?.groups ?? []), ...(cfg.allow?.private ?? []), ...(cfg.deny?.groups ?? []), ...(cfg.deny?.private ?? [])]) {
+            const id = String(raw ?? '').trim();
+            if (/^\d{4,15}$/.test(id) && !protectedIds.includes(id)) protectedIds.push(id);
+          }
+          const crossLeaks = findIdentityLeaks(message, { ids: protectedIds });
+          if (crossLeaks.length) { sendJson({ ok: false, error: formatIdentityLeakError(crossLeaks, '跨场合投递') }, 403); return; }
+          const st = getSocialV2State(key);
+          const targetSt = getSocialV2State(target);
+          const fishBlock = fishGuardSendBlock(target, targetSt);
+          if (fishBlock) { sendJson({ ok: false, error: fishBlock.error }, 403); return; }
+          const now = Date.now();
+          st.crossSendTimes = (Array.isArray(st.crossSendTimes) ? st.crossSendTimes : []).filter((t) => now - Number(t) < 3600000);
+          if (crossSceneRateBlocked(st.crossSendTimes, now, csCfg.maxPerHour)) {
+            sendJson({ ok: false, error: `跨场合投递太频繁（每小时最多 ${csCfg.maxPerHour} 条）` }, 429);
+            return;
+          }
+          const tokenBlock = tokenGuardSendBlock(key, st, 1);
+          if (tokenBlock) { sendJson({ ok: false, error: tokenBlock.error }, 429); return; }
+          // 先预占额度：网络失败也不放开，防止失败重试刷次数。
+          const reservedAt = now;
+          st.crossSendTimes.push(reservedAt);
+          st.lastActionAt = now;
+          saveSocialV2State();
+          try {
+            const sent = await sendMessagesV2(target, [message], [], null, null);
+            recordSentMessagesV2(target, sent);
+            const targetAfter = getSocialV2State(target);
+            targetAfter.lastActionAt = now;
+            saveSocialV2State();
+            log(`[cross] ${key} -> ${target} 投递成功 ${sent.length}/1 条`);
+            appendActivity(`${key} [cross] 向 ${target} 跨场合投递：${message.slice(0, 80)}`);
+            sendJson({ ok: true, key, target, sent: sent.length, maxPerHour: csCfg.maxPerHour });
+          } catch (error) {
+            // 失败回滚预占次数（已发出的那部分不重复计；sendMessagesV2 已把 sent 记进目标会话）。
+            const idx = st.crossSendTimes.indexOf(reservedAt);
+            if (idx >= 0) st.crossSendTimes.splice(idx, 1);
+            saveSocialV2State();
+            log(`[cross] ${key} -> ${target} 投递失败：${error?.message ?? error}`);
+            sendJson({ ok: false, error: `跨场合投递失败：${error?.message ?? error}` }, 500);
           }
           return;
         }
@@ -8112,23 +8234,49 @@ async function main() {
           return;
         }
         // ── 羽的现场修正：说话习惯（style-notes.md）────────────────────────────
-        // GET 看当前注入块与文件路径；POST 追加一条（带日期前缀）。
+        // GET ?key=group:123 看按场合过滤后的注入块；POST 追加一条（带日期 + 作用域前缀）。
         // 主人和甘棠都能用：主人走控制台，甘棠走 scripts/memctl.mjs 或直接 write 文件。
+        //
+        // 作用域（2026-10-31 路线 A）：行的格式是 `- 2026-10-31 [全局] 文本`；
+        //   [全局] 所有场合 / [私聊] 只私聊 / [群] 任何群 / [群:123] 只那个群。
+        //   没有前缀的旧行 = 全局（历史文件不用改）。
         if (url.pathname === '/api/socialV2/style-notes') {
           const styleFile = path.join(path.dirname(activePersonaFile()), 'style-notes.md');
+          const readStyleNoteLines = () => {
+            try {
+              return fs.readFileSync(styleFile, 'utf8').split(/\r?\n/);
+            } catch {
+              return [];
+            }
+          };
           if (req.method === 'GET') {
-            sendJson({ ok: true, path: styleFile, block: styleNotesBlock() });
+            const key = String(url.searchParams.get('key') ?? '').trim();
+            const entries = readStyleNoteLines().map(parseStyleNoteLine).filter(Boolean)
+              .map((p) => ({ text: p.text, scope: p.scope, date: p.date, line: p.raw }));
+            sendJson({ ok: true, path: styleFile, entries, block: styleNotesBlock(key) });
             return;
           }
           if (req.method === 'POST') {
             const body = await readBody();
             const text = String(body.text ?? '').trim();
+            const rawScope = String(body.scope ?? 'global').trim();
             if (!text) { sendJson({ ok: false, error: 'text 不能为空' }, 400); return; }
+            if (rawScope === 'here' || rawScope === '本场合') {
+              sendJson({ ok: false, error: '控制台写入不能使用 here（没有场景上下文），请写 global / private / group / group:<群号>' }, 400);
+              return;
+            }
+            const scope = normalizeRuleScope(rawScope);
+            if (!scope) {
+              sendJson({ ok: false, error: 'scope 只能是 global / private / group / group:<群号>' }, 400);
+              return;
+            }
             try {
               fs.mkdirSync(path.dirname(styleFile), { recursive: true });
-              fs.appendFileSync(styleFile, `- ${localDayKey()} ${text.replace(/\s*\n\s*/g, ' ')}\n`, 'utf8');
+              const line = formatStyleNoteLine({ scope, date: localDayKey(), text });
+              if (!line) { sendJson({ ok: false, error: 'text 不能为空' }, 400); return; }
+              fs.appendFileSync(styleFile, `${line}\n`, 'utf8');
               styleNotesCache = { key: '', text: '' };
-              sendJson({ ok: true, path: styleFile, block: styleNotesBlock() });
+              sendJson({ ok: true, path: styleFile, scope, line, block: styleNotesBlock() });
             } catch (error) {
               sendJson({ ok: false, error: String(error?.message ?? error) }, 500);
             }
@@ -8141,15 +8289,24 @@ async function main() {
           const category = String(body.category ?? '').trim();
           const content = String(body.content ?? '').trim();
           const extra = body.extra && typeof body.extra === 'object' ? body.extra : {};
+          const categories = ['activeTopic', 'pendingThought', 'memberImpression', 'rule'];
           if (!key || !category || !content) { sendJson({ ok: false, error: 'key/category/content 不能为空' }, 400); return; }
-          if (!['activeTopic', 'pendingThought', 'memberImpression'].includes(category)) { sendJson({ ok: false, error: 'category 必须是 activeTopic / pendingThought / memberImpression' }, 400); return; }
+          if (!categories.includes(category)) { sendJson({ ok: false, error: `category 必须是 ${categories.join(' / ')}` }, 400); return; }
           if (category === 'memberImpression' && !String(extra.target || '').trim()) { sendJson({ ok: false, error: 'memberImpression 需要 extra.target 指定群友名字' }, 400); return; }
+          // 规矩必须有作用域：global（默认）/private/group/group:<id>/here（= 当前场合）。
+          // here 由服务端解析成具体值再落盘，避免把「本场合」这种相对词写进状态文件。
+          let appendExtra = extra;
+          if (category === 'rule') {
+            const scope = normalizeRuleScope(extra.scope, { key });
+            if (!scope) { sendJson({ ok: false, error: 'rule 的 extra.scope 只能是 global / private / group / group:<群号> / here' }, 400); return; }
+            appendExtra = { ...extra, scope };
+          }
           if (req.headers['x-agent-token'] && !agentTokenOk(key, req.headers['x-agent-token'])) { sendJson({ ok: false, error: 'agent token 无效' }, 403); return; }
           if (req.headers['x-agent-token'] && !v2SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
           if (req.headers['x-agent-token'] && !v2ToolEnabled('memory')) { sendJson({ ok: false, error: '工具未启用：qq_memory_append' }, 403); return; }
           const st = getSocialV2State(key);
-          appendMemoryV2(st, category, content, extra);
-          sendJson({ ok: true, key, category, content, memory: formatMemoryV2(st) });
+          appendMemoryV2(st, category, content, appendExtra, key);
+          sendJson({ ok: true, key, category, content, scope: appendExtra.scope, memory: formatMemoryV2(st, key) });
           return;
         }
         if (req.method === 'POST' && url.pathname === '/api/socialV2/memory-update') {
@@ -8166,10 +8323,12 @@ async function main() {
             pendingQuestion: newExtra.pendingQuestion !== undefined ? redactExtra(newExtra.pendingQuestion) : undefined,
             participants: Array.isArray(newExtra.participants) ? newExtra.participants.map((p) => redactExtra(p)) : undefined,
             motivation: newExtra.motivation !== undefined ? redactExtra(newExtra.motivation) : undefined,
-            target: newExtra.target !== undefined ? redactExtra(newExtra.target) : undefined
+            target: newExtra.target !== undefined ? redactExtra(newExtra.target) : undefined,
+            scope: newExtra.scope !== undefined ? redactExtra(newExtra.scope) : undefined
           };
+          const categories = ['activeTopic', 'pendingThought', 'memberImpression', 'rule'];
           if (!key || !category) { sendJson({ ok: false, error: 'key/category 不能为空' }, 400); return; }
-          if (!['activeTopic', 'pendingThought', 'memberImpression'].includes(category)) { sendJson({ ok: false, error: 'category 必须是 activeTopic / pendingThought / memberImpression' }, 400); return; }
+          if (!categories.includes(category)) { sendJson({ ok: false, error: `category 必须是 ${categories.join(' / ')}` }, 400); return; }
           if (category === 'memberImpression' && !target) { sendJson({ ok: false, error: 'memberImpression 需要 target 指定原群友名字' }, 400); return; }
           if (category !== 'memberImpression' && !oldContent) { sendJson({ ok: false, error: '该类别需要 oldContent 指定要编辑的记忆内容' }, 400); return; }
           if (req.headers['x-agent-token'] && !agentTokenOk(key, req.headers['x-agent-token'])) { sendJson({ ok: false, error: 'agent token 无效' }, 403); return; }
@@ -8188,6 +8347,20 @@ async function main() {
             if (newContent !== undefined) st.pendingThoughts[idx].text = newContent.slice(0, 200);
             if (cleanNewExtra.motivation !== undefined) st.pendingThoughts[idx].motivation = String(cleanNewExtra.motivation).slice(0, 50);
             if (cleanNewExtra.expiresAtMs !== undefined) st.pendingThoughts[idx].expiresAt = Date.now() + Math.max(0, Number(cleanNewExtra.expiresAtMs) || 0);
+          } else if (category === 'rule' && Array.isArray(st.rules)) {
+            const idx = st.rules.findIndex((r) => normalizeRuleText(r?.text) === normalizeRuleText(oldContent));
+            if (idx < 0) { sendJson({ ok: false, error: '找不到要编辑的规矩' }, 404); return; }
+            if (newContent !== undefined) {
+              const nextText = normalizeRuleText(newContent);
+              if (!nextText) { sendJson({ ok: false, error: 'newContent 不能为空' }, 400); return; }
+              st.rules[idx].text = nextText;
+            }
+            if (cleanNewExtra.scope !== undefined) {
+              const scope = normalizeRuleScope(cleanNewExtra.scope, { key });
+              if (!scope) { sendJson({ ok: false, error: 'scope 只能是 global / private / group / group:<群号> / here' }, 400); return; }
+              st.rules[idx].scope = scope;
+            }
+            st.rules[idx].updatedAt = Date.now();
           } else if (category === 'memberImpression' && st.memberImpressions && typeof st.memberImpressions === 'object') {
             const oldTarget = target;
             if (['__proto__', 'constructor', 'prototype'].includes(oldTarget)) { sendJson({ ok: false, error: '非法的群友名字' }, 400); return; }
@@ -8216,7 +8389,7 @@ async function main() {
             }
           }
           saveSocialV2State();
-          sendJson({ ok: true, key, category, memory: formatMemoryV2(st) });
+          sendJson({ ok: true, key, category, memory: formatMemoryV2(st, key) });
           return;
         }
         if (req.method === 'GET' && url.pathname === '/api/socialV2/memory') {
@@ -8230,19 +8403,41 @@ async function main() {
           const raw = {
             activeTopics: Array.isArray(st.activeTopics) ? st.activeTopics.slice(-20) : [],
             pendingThoughts: Array.isArray(st.pendingThoughts) ? st.pendingThoughts.filter((t) => !t.expiresAt || Date.now() < t.expiresAt).slice(-20) : [],
-            memberImpressions: st.memberImpressions && typeof st.memberImpressions === 'object' ? st.memberImpressions : {}
+            memberImpressions: st.memberImpressions && typeof st.memberImpressions === 'object' ? st.memberImpressions : {},
+            rules: Array.isArray(st.rules) ? st.rules.slice(-20) : []
           };
           if (category === 'activeTopic') {
             raw.pendingThoughts = [];
             raw.memberImpressions = {};
+            raw.rules = [];
           } else if (category === 'pendingThought') {
             raw.activeTopics = [];
             raw.memberImpressions = {};
+            raw.rules = [];
           } else if (category === 'memberImpression') {
             raw.activeTopics = [];
             raw.pendingThoughts = [];
+            raw.rules = [];
+          } else if (category === 'rule') {
+            raw.activeTopics = [];
+            raw.pendingThoughts = [];
+            raw.memberImpressions = {};
           }
-          sendJson({ ok: true, key, category, formatted: formatMemoryV2({ ...st, ...raw }), raw });
+          // 规矩：查询视角与唤醒提示词一致——本会话的规矩 + **别的会话的 global 规矩**。
+          // private / group:<id> 规矩换了场合不出现（分清场合）；去重按文本。
+          const mergedRules = Array.isArray(raw.rules) ? raw.rules.slice() : [];
+          if (!category || category === 'rule') {
+            for (const [otherKey, otherSt] of socialV2.conversations) {
+              if (otherKey === key || !otherSt) continue;
+              for (const rule of Array.isArray(otherSt.rules) ? otherSt.rules : []) {
+                if (String(rule?.scope ?? 'global') !== 'global') continue;
+                const text = String(rule?.text ?? '').trim();
+                if (!text || mergedRules.some((item) => String(item?.text ?? '').trim() === text)) continue;
+                mergedRules.push({ ...rule, scope: 'global', from: otherKey });
+              }
+            }
+          }
+          sendJson({ ok: true, key, category, formatted: formatMemoryV2({ ...st, ...raw, rules: mergedRules }, key), raw });
           return;
         }
         if (req.method === 'POST' && url.pathname === '/api/socialV2/memory-remove') {
@@ -8252,7 +8447,7 @@ async function main() {
           const content = String(body.content ?? '').trim();
           const target = String(body.target ?? '').trim();
           if (!key || !category) { sendJson({ ok: false, error: 'key/category 不能为空' }, 400); return; }
-          if (!['activeTopic', 'pendingThought', 'memberImpression'].includes(category)) { sendJson({ ok: false, error: 'category 必须是 activeTopic / pendingThought / memberImpression' }, 400); return; }
+          if (!['activeTopic', 'pendingThought', 'memberImpression', 'rule'].includes(category)) { sendJson({ ok: false, error: 'category 必须是 activeTopic / pendingThought / memberImpression / rule' }, 400); return; }
           if (category === 'memberImpression' && !target) { sendJson({ ok: false, error: 'memberImpression 需要 target 指定群友名字' }, 400); return; }
           if (category === 'memberImpression' && ['__proto__', 'constructor', 'prototype'].includes(target)) { sendJson({ ok: false, error: '非法的群友名字' }, 400); return; }
           if (category !== 'memberImpression' && !content) { sendJson({ ok: false, error: '该类别需要 content 指定要删除的记忆内容' }, 400); return; }
@@ -8266,9 +8461,11 @@ async function main() {
             st.pendingThoughts = st.pendingThoughts.filter((t) => String(t?.text ?? '') !== content);
           } else if (category === 'memberImpression' && st.memberImpressions && typeof st.memberImpressions === 'object') {
             delete st.memberImpressions[target];
+          } else if (category === 'rule' && Array.isArray(st.rules)) {
+            st.rules = st.rules.filter((r) => normalizeRuleText(r?.text) !== normalizeRuleText(content));
           }
           saveSocialV2State();
-          sendJson({ ok: true, key, category, memory: formatMemoryV2(st) });
+          sendJson({ ok: true, key, category, memory: formatMemoryV2(st, key) });
           return;
         }
         if (req.method === 'POST' && url.pathname === '/api/socialV2/memory-clear') {
@@ -8276,7 +8473,7 @@ async function main() {
           const key = String(body.key ?? '').trim();
           const category = String(body.category ?? '').trim();
           if (!key) { sendJson({ ok: false, error: 'key 不能为空' }, 400); return; }
-          if (category && !['activeTopic', 'pendingThought', 'memberImpression'].includes(category)) { sendJson({ ok: false, error: 'category 必须是 activeTopic / pendingThought / memberImpression' }, 400); return; }
+          if (category && !['activeTopic', 'pendingThought', 'memberImpression', 'rule'].includes(category)) { sendJson({ ok: false, error: 'category 必须是 activeTopic / pendingThought / memberImpression / rule' }, 400); return; }
           if (req.headers['x-agent-token'] && !agentTokenOk(key, req.headers['x-agent-token'])) { sendJson({ ok: false, error: 'agent token 无效' }, 403); return; }
           if (req.headers['x-agent-token'] && !v2SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
           if (req.headers['x-agent-token'] && !v2ToolEnabled('memory')) { sendJson({ ok: false, error: '工具未启用：qq_memory_clear' }, 403); return; }
@@ -8284,8 +8481,9 @@ async function main() {
           if (!category || category === 'activeTopic') st.activeTopics = [];
           if (!category || category === 'pendingThought') st.pendingThoughts = [];
           if (!category || category === 'memberImpression') st.memberImpressions = {};
+          if (!category || category === 'rule') st.rules = [];
           saveSocialV2State();
-          sendJson({ ok: true, key, category: category || 'all', memory: formatMemoryV2(st) });
+          sendJson({ ok: true, key, category: category || 'all', memory: formatMemoryV2(st, key) });
           return;
         }
         // ── 二代黑话学习（reserved2）：AI 查询/提交黑话候选 ─────────────────
@@ -10368,6 +10566,14 @@ async function main() {
     return m ? (fishGroupNames.get(m[1]) ?? '') : '';
   }
 
+  /**
+   * 场合卡用群名：只读缓存，不为了拼提示词去发 OneBot 请求。
+   * 入站消息会顺带 ensureFishGroupName 预热；没预热到就显示不带群名的版本（可接受）。
+   */
+  function groupNameForSceneV2(key) {
+    return fishGuardGroupName(key);
+  }
+
   /** 从 unread 里找“人类直接叫本鱼/管理员说话”的证据（发送硬拦时用于放行）。 */
   function fishGuardDirectUnread(st) {
     const unread = Array.isArray(st?.unread) ? st.unread : [];
@@ -10630,7 +10836,14 @@ async function main() {
     return defaultMs;
   }
 
-  function formatMemoryV2(st) {
+  /**
+   * 当前会话的轻记忆块（本场合视角）。
+   *
+   * 2026-10-31 路线 A：新增「规矩」一类（st.rules），写入时带 scope（global/private/group/group:<id>）。
+   * 这里只渲染**本场合生效**的规矩；别的场合写下的 global 规矩由 formatSharedMemoryV2 补，
+   * 避免同一轮注入两份。`key` 只用于判断作用域（老调用方不传时按全局处理，保持兼容）。
+   */
+  function formatMemoryV2(st, key = '') {
     if (!st) return '';
     const lines = [];
     const topics = Array.isArray(st.activeTopics) ? st.activeTopics.filter((t) => t && t.text) : [];
@@ -10664,6 +10877,12 @@ async function main() {
         if (traits.length) for (const trait of traits) lines.push(`  · ${trait.length > 120 ? `${trait.slice(0, 120)}…` : trait}`);
         else lines.push('  · 暂无记录');
       }
+    }
+    // 规矩：按当前场合过滤（global 全场合；private 只私聊；group 所有群；group:<id> 只那个群）。
+    const ruleLines = collectRulesForScene(Array.isArray(st.rules) ? st.rules : [], [], key, { max: 20 }).lines;
+    if (ruleLines.length) {
+      lines.push('【记下的规矩（按场合生效）】');
+      for (const line of ruleLines) lines.push(line);
     }
     return lines.join('\n');
   }
@@ -10721,6 +10940,19 @@ async function main() {
     if (thoughts.length) {
       lines.push('【另一段对话里想说还没说的】');
       for (const t of thoughts.slice(-6)) lines.push(`- （${t.conv}）${String(t.text).slice(0, 160)}`);
+    }
+    // 跨场合的「规矩」：只有 global 才跨会话（private / group:<id> 绝不跨场合，
+    // 这是「分清场合」的硬要求）。当前会话自己的规矩已由 formatMemoryV2 注入，这里去重。
+    const currentRules = socialV2.conversations.get(currentKey)?.rules ?? [];
+    const otherRuleSets = [];
+    for (const [key, st] of socialV2.conversations) {
+      if (!st || key === currentKey) continue;
+      otherRuleSets.push({ key, rules: Array.isArray(st.rules) ? st.rules : [] });
+    }
+    const sharedRules = collectRulesForScene(currentRules, otherRuleSets, currentKey, { max: 20 }).sharedLines;
+    if (sharedRules.length) {
+      lines.push('【跨场合的规矩（所有场合都认）】');
+      for (const line of sharedRules) lines.push(line);
     }
     lines.push('（这些事发生在另一段对话里，不是这边正在聊的：私聊里的事不要主动搬到群里；在私聊里提群里的事，先说一句「群里刚才…」。）');
     return lines.length ? `【跨会话记忆 · 私聊与群聊互通】\n${lines.join('\n')}` : '';
@@ -10855,7 +11087,18 @@ async function main() {
     return true;
   }
 
-  function appendMemoryV2(st, category, content, extra = {}) {
+  /**
+   * 追加一条轻记忆。
+   *
+   * 2026-10-31 路线 A：新增 `rule`（规矩）类别。与话题/心里话/印象不同，规矩是**指令性**的，
+   * 所以必须带作用域（scope），注入时按场合过滤：
+   *   global        所有场合都认（私聊里定下的规矩，群里也认）
+   *   private       只私聊生效
+   *   group         任何群聊生效
+   *   group:<id>    只在指定群生效
+   * `key` 是写入方所在会话，用来把 'here' 解析成具体场合；不传时按全局处理（兼容旧调用）。
+   */
+  function appendMemoryV2(st, category, content, extra = {}, key = '') {
     if (!st) return;
     const text = redactKnownTokensOnly(String(content ?? '')).trim();
     const cat = String(category || '').trim();
@@ -10901,6 +11144,23 @@ async function main() {
         });
       }
       if (st.pendingThoughts.length > 20) st.pendingThoughts.splice(0, st.pendingThoughts.length - 20);
+    } else if (cat === 'rule') {
+      // 规矩：同一句话不重复存；scope 变了就更新（「这条以后群里也认」）。
+      if (!Array.isArray(st.rules)) st.rules = [];
+      const scope = normalizeRuleScope(extra.scope, { key });
+      const ruleText = normalizeRuleText(text);
+      if (!scope || !ruleText) return;
+      const existing = st.rules.find((r) => r && normalizeRuleText(r.text) === ruleText);
+      if (existing) {
+        existing.scope = scope;
+        existing.updatedAt = Date.now();
+      } else {
+        st.rules.push({ text: ruleText.slice(0, RULE_MAX_CHARS), scope, createdAt: Date.now(), updatedAt: Date.now() });
+      }
+      if (st.rules.length > RULE_MAX_COUNT) {
+        st.rules.sort((a, b) => (Number(a?.updatedAt) || 0) - (Number(b?.updatedAt) || 0));
+        st.rules.splice(0, st.rules.length - RULE_MAX_COUNT);
+      }
     } else if (cat === 'memberImpression') {
       const target = String(extra.target || '').trim();
       if (!target || ['__proto__', 'constructor', 'prototype'].includes(target)) return;
@@ -11213,7 +11473,7 @@ async function main() {
     const biliBrief = cfg.biliBridge?.enabled !== false && cfg.biliBridge?.memory?.enabled !== false
       ? biliMemory.briefBlock()
       : '';
-    const memoryCardText = memoryCardPromptBlock();
+    const memoryCardText = memoryCardPromptBlock(cfg.ownerQQ ? `private:${String(cfg.ownerQQ)}` : '');
     return [
       roleLine,
       // 人格卡是动机的先验：她是什么样的人，决定她更容易被什么打动。
@@ -12168,8 +12428,13 @@ async function main() {
   }
   // 记忆卡注入块：插件每次整理后原子写 memory-card-prompt-qq.md，这里按 mtime 缓存读。
   // 不解析 JSON、不依赖插件代码——桥接和插件是不同进程，文件是唯一契约。
+  //
+  // 2026-10-31 路线 A：注入按**当前场合**过滤（只认渲染文件里的标记，不改记忆卡内容）：
+  //   · 记录级 audience 标记 [仅私聊可见]/[仅群可见] 由记忆卡渲染侧写入；
+  //   · socialV2.memoryScene.groupExcludePrivate=true 时，群聊连 [私聊] 记录也一起过滤
+  //     （硬开关，默认关 = 记忆共同）。
   let memoryCardPromptCache = { key: '', text: '' };
-  function memoryCardPromptBlock() {
+  function memoryCardPromptRaw() {
     try {
       const stat = fs.statSync(MEMORY_CARD_PATHS.promptQq);
       const key = `${stat.mtimeMs}:${stat.size}`;
@@ -12180,6 +12445,15 @@ async function main() {
     } catch {
       return '';
     }
+  }
+  function memoryCardPromptBlock(key = '') {
+    const text = memoryCardPromptRaw();
+    if (!text) return '';
+    const scene = cfg.socialV2?.memoryScene ?? {};
+    return filterMemoryCardPromptForScene(text, key, {
+      groupExcludePrivate: scene.groupExcludePrivate === true,
+      honorAudience: scene.honorAudience !== false
+    });
   }
 
   /**
@@ -12201,7 +12475,7 @@ async function main() {
     const lines = renderEpisodeLines(narrative);
     if (!lines.length) return '';
     try {
-      if (memoryCardPromptBlock().includes('## 我们一起经历过的')) return '';
+      if (memoryCardPromptRaw().includes('## 我们一起经历过的')) return '';
     } catch {}
     return `## 我们一起经历过的\n${lines.join('\n')}`;
   }
@@ -12213,26 +12487,32 @@ async function main() {
    * 只取最后 30 条，太长自己截断，避免这个文件变成第二个记忆卡。
    * 为什么用文件而不是数据库：主人可以直接用记事本改，甘棠可以用 write 工具改，
    * 桥接只负责「每轮读一遍、按 mtime 缓存」——三方都不需要对接接口。
+   *
+   * 2026-10-31 路线 A：行首可选作用域前缀 `[全局]/[私聊]/[群]/[群:123]`（旧行=全局）。
+   * 注入时按当前场合过滤：私聊里看不到 [群] 条，群里看不到 [私聊] 条。
+   * 缓存只缓存**原始行**，过滤按 key 现算（一个进程同时服务多个会话）。
    */
-  let styleNotesCache = { key: '', text: '' };
-  function styleNotesBlock() {
+  let styleNotesCache = { key: '', lines: [] };
+  function readStyleNoteRawLines() {
     try {
       const file = path.join(path.dirname(activePersonaFile()), 'style-notes.md');
       const stat = fs.statSync(file);
       const key = `${stat.mtimeMs}:${stat.size}`;
-      if (styleNotesCache.key === key) return styleNotesCache.text;
+      if (styleNotesCache.key === key) return styleNotesCache.lines;
       const raw = fs.readFileSync(file, 'utf8');
       const lines = raw.split(/\r?\n/).map((line) => line.trim())
-        .filter((line) => line.startsWith('- ') && line.length > 2)
-        .slice(-30);
-      const text = lines.length
-        ? `【羽定下的说话习惯（新的在最后；和上面的记忆/人设冲突时，以这几条为准）】\n${lines.join('\n')}`
-        : '';
-      styleNotesCache = { key, text };
-      return text;
+        .filter((line) => line.startsWith('- ') && line.length > 2);
+      styleNotesCache = { key, lines };
+      return lines;
     } catch {
-      return '';
+      return [];
     }
+  }
+  function styleNotesBlock(key = '') {
+    const lines = filterStyleNotesForScene(readStyleNoteRawLines(), key, { max: 30 });
+    return lines.length
+      ? `【羽定下的说话习惯（新的在最后；和上面的记忆/人设冲突时，以这几条为准）】\n${lines.join('\n')}`
+      : '';
   }
 
   // 按仿真模式取用：先用标题里的 〔一代〕/〔二代〕 标记筛掉另一模式的专属小节，
@@ -13328,8 +13608,17 @@ async function main() {
     // 「群里在聊什么」「群友发言 8 条」「这轮可以少说」——她跟主人一对一，
     // 提示词却在让她评估群气氛、限制发言量，于是永远隔着一层。
     const isPrivateChat = String(key).startsWith('private:');
+    // 场合档位（2026-10-31 路线 A）：每场景一个 label/语气/是否守私聊边界，
+    // 开头就把「你现在在哪种场合」说清楚，而不是只给一个 group:数字 的 key。
+    const scene = resolveSceneProfile(key, cfg.socialV2?.scenes);
+    const sceneLine = `${formatSceneCard(scene, { groupName: groupNameForSceneV2(key) })}\n\n`;
+    // 受控跨场景投递（私聊 → 白名单群）：只在开启且配了目标时告诉模型这条能力。
+    const crossSceneCfg = cfg.socialV2?.crossSceneSend;
+    const crossSceneLine = (!isPrivateChat || !crossSceneCfg?.enabled || !crossSceneCfg.allowTargets?.length)
+      ? ''
+      : `【跨场合投递】已开启（仅限私聊 → 白名单群）：主人明确让你带一句话过去时，用 qq_send_cross_scene(target="group:<群号>", message="…") 发到 ${crossSceneCfg.allowTargets.join('、')}；一次一条、只发文本、最多 ${crossSceneCfg.maxChars} 字。没被明确要求就不要主动用；不要借它转发私聊里的事、账号号码或任何隐私信息。\n\n`;
     const tokenLine = `【会话令牌】${st.agentToken}（调用二代状态工具时请在参数中带上此令牌）\n\n`;
-    const memoryText = formatMemoryV2(st);
+    const memoryText = formatMemoryV2(st, key);
     const memoryLine = memoryText ? `${memoryText}\n\n` : '';
     // 注意：黑话表不在这里注入，deliverPromptNow 的 withSlangContext 会统一注入，
     // 避免唤醒 prompt 出现两份黑话表。
@@ -13411,7 +13700,8 @@ async function main() {
       : '';
     const biliLine = biliBrief || biliRecall ? `${biliBrief}${biliRecall ? `${biliRecall}\n` : ''}\n` : '';
     // 二代不自动注入完整角色卡，但记忆卡必须每轮都在：否则她记不起和主人的事。
-    const memoryCardText = memoryCardPromptBlock();
+    // 注入时按当前场合过滤（记录级 audience 标记 + memoryScene 配置），不改记忆卡本身。
+    const memoryCardText = memoryCardPromptBlock(key);
     const memoryCardLine = memoryCardText ? `${memoryCardText}\n\n` : '';
     // 叙事层（「我们一起经历过的」）：插件渲染进 md 时这里是空的，没渲染时由桥接补上。
     const narrativeText = narrativeFallbackBlock();
@@ -13420,16 +13710,19 @@ async function main() {
     // 在那之前（以及以后万一标记丢了），群里这一侧必须自己守住边界：
     // 2026-10-30 主人反馈「该私聊的话跑到群里」——查实是他在私聊里说「下午第一次组会有点紧张」，
     // 这条记录进了共用记忆卡、在群里那一轮被读到，她在群里接了「组会开了没」「别紧张」。
-    const convGuardLine = isPrivateChat
-      ? ''
-      : '【两段对话】记忆卡里私聊和群聊的事是排在一起的。涉及羽的私生活、情绪、睡眠、身体、学习、家里的事，多半是私聊里说的——群里的场合不要主动提，也别当成他刚在群里说过；确实要在群里说，先问一句「你介意我说吗」。\n\n';
+    // 2026-10-31：守卫改由场合档位的 memoryGuard 控制（默认群聊开、私聊关），
+    // 文案保持原样——这是主人实测过的措辞，不要顺手重写。
+    const convGuardLine = scene.kind === 'group' && scene.memoryGuard
+      ? '【两段对话】记忆卡里私聊和群聊的事是排在一起的。涉及羽的私生活、情绪、睡眠、身体、学习、家里的事，多半是私聊里说的——群里的场合不要主动提，也别当成他刚在群里说过；确实要在群里说，先问一句「你介意我说吗」。\n\n'
+      : '';
     // 羽的现场修正：紧跟记忆卡，优先级高于记忆（他刚说的新要求总该赢过旧记录）。
-    const styleNotesText = styleNotesBlock();
+    // 2026-10-31：按当前场合过滤（[私聊]/[群]/[群:123] 作用域），旧行没有前缀 = 全局。
+    const styleNotesText = styleNotesBlock(key);
     const styleNotesLine = styleNotesText ? `${styleNotesText}\n\n` : '';
     // 跨会话记忆：私聊和群聊的轻记忆各自一份，这里补上别的会话的，避免「私聊说过的规矩群里不认」。
     const sharedMemoryText = formatSharedMemoryV2(key);
     const sharedMemoryLine = sharedMemoryText ? `${sharedMemoryText}\n\n` : '';
-    const base = roleLine + identityLine + provenanceLine + adminLine + biliLine + memoryCardLine + narrativeLine + convGuardLine + styleNotesLine + tokenLine + initialPromptLine + antiAiLine + proactiveLine + closureLine + stickerLine + stickerMatchLine + replyLine + statusLine + wakeLine + memoryLine + sharedMemoryLine + participationLine + fishGuardLine + tokenGuardLine + preSleepLine;
+    const base = roleLine + identityLine + provenanceLine + sceneLine + adminLine + biliLine + memoryCardLine + narrativeLine + convGuardLine + styleNotesLine + tokenLine + initialPromptLine + antiAiLine + proactiveLine + closureLine + stickerLine + stickerMatchLine + replyLine + statusLine + wakeLine + memoryLine + sharedMemoryLine + crossSceneLine + participationLine + fishGuardLine + tokenGuardLine + preSleepLine;
     if (reason === 'bootstrap') {
       return `${base}【引导唤醒】你已接入 QQ 会话 ${key}。\n当前是二代仿真模式：你的文本输出不会自动发送到 QQ，所有发言必须通过工具完成。\n请先调用 qq_get_prompt 查看角色、推荐值、可用工具和状态；有待回应的消息先按首回复节奏处理，最后才用 qq_set_wake_config 设置你希望如何被唤醒。`;
     }

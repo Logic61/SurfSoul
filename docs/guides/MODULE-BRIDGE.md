@@ -335,7 +335,7 @@ await pumpMux();      // DSH 事件流主循环（永不返回）
 
 `buildWakePromptV2`（`src/bridge.js:12523-12640`）按固定顺序拼：
 
-角色名 → 身份（昵称+QQ号，`src/bridge.js:12486-12500`）→ 来源归属（哪个平台的内容，`buildProvenanceBlock`）→ 管理员规则（compact）→ B站简报 → 记忆卡 → **会话令牌** → 初始提示词（**仅 bootstrap**）→ 反AI味 → 积极性 → 对话收尾判断 → 表情策略+表情库摘要 → 表情匹配推荐 → 首回复节奏 → 此刻状态 → 当前唤醒配置 → 记忆（话题/想法/印象）→ 参与度参考 → 鱼群保护 → Token 防爆破 → 沉睡前强制等待，最后按 `reason` 追加一段（bootstrap / timeout / replyCheck / proactiveCheck / history / poke / 默认）。
+角色名 → 身份（昵称+QQ号，`src/bridge.js:12486-12500`）→ 来源归属（哪个平台的内容，`buildProvenanceBlock`）→ **【场合】卡（2026-10-31：场合档位 + 当前群/私聊 + 私聊边界守卫）** → 管理员规则（compact）→ B站简报 → 记忆卡（按当前场合过滤 audience 标记）→ **会话令牌** → 初始提示词（**仅 bootstrap**）→ 反AI味 → 积极性 → 对话收尾判断 → 表情策略+表情库摘要 → 表情匹配推荐 → 首回复节奏 → 此刻状态 → 当前唤醒配置 → 记忆（话题/想法/印象/**按场合生效的规矩**）→ 跨会话记忆（含跨场合 global 规矩）→ 受控跨场合投递提示（仅主人私聊且开启时）→ 参与度参考 → 鱼群保护 → Token 防爆破 → 沉睡前强制等待，最后按 `reason` 追加一段（bootstrap / timeout / replyCheck / proactiveCheck / history / poke / 默认）。
 
 `deliverPromptNow` 还会在最外层包 `withSlangContext`（时间+黑话）与 `withAlignmentContext`（群聊身份对齐，置顶）（`src/bridge.js:11251`），并在 `wakeReason` 存在时追加【本次消息快照】JSON 与 `history=true` 的说明（`src/bridge.js:11234-11249`）。
 
@@ -437,7 +437,7 @@ await pumpMux();      // DSH 事件流主循环（永不返回）
 | 文件 | 内容 | 上限/裁剪 | 位置 |
 |---|---|---|---|
 | `state/sessions.json` | `{sessions:{key→sessionId}, sessionPolicies:{key→签名}}` | 无（按 key 数） | `src/bridge.js:111`、`src/bridge.js:1245-1291` |
-| `state/social-v2.json` | 每会话 wakeConfig / recent / unread / agentToken / 水位 / 记忆 / 鱼群 / 收尾 | recent ≤200、unread ≤100、wakeTimes ≤200、sendTimes ≤500、activeTopics/pendingThoughts ≤50、impressions ≤50、fishGuardLog ≤30、seenForwardIds ≤1000 | `src/bridge.js:114`、`src/bridge.js:9628-9670` |
+| `state/social-v2.json` | 每会话 wakeConfig / recent / unread / agentToken / 水位 / 记忆（话题/想法/印象/**规矩 rules**）/ 鱼群 / 收尾 / 跨场合投递次数（`crossSendTimes`） | recent ≤200、unread ≤100、wakeTimes ≤200、sendTimes ≤500、activeTopics/pendingThoughts ≤50、impressions ≤50、rules ≤50、fishGuardLog ≤30、seenForwardIds ≤1000 | `src/bridge.js:114`、`src/bridge.js:9628-9670` |
 | `state/initial-prompts.json` | 操作者预写的每会话「环境介绍」 | 单条 ≤ `initialPromptMaxChars`（100~8000，默认 2000） | `src/bridge.js:117`、`src/bridge.js:9681-9801` |
 
 三份都是「**读坏就只读降级**」：`stateWritable` / `initialPromptsWritable` / `slangStoreWritable` / `stickerStoreWritable`。原则一致——宁可这一轮不写，也不能用内存里的空数据覆盖磁盘（`src/bridge.js:1247-1251`、`src/bridge.js:9698-9702`、`src/bridge.js:1770-1772`、`src/bridge.js:1790-1801`）。
@@ -643,7 +643,7 @@ await pumpMux();      // DSH 事件流主循环（永不返回）
 | GET | `/api/socialV2/message-detail` | `getMessageDetail` | 200 字符预览 + `textTruncated` | `src/bridge.js:7431-7480` |
 | GET | `/api/socialV2/forward-message` | `getForwardMsg` | 见 §4.6 | `src/bridge.js:7482-7573` |
 | POST | `/api/socialV2/forward-media` | `getForwardMsg` | 取转发里的图片字节 | `src/bridge.js:7574-7592` |
-| GET | `/api/socialV2/memory` | `memory` | 三类记忆 | `src/bridge.js:7701-7726` |
+| GET | `/api/socialV2/memory` | `memory` | 四类记忆：话题/想法/印象/**规矩**（规矩含跨场合 global 合并） | `src/bridge.js:7701-7726` |
 | GET | `/api/socialV2/slang/query` | `slangQuery` | 已确认词条（**不含 evidence**） | `src/bridge.js:7771-7793` |
 | GET | `/api/socialV2/voices`、`/api/voice/list` | `sendVoice` | 库内文件名；**不含绝对路径** | `src/bridge.js:6916-6959` |
 | GET | `/api/socialV2/sticker-list` | `listStickers` | **GET 不支持 refresh**（写副作用不能挂在读接口上） | `src/bridge.js:6961-6983` |
@@ -652,7 +652,7 @@ await pumpMux();      // DSH 事件流主循环（永不返回）
 | GET | `/api/socialV2/tool-log` | — `A!`（GET 也是） | 工具调用日志 | `src/bridge.js:7359` |
 | GET | `/api/socialV2/feedback` | — `A!` | 反馈列表 | `src/bridge.js:7372` |
 
-`/api/socialV2/prompt` 的 `toolMap`（30 项 flag→工具名）决定了模型看到哪些工具（`src/bridge.js:5459-5497`），`sticker` 全局开关会连带隐藏 6 个表情工具（`src/bridge.js:5493-5496`）。
+`/api/socialV2/prompt` 的 `toolMap`（31 项 flag→工具名）决定了模型看到哪些工具（`src/bridge.js:5459-5497`），`sticker` 全局开关会连带隐藏 6 个表情工具（`src/bridge.js:5493-5496`）。
 
 ### 6.11 二代写接口（`A`）
 
@@ -666,6 +666,8 @@ await pumpMux();      // DSH 事件流主循环（永不返回）
 | GET/POST | `/api/socialV2/initial-prompt` | — `A!` | 读/写 `state/initial-prompts.json` | `src/bridge.js:5869-5922` |
 | POST | `/api/socialV2/send-burst` | `sendBurst` | **发 QQ**（多段） | `src/bridge.js:5923-6048` |
 | POST | `/api/socialV2/send-message` | `sendMessage` | **发 QQ**（单/多段，可引用/@） | `src/bridge.js:6050-6202` |
+| POST | `/api/socialV2/send-cross` | `crossSceneSend` | **受控跨场合投递**（主人私聊 → 显式白名单群；默认关；桥接代投，不向模型发目标 token） | `src/bridge.js` 同段（2026-10-31 路线 A） |
+| GET/POST | `/api/socialV2/style-notes` | —（控制台/管理端） | 说话习惯：POST 可选 `scope`（global/private/group/group:<id>）；GET `?key=` 返回按场合过滤后的注入块 | `src/bridge.js` 同段（2026-10-31 路线 A） |
 | POST | `/api/socialV2/send-poke` | `sendPoke` | **发 QQ**（拍一拍） | `src/bridge.js:6203-6310` |
 | POST | `/api/socialV2/send-voice` | `sendVoice` | **发 QQ**（语音） | `src/bridge.js:6654-6752` |
 | POST | `/api/socialV2/send-sticker` | `sendSticker` | **发 QQ**（表情） | `src/bridge.js:6754-6862` |
@@ -673,7 +675,7 @@ await pumpMux();      // DSH 事件流主循环（永不返回）
 | POST | `/api/socialV2/sticker-note` | `stickerNote` | 写本地表情认知 | `src/bridge.js:6364-6386` |
 | POST | `/api/socialV2/sticker-remark` | `setStickerRemark` | 改 QQ 官方备注 | `src/bridge.js:6388-6404` |
 | POST | `/api/socialV2/sticker-list` | `listStickers` | 强制刷新（AI 侧最小间隔 10 秒） | `src/bridge.js:6984-7009` |
-| POST | `/api/socialV2/memory-append` / `-update` / `-remove` / `-clear` | `memory` | 写会话记忆 | `src/bridge.js:7617-7768` |
+| POST | `/api/socialV2/memory-append` / `-update` / `-remove` / `-clear` | `memory` | 写会话记忆（四类：activeTopic / pendingThought / memberImpression / **rule**；rule 的 `extra.scope` 决定生效场合） | `src/bridge.js:7617-7768` |
 | POST | `/api/socialV2/slang/submit` | `slangSubmit` | 写黑话库（2026-10-31 起不再限频；同词重复提交合并计数） | `src/bridge.js:8315-8370` |
 | POST | `/api/socialV2/feedback` | `feedback` | 写 `state/feedback.json`（限频 5/分、20/时） | `src/bridge.js:7383-7412` |
 | POST | `/api/socialV2/feedback-clear` | — `A!` | 清空反馈 | `src/bridge.js:7376` |
@@ -682,7 +684,7 @@ await pumpMux();      // DSH 事件流主循环（永不返回）
 | POST | `/api/socialV2/check-send` | — | 只读（发送前探测工具是否启用） | `src/bridge.js:7282-7310` |
 | POST | `/api/socialV2/record-sent` | — | **永远 403**（内部接口，防伪造历史） | `src/bridge.js:7426-7429` |
 
-三条容易被忽略的「必须 `reserved2` + 必须 agent token」：`send-burst`（`src/bridge.js:5963-5967`）、`send-message`（`src/bridge.js:6096-6097`）、`send-sticker`（`src/bridge.js:6771-6772`）。而 `send-voice` / `send-poke` / `forward-message` 也各自显式要求。
+三条容易被忽略的「必须 `reserved2` + 必须 agent token」：`send-burst`（`src/bridge.js:5963-5967`）、`send-message`（`src/bridge.js:6096-6097`）、`send-sticker`（`src/bridge.js:6771-6772`）。而 `send-voice` / `send-poke` / `forward-message` 也各自显式要求；`send-cross`（2026-10-31）同样要求 `reserved2` + token，且额外要求来源是主人私聊、目标双白名单、`crossSceneSend.enabled=true`。
 
 ### 6.12 管理端表情库
 

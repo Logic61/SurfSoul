@@ -131,7 +131,7 @@
 | 子段 | 关键键 | 作用 |
 | --- | --- | --- |
 | 总开关 | `enabled`、`autoReplyCheckMs`、`agentPreset`（`qq-chat-v2`）、`provideRecommendations` | 二代是"一切皆工具"，文本不自动发送 |
-| `tools` | 31 个布尔开关 | **逐个工具的开关**：发消息/引用/分条/等待/表情/语音/记忆/黑话/收尾…默认全开，`setStickerRemark` 与 `sendVoice` 默认**关** |
+| `tools` | 32 个布尔开关 | **逐个工具的开关**：发消息/引用/分条/等待/表情/语音/记忆/黑话/收尾/跨场合投递…默认全开，`setStickerRemark` 与 `sendVoice` 默认**关** |
 | `wake` | `defaultMode`（diving）、`preSleepWaitEnabled`、`preSleepWaitMs`（300000）、`batchWindowMs`、`maxWakePerMinute/Hour`、`noActionLimit`、`recommended*` | 唤醒调度与"沉睡前观察"的强制窗口 |
 | `closure` | `enabled`、`cooldownMs`（20 分钟）、`requireNoOpenQuestion`、`promptInWake`、`maxSummaryChars`、`maxNextOpeningChars` | 对话收尾：冷却只压普通概率唤醒，@/提问/私聊不压 |
 | `send` | `burstMaxMessages`（8）、`maxSendPerMinute/Hour`、`maxMessageChars`（500）、`gap*` | 发送节流与硬上限（超长 400、超条数 429） |
@@ -145,6 +145,9 @@
 | `history` | `enabled`、`limit`、`maxAgeMinutes`、`wake`、`includePrivate` | 上线补历史 |
 | `initialPromptMaxChars` | `2000` | 每会话首次唤醒的"环境说明"上限 |
 | `media` | `maxBytes`（8MB）、`maxPixels`（64MP）、`maxCount`（5） | 图片/表情/动图限制 |
+| `scenes` | `defaultPrivate.label/toneHint`、`defaultGroup.label/toneHint/memoryGuard`、`overrides.<key>` | **场合档位**（2026-10-31）：唤醒提示词顶部注入【场合】卡；`toneHint` 是该场合的语气提示，`memoryGuard`（默认群聊开）决定是否注入「私聊的事别搬到群里」守卫 |
+| `memoryScene` | `groupExcludePrivate`（默认 `false`）、`honorAudience`（默认 `true`） | 记忆卡注入的场合过滤：`honorAudience` 认记录级 `audience` 标记；`groupExcludePrivate=true` 时群聊连 `[私聊]` 记录也过滤（硬开关，默认关=记忆共同） |
+| `crossSceneSend` | `enabled`（默认 **`false`**）、`allowTargets`（如 `["group:123"]`）、`maxPerHour`（6）、`maxChars`（200） | **受控跨场合投递**：只允许主人私聊 → 显式白名单群；默认关，开了也必须配 `allowTargets`。桥接代投、不给模型目标 token；过敏感/身份/长度/频率/token 回合额度/静默/鱼群闸 |
 
 #### 1.11.1 语音（`socialV2.voice`）
 

@@ -2965,3 +2965,29 @@ return list[0] ?? pool[0];
   `build-agent-preset-patches --check` 一致。
 - **生效方式**：重启桥接（限流/路由）+ 重启 DSH（MCP 描述/preset 装配）；本次未重启。
 
+## 场合作用域（路线 A）的三个坑：TDZ / 测试写进仓库根 / 一份记忆卡不可能按场景渲染两次（2026-10-31）
+
+- **现象**：新增 `POST /api/socialV2/send-cross` 后第一次真机/夹具请求就 500，报
+  `Cannot access 'selfExpressionProtectedIds' before initialization`。
+- **根因**：`src/bridge.js` 的 300+ 个路由分支全写在**同一个 `http.createServer` 回调函数体**里。
+  `selfExpressionProtectedIds` 是在 set-signature 分支里声明的 `const`（源码中位置更靠后）；从更早的
+  send-cross 分支引用它，就命中了同一函数作用域的 **TDZ**——而且因为执行永远到不了那条声明，它是**必现**而不是偶发。
+  被 import 的纯函数（`findIdentityLeaks`）没问题，问题是「复用同一回调里更靠后的局部 const」。
+- **修法**：send-cross 分支就地算一份只读 `protectedIds`（从 `cfg.ownerQQ/admin/allow.*/deny.*` 过滤 4~15 位数字），
+  不复用后面的局部变量。**教训**：在这个单回调里，跨分支共享逻辑要么提到 main 作用域的函数，要么就地写，
+  绝不能引用「位置更靠后的 const/let」。
+- **测试坑 1**：`scripts/audit-bridge-harness.mjs` 里 `activePersonaFile: () => ''` 会让
+  `path.dirname('')` 变成 `'.'`——style-notes 的写入路径就成了**仓库根目录的 `style-notes.md`**。fixture 必须指向
+  `temp/dsh/surfcore/persona.md` 这类不存在但安全的路径，测试只碰临时目录。
+- **测试坑 2**：VM 里创建的对象与主 realm 原型不同，`assert.deepStrictEqual` 会报
+  「Values have same structure but are not reference-equal」。断言 fixture 里的大对象先过
+  `JSON.parse(JSON.stringify(x))` 再比较。
+- **设计坑**：记忆卡的注入文件是**一份**（所有 QQ 会话共用，这是「记忆共同」的实现方式），所以「按场合过滤」
+  不可能靠插件渲染两次；只能：渲染侧写标记（`[仅私聊可见]/[仅群可见]`），桥接读文件时按当前会话过滤
+  （`filterMemoryCardPromptForScene()`）。别试图在插件里按 key 渲染第二份 prompt——桥接/插件是不同进程，
+  文件是唯一契约，两份文件会出现「谁先写谁生效」的竞态。
+- **验证**：`test-scene-scope`（纯函数 12 项）+ `test-scene-wiring`（真实 bridge + 夹具 7 项，包含 send-cross 全闸门）
+  已进 `test:audit`；`test-memory-card-wiring` 更新为带 key 的记忆卡注入断言；`test-core-rev-sync` 在
+  `npm run sync:engine-rev` 后通过。
+
+

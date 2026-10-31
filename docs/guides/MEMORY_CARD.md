@@ -79,6 +79,7 @@ B站 调度器每次醒来的统一上下文 = 人设卡 + 管理员 + 身份对
   "botReply": "她回：抱抱你，不要难过",
   "isSelf": false,
   "conversationKey": "private:123",
+  "audience": "any",
   "mergedFrom": [],
   "importance": 82,
   "importanceReasons": ["主人私聊", "情绪浓度 24"],
@@ -91,6 +92,26 @@ B站 调度器每次醒来的统一上下文 = 人设卡 + 管理员 + 身份对
   "recallCount": 0
 }
 ```
+
+### 3.1 场合作用域（2026-10-31 路线 A）
+
+记忆卡是「记忆共同」的主载体：同一份 `memory-card-prompt-qq.md` 同时进私聊和群聊提示词，每条记录默认带
+`[私聊]` / `[群里]` 渲染标签（`conversationTag()`，从 `private` / `conversationKey` 推导）。
+
+在此之上增加**记录级可见性**，用来处理「这条不该在群里出现」的少数情况：
+
+| 字段 | 值 | 行为 |
+| --- | --- | --- |
+| `audience` | `any`（默认） | 私聊/群聊都可见——记忆共同，日常绝大多数记录都是这个 |
+| | `private-only` | 渲染成 `[仅私聊可见]`，桥接在**群聊**注入时整行过滤 |
+| | `group-only` | 渲染成 `[仅群可见]`，桥接在**私聊**注入时整行过滤 |
+
+- 桥接不解析 JSON，只读渲染好的 md：`src/scene-scope.js` 的 `filterMemoryCardPromptForScene()` 按行过滤标记；
+  渲染侧（`recordLine()`）写标记。
+- 过滤开关在 `config.json` 的 `socialV2.memoryScene`：`honorAudience`（默认 `true`）、
+  `groupExcludePrivate`（默认 `false`；设 `true` 时群聊连 `[私聊]` 普通记录也一起过滤，是「宁可少记不可串台」的硬开关）。
+- **赋值入口**：目前只有手工编辑 `memory-card.json`（或后续控制台）；不按关键词/来源自动推断——误判会把该共享的
+  记忆藏起来。模型侧的「场合约束」走轻记忆 `rule`（scope）+ style-notes 作用域，见 `RULES.md`「记忆共同、分清场合」。
 
 ---
 

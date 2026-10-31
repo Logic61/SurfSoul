@@ -171,7 +171,7 @@ DSH agent ──► 决定用工具发言 / 或（reserved 一代）直接输出
 ### 5.2 出站：agent 说了一句，到 QQ
 
 ```
-agent 调 qq_send_message / qq_reply / qq_send_burst / qq_send_voice / qq_send_sticker
+agent 调 qq_send_message / qq_reply / qq_send_burst / qq_send_voice / qq_send_sticker / qq_send_cross_scene
   └─► MCP server（stdio）→ 控制台 HTTP（带 x-agent-token + x-agent-call）
         ├─ ① 会话令牌有效？命中活跃会话？（防"漏传令牌升级成管理端全权"的 confused deputy）
         ├─ ② 目标在白名单里？（发送白名单是硬闸，和管理端无关）
@@ -182,6 +182,10 @@ agent 调 qq_send_message / qq_reply / qq_send_burst / qq_send_voice / qq_send_s
         ├─ ⑦ 写审计（tool-calls.jsonl），按 messageId 校验回执
         └─ ⑧ 回执成功 → 记进 social-v2（自己的发言、未读水位、收尾判断的输入）
 ```
+
+> **跨场合投递（2026-10-31 路线 A）**：`qq_send_cross_scene` 是唯一的「不回到当前会话」的发送通道，且只开
+> 「主人私聊 → `socialV2.crossSceneSend.allowTargets` 显式白名单群」：默认关、目标双白名单、只发一条纯文本，
+> 额外过身份闸/长度/每小时频率/token 回合额度/静默/鱼群；桥接代投，**不把目标群的 token 交给模型**。
 
 ### 5.3 唤醒与潜水（二代仿真）
 
@@ -207,6 +211,11 @@ B站 行为 ─┼─► memory-inbox.jsonl ─►（插件，每 10 分钟）�
   和主人相关且重要度 ≥ 65 的永不遗忘。容量 80/90/100% 三档告警，可自动压缩到 90%。
 - **隐私**：每条记忆带 `scope`（qq / bili / pet / shared）；B站 的注入只取 `bili/shared`，
   共享 scope 会脱敏 5–12 位连续数字；时政/娱乐圈等 `sensitive` 不进 B站。
+- **场合（2026-10-31 路线 A）**：记忆共同——同一份衰减卡同时进私聊和群聊；每条记录渲染 `[私聊]/[群里]` 标签，
+  另有可选 `audience`（any / private-only / group-only）在桥接注入时按当前场合整行过滤（默认 any）。
+  「规矩」不靠删记忆：轻记忆有带 scope 的 `rule`（global/private/group/group:<id>），style-notes 行首可写
+  `[全局]/[私聊]/[群]/[群:123]`；每轮唤醒再注入一张【场合】卡（当前是哪种场合、档位、边界）。详见
+  [`MEMORY_CARD.md`](MEMORY_CARD.md) §3.1 与 [`../RULES.md`](../../RULES.md)「记忆共同、分清场合」。
 
 ### 5.5 目的机制：主动找主人
 

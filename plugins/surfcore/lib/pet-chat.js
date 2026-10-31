@@ -24,7 +24,7 @@ import { resolvePersonaFile } from './persona.js';
 import { memoryCardPromptBlock } from './memory-card.js';
 import { activeMemoryPaths, readCurrentCharacter } from '../../../src/character-persona.js';
 import { adminFromSources } from '../../../src/admin-identity.js';
-import { appendMemoryInboxEvent } from '../../../src/memory-card.js?rev=memfix-bf81dfb676';
+import { appendMemoryInboxEvent } from '../../../src/memory-card.js?rev=memfix-f0b02c2270';
 import { synthesizeToFile, wavDurationMs } from '../../../src/voice-tts.js';
 
 const ONE_SECOND = 1000;

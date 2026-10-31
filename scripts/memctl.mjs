@@ -13,10 +13,14 @@
 //
 // 用法（在 owner 私聊里，她有本地工具）：
 //   node scripts/memctl.mjs style add "别用括号写内心戏"
+//   node scripts/memctl.mjs style add --scope group "群里别发路径/命令"   # 作用域：global/private/group/group:<群号>
 //   node scripts/memctl.mjs style list
 //   node scripts/memctl.mjs style rm 3
 //   node scripts/memctl.mjs mem add "羽不吃香菜，别再问他要不要放"
 //   node scripts/memctl.mjs mem recent 8
+//
+// 2026-10-31 路线 A：style-notes 支持场合作用域（旧行没有前缀 = 全局，向后兼容）。
+// 这里用 src/scene-scope.js 的同一份解析/格式化实现，不再手拼字符串。
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -26,6 +30,9 @@ import {
 import {
   resolveMemoryCardPaths, appendMemoryInboxEvent, loadMemoryCard, normalizeCard,
 } from '../src/memory-card.js'
+import {
+  formatStyleNoteLine, normalizeRuleScope, parseStyleNoteLine,
+} from '../src/scene-scope.js'
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const argv = process.argv.slice(2)
@@ -52,28 +59,47 @@ function ownerQQ() {
   }
 }
 
-const [group, action, ...rest] = argv
-const text = rest.join(' ').trim()
+const [group, action, ...rawArgs] = argv
+// style add 支持 --scope global|private|group|group:<群号>（缺省 global；here 不适用 CLI）
+function splitScopeArgs(args) {
+  let rawScope = 'global'
+  const parts = []
+  for (let i = 0; i < args.length; i += 1) {
+    const item = String(args[i] ?? '')
+    if (item === '--scope') { rawScope = String(args[i + 1] ?? ''); i += 1; continue }
+    if (item.startsWith('--scope=')) { rawScope = item.slice('--scope='.length); continue }
+    parts.push(item)
+  }
+  return { rawScope, text: parts.join(' ').trim() }
+}
+const { rawScope, text } = splitScopeArgs(rawArgs)
 
 if (group === 'style') {
   const file = styleFile()
   if (action === 'list' || !action) {
     const lines = readStyleLines()
     if (!lines.length) console.log('（还没有现场修正）')
-    else lines.forEach((line, i) => console.log(`${String(i + 1).padStart(2)}. ${line.replace(/^-\s*/, '')}`))
+    else lines.forEach((line, i) => {
+      const parsed = parseStyleNoteLine(line)
+      const scope = parsed?.scope && parsed.scope !== 'global' ? `[${parsed.scope}] ` : ''
+      console.log(`${String(i + 1).padStart(2)}. ${scope}${line.replace(/^-\s*/, '')}`)
+    })
     console.log(`\n文件：${file}`)
     process.exit(0)
   }
   if (action === 'add') {
-    if (!text) { console.error('用法：memctl style add "一句话"'); process.exit(1) }
+    if (!text) { console.error('用法：memctl style add [--scope global|private|group|group:<群号>] "一句话"'); process.exit(1) }
+    const scope = normalizeRuleScope(rawScope)
+    if (!scope) { console.error('scope 只能是 global / private / group / group:<群号>'); process.exit(1) }
     fs.mkdirSync(path.dirname(file), { recursive: true })
     // 已经有一条一样的就不重复写（他常一句话说两遍）
     if (readStyleLines().some((line) => line.replace(/^-\s*/, '').includes(text))) {
       console.log(`已经有了，没重复写：${text}`)
       process.exit(0)
     }
-    fs.appendFileSync(file, `- ${today()} ${text.replace(/\s*\n\s*/g, ' ')}\n`, 'utf8')
-    console.log(`记下了（下一轮消息就生效）：${text}`)
+    const line = formatStyleNoteLine({ scope, date: today(), text })
+    fs.appendFileSync(file, `${line}\n`, 'utf8')
+    console.log(`记下了（下一轮消息就生效）：${line}`)
     process.exit(0)
   }
   if (action === 'rm') {

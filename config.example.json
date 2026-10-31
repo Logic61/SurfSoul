@@ -223,7 +223,8 @@
       "getSelfImage": true,
       "setSignature": true,
       "sendQzone": true,
-      "sendVoice": false
+      "sendVoice": false,
+      "crossSceneSend": true
     },
     "wake": {
       "defaultMode": "diving",
@@ -384,6 +385,28 @@
       "maxBytes": 8388608,
       "maxPixels": 64000000,
       "maxCount": 5
+    },
+    "scenes": {
+      "defaultPrivate": {
+        "label": "私聊",
+        "toneHint": ""
+      },
+      "defaultGroup": {
+        "label": "群聊",
+        "toneHint": "",
+        "memoryGuard": true
+      },
+      "overrides": {}
+    },
+    "memoryScene": {
+      "groupExcludePrivate": false,
+      "honorAudience": true
+    },
+    "crossSceneSend": {
+      "enabled": false,
+      "allowTargets": [],
+      "maxPerHour": 6,
+      "maxChars": 200
     }
   },
   "webSearch": {

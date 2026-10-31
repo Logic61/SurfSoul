@@ -318,6 +318,7 @@ const TOOL_CONFIG_FLAGS = {
   qq_set_wake_config: 'setWakeConfig',
   qq_send_burst: 'sendBurst',
   qq_send_message: 'sendMessage',
+  qq_send_cross_scene: 'crossSceneSend',
   qq_wait_for_messages: 'waitMessages',
   qq_report_feedback: 'feedback',
   qq_get_my_recent_messages: 'getMyRecent',
@@ -769,6 +770,33 @@ server.tool(
   }
 );
 
+// 受控跨场合投递（2026-10-31 路线 A）：只在「主人私聊」里、主人明确让你带一句话到某个群时使用。
+// 硬闸门全在桥接侧：来源必须是主人私聊、目标必须在操作者配置的 allowTargets 白名单里、
+// 还要过发送白名单 / 敏感信息 / 身份闸 / 频率。工具被关掉时注册期就不会出现。
+server.tool(
+  'qq_send_cross_scene',
+  '受控跨场合投递：从**主人私聊**把一条文本发到操作者显式允许的某个群。只在主人明确说「帮我把这句话发到某群 / 带句话过去」时使用；没被明确要求就不要主动用，更不要用它转发私聊里的私事、账号号码或任何隐私信息。只能发一条纯文本（不能引用/不能图片/不能连发）；目标必须已在桥接配置里开过 allowTargets，否则会被拒绝。发送失败不要重试，先看错误。',
+  {
+    key: z.string().describe('当前会话 key（必须是主人私聊，格式 private:QQ号）'),
+    token: z.string().describe('会话令牌（见唤醒提示中的【会话令牌】）'),
+    target: z.string().describe('目标群 key，格式 group:群号（必须在操作者配置的跨场合白名单里）'),
+    message: z.string().describe('要投递的纯文本，一条，尽量短')
+  },
+  async ({ key, token, target, message }) => {
+    try {
+      const data = await agentApi('/api/socialV2/send-cross', {
+        method: 'POST',
+        body: JSON.stringify({ key, target, message }),
+        headers: { 'x-agent-token': token },
+        timeoutMs: 60000
+      });
+      return { content: [{ type: 'text', text: serializeModelData(data) }] };
+    } catch (error) {
+      return { content: [{ type: 'text', text: `跨场合投递失败：${error?.message ?? error}` }], isError: true };
+    }
+  }
+);
+
 if (cfg.socialV2?.tools?.sendPoke !== false) {
   server.tool(
     'qq_send_poke',
@@ -984,18 +1012,19 @@ server.tool(
 
 server.tool(
   'qq_memory_append',
-  '记录一条轻量记忆：activeTopic=进行中的话题；pendingThought=你想说但还没说的话；memberImpression=对某位群友的印象。记忆会持久化，并在后续唤醒/qq_get_prompt 中自动出现。',
+  '记录一条轻量记忆：activeTopic=进行中的话题；pendingThought=你想说但还没说的话；memberImpression=对某位群友的印象；rule=**规矩/说话习惯**（主人定的：「以后别叫管理员」「群里别发路径」这类，要当指令遵守、不是普通记忆）。记忆会持久化，并在后续唤醒/qq_get_prompt 中自动出现。rule 必须用 extra.scope 指定生效场合：global=所有场合都认（私聊里定的规矩群里也认）/ private=只私聊 / group=任何群 / group:<群号>=只在那个群 / here=当前场合。不写 scope 默认 global。',
   {
     key: z.string().describe('会话 key，格式 group:群号 或 private:QQ号'),
     token: z.string().describe('会话令牌（见唤醒提示中的【会话令牌】）'),
-    category: z.enum(['activeTopic', 'pendingThought', 'memberImpression']).describe('记忆类别'),
-    content: z.string().describe('记忆内容，例如话题、想说的话、对某人的印象标签'),
+    category: z.enum(['activeTopic', 'pendingThought', 'memberImpression', 'rule']).describe('记忆类别；rule=规矩/说话习惯（带作用域）'),
+    content: z.string().describe('记忆内容，例如话题、想说的话、对某人的印象标签、或一条规矩'),
     extra: z.object({
       target: z.string().optional().describe('memberImpression 时的群友名字/昵称'),
       participants: z.array(z.string()).optional().describe('activeTopic 的参与者列表'),
       pendingQuestion: z.string().optional().describe('activeTopic 里还没问出口的问题'),
       motivation: z.string().optional().describe('pendingThought 的动机，如 curiosity/sociability'),
-      expiresAtMs: z.number().optional().describe('pendingThought 过期毫秒数，默认 2 小时')
+      expiresAtMs: z.number().optional().describe('pendingThought 过期毫秒数，默认 2 小时'),
+      scope: z.string().optional().describe('rule 的作用域：global / private / group / group:<群号> / here（默认 global）')
     }).optional().describe('附加信息')
   },
   async ({ key, token, category, content, extra }) => {
@@ -1014,11 +1043,11 @@ server.tool(
 
 server.tool(
   'qq_memory_query',
-  '查看当前会话的轻量记忆：进行中的话题、你想说但还没说的话、对群友的印象（只读）。',
+  '查看当前会话的轻量记忆：进行中的话题、你想说但还没说的话、对群友的印象、按场合生效的规矩（只读）。跨场合的全局规矩也会合并在里面。',
   {
     key: z.string().describe('会话 key，格式 group:群号 或 private:QQ号'),
     token: z.string().describe('会话令牌（见唤醒提示中的【会话令牌】）'),
-    category: z.enum(['activeTopic', 'pendingThought', 'memberImpression']).optional().describe('可选：只看某一类记忆')
+    category: z.enum(['activeTopic', 'pendingThought', 'memberImpression', 'rule']).optional().describe('可选：只看某一类记忆')
   },
   async ({ key, token, category }) => {
     try {
@@ -1034,11 +1063,11 @@ server.tool(
 
 server.tool(
   'qq_memory_remove',
-  '删除一条轻量记忆：activeTopic/pendingThought 用 content 匹配原文删除；memberImpression 用 target 参数指定群友名字删除。',
+  '删除一条轻量记忆：activeTopic/pendingThought/rule 用 content 匹配原文删除；memberImpression 用 target 参数指定群友名字删除。',
   {
     key: z.string().describe('会话 key，格式 group:群号 或 private:QQ号'),
     token: z.string().describe('会话令牌（见唤醒提示中的【会话令牌】）'),
-    category: z.enum(['activeTopic', 'pendingThought', 'memberImpression']).describe('记忆类别'),
+    category: z.enum(['activeTopic', 'pendingThought', 'memberImpression', 'rule']).describe('记忆类别'),
     content: z.string().optional().describe('要删除的话题/想法原文（memberImpression 不需要）'),
     target: z.string().optional().describe('memberImpression 时要删除的群友名字')
   },
@@ -1058,11 +1087,11 @@ server.tool(
 
 server.tool(
   'qq_memory_clear',
-  '清空轻量记忆：不传 category 清空全部；传 activeTopic/pendingThought/memberImpression 只清空对应类别。',
+  '清空轻量记忆：不传 category 清空全部；传 activeTopic/pendingThought/memberImpression/rule 只清空对应类别。',
   {
     key: z.string().describe('会话 key，格式 group:群号 或 private:QQ号'),
     token: z.string().describe('会话令牌（见唤醒提示中的【会话令牌】）'),
-    category: z.enum(['activeTopic', 'pendingThought', 'memberImpression']).optional().describe('要清空的类别，缺省清空全部')
+    category: z.enum(['activeTopic', 'pendingThought', 'memberImpression', 'rule']).optional().describe('要清空的类别，缺省清空全部')
   },
   async ({ key, token, category }) => {
     try {
