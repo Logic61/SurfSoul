@@ -224,7 +224,7 @@ plugins/surfcore/presets/<preset>.patch.yml                    ← 生成物（�
 | 429 | 频率超限 | 减条数/放慢 |
 | 工具名拼错 → 静默失效 | `restrict()` 对未知名字抛错被吞 | 跑 `npm run scan:tool-names` |
 | DSH 升级后工具集体消失 | MCP 配置被覆盖 / preset 行没重建 | 重跑 `setup-dsh.mjs` |
-| `qq_send_voice` 一直 502 | 语音引擎没启动 | 设置页语音页启动对应包 |
+| `qq_send_voice` 报 502 / 「合成超时」 | 语音引擎没启动，或 CPU 被别的大型任务占满导致合成慢过超时（本地包是 CPU 推理；错误现为 504 + 「改回打字」） | 启动对应包；或把 `socialV2.voice.tts.timeoutMs` 调大后重启桥接（见 `SUBSYSTEM-VOICE.md` §4.4） |
 | `qq_wait_for_messages` 报「必须先做沉睡前观察」 | 直接 `set_wake_config` 潜水 | 先 wait 300000 |
 
 ---

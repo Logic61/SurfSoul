@@ -54,6 +54,14 @@
 
 - 当前版本：`0.1.0`（SurfCore 合体版），目标 DSH `0.2.1-rc.2`。
 - 已完成：QQ 桥接内核、四模式、控制台十页、B站生物钟/评论/动态、双向记忆、身份对齐、语音、表情包、黑话学习、token 看板、**记忆卡（长期记忆 / 遗忘 / 容量告警）**、**每日 token 额度（QQ/B站/其他/总额，双单位，80% 每天一次）**。
+- 已完成（2026-10-31 09:30–10:30）：**语音「合成超时」修复（错误分类 + 150s 预算）**——用户 23:22/23:29 两次发语音
+  都报「合成超时（>60s）」，只丢下一句「修复语音功能」。只读诊断确认：不是 GPU（本地包 GSV 是 CPU 推理），
+  是主人自己的「犬类项目」重训流水线压满 CPU 导致单条合成 70~126s；训练 00:19 结束后自行恢复 9~17s。
+  修代码侧放大缺陷：`voice-tts.js` 给错误打 `code/statusCode`、`bridge.js` 新增 `voiceSynthError()` 统一分类
+  （超时→504、引擎→502；之前被中文正则兜底成 400），AI 通道 5xx 文案追加「改回打字」，合成耗时进日志；
+  本机 `tts.timeoutMs` 60000→150000；顺手修 R37（群聊 `who=list` 引用未定义 `last`）。
+  新测试 `test-voice-route-errors.mjs` 进 `test:audit`；复盘 `docs/cases/2026-10-31-voice-tts-timeout.md`。
+  真正的提速（GSV 换 GPU）列为可选后续（需新 venv + 兼容性验证，见 HANDOFF）。
 - 已完成（2026-10-30 19:20–20:10）：**B站 可引用分镜 `watch-storyboard`（C-1 落地）**——用户要求把
   `dsh-video-storyboard` 的「分镜方法」用到 surfcore 刷B站板块。新命令：surfcore 取 720p 直链 + WBI 官方字幕 →
   调已装分镜 CLI 出「编号格 + 可寻址清单 + 音频条」；官方字幕 JSON 直接当 `transcriptFile`，不需要 ASR/yt-dlp/cookies.txt；

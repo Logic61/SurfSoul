@@ -1980,7 +1980,9 @@ async function main() {
       return '这条消息已经发过语音了，等主人再说一句';
     }
     if (who === 'list') {
-      const ok = last.isOwner === true || cfgVoice.trigger.members.includes(String(last.userId));
+      // 曾经这里引用未定义的 last（R37）：who='list' 一用就 ReferenceError。
+      const lastSpeaker = voiceLastSpeaker.get(String(key));
+      const ok = lastSpeaker?.isOwner === true || cfgVoice.trigger.members.includes(String(lastSpeaker?.userId ?? ''));
       if (!ok) return '该成员不在语音触发名单里';
     }
     return null;
@@ -2029,6 +2031,30 @@ async function main() {
   }
 
   /**
+   * 语音合成错误 → HTTP 状态 + 给模型的可读文案。
+   *
+   * 必须优先用 error.statusCode（voice-tts.js 已结构化标注）；中文文本只做旧错误的兜底。
+   * 历史缺陷（SUBSYSTEM-VOICE §10.6 #5）：超时文案「合成超时」不含 /语音合成|TTS/，
+   * 被中文正则兜底成 400，模型据此以为"参数不对"。
+   * hint=true（AI 通道）时给 5xx 文案追加「改回打字」：MCP 层会丢掉 HTTP 状态码，
+   * 模型只能看到文案，所以兜底指令必须写进文案里。
+   */
+  function voiceSynthError(error, { hint = false } = {}) {
+    const raw = String(error?.message ?? error);
+    if (/频率超限/.test(raw)) return { status: 429, error: raw };
+    let status = Number(error?.statusCode);
+    if (![400, 413, 429, 500, 502, 503, 504].includes(status)) {
+      if (/合成超时/.test(raw)) status = 504;
+      else if (/TTS 服务没起来|TTS 服务返回|TTS 返回了空音频/.test(raw)) status = 502;
+      else status = 400;
+    }
+    const text = hint && status >= 500 && !/改回打字/.test(raw)
+      ? `${raw}（本地语音引擎这次没成功：请改回打字，不要重试，也不要假装发了语音）`
+      : raw;
+    return { status, error: text };
+  }
+
+  /**
    * text → 本地 wav。AI 通道与操作者通道共用，抛出的错误已经是可直接展示的句子。
    */
   async function synthesizeVoiceText(text, { character = '', voice = '', route = '' } = {}) {
@@ -2039,17 +2065,25 @@ async function main() {
     if (say.length > vc.tts.maxChars) {
       throw new Error(`要说的话最多 ${vc.tts.maxChars} 字（收到 ${say.length}）`);
     }
-    const r = await synthesizeToFile({
-      text: say,
-      character: voice ? '' : character || vc.tts.character,
-      voice: voice || '',
-      baseUrl: (route && vc.tts.endpoints?.[route]) || vc.tts.endpoints?.[vc.tts.route] || vc.tts.baseUrl,
-      timeoutMs: vc.tts.timeoutMs,
-      // 换了音色/映射就把它 +1，否则会一直命中旧音色的缓存
-      cacheVersion: vc.tts.cacheVersion ?? null,
-      outDir: vc.tts.dir
-    });
-    return { path: r.path, via: 'tts', ttsCached: r.cached, ttsDurationMs: r.durationMs };
+    const t0 = Date.now();
+    try {
+      const r = await synthesizeToFile({
+        text: say,
+        character: voice ? '' : character || vc.tts.character,
+        voice: voice || '',
+        baseUrl: (route && vc.tts.endpoints?.[route]) || vc.tts.endpoints?.[vc.tts.route] || vc.tts.baseUrl,
+        timeoutMs: vc.tts.timeoutMs,
+        // 换了音色/映射就把它 +1，否则会一直命中旧音色的缓存
+        cacheVersion: vc.tts.cacheVersion ?? null,
+        outDir: vc.tts.dir
+      });
+      // 合成耗时进日志：下次再报「超时」时，先能分清是引擎慢还是引擎挂了
+      log(`[voice] TTS 合成完成 ${Date.now() - t0}ms（${say.length} 字${r.cached ? '，本地缓存' : ''}）`);
+      return { path: r.path, via: 'tts', ttsCached: r.cached, ttsDurationMs: r.durationMs };
+    } catch (error) {
+      log(`[voice] TTS 合成失败 ${Date.now() - t0}ms：${error?.code ?? ''} ${error?.message ?? error}`);
+      throw error;
+    }
   }
 
   function voiceLibrary() {
@@ -6850,8 +6884,8 @@ async function main() {
                 })
               : resolveVoicePathForOperator(body.file ?? body.path ?? '');
           } catch (error) {
-            const msg = error?.message ?? String(error);
-            sendJson({ ok: false, error: msg }, /语音合成|TTS/.test(msg) ? 502 : 400);
+            const r = voiceSynthError(error);
+            sendJson({ ok: false, error: r.error }, r.status);
             return;
           }
           // 音量参数先校验（写错了当场告诉你，不要等到发的时候才炸）
@@ -6979,9 +7013,8 @@ async function main() {
                 route: body.route ? String(body.route) : ''
               });
             } catch (error) {
-              const msg = error?.message ?? String(error);
-              const code = /频率超限/.test(msg) ? 429 : /语音合成|TTS/.test(msg) ? 502 : 400;
-              sendJson({ ok: false, error: msg }, code);
+              const r = voiceSynthError(error, { hint: true });
+              sendJson({ ok: false, error: r.error }, r.status);
               return;
             }
           } else {

@@ -11,6 +11,20 @@ import path from 'node:path';
 
 export const DEFAULT_BASE_URL = 'http://127.0.0.1:8765';
 
+/**
+ * 抛给调用方（桥接/桌宠）的可分类错误。
+ *
+ * 为什么必须带 code/statusCode：桥接历史上靠中文正则 `/语音合成|TTS/` 猜 HTTP 状态码，
+ * 而超时文案是「合成超时（>60s）」——不含那两个词，被兜底成 400（docs §10.6 #5）。
+ * 只改文案不可靠（以后换个说法又坏），错误类型必须结构化。
+ */
+function ttsFailure(message, code, statusCode) {
+  const error = new Error(message);
+  error.code = code;
+  error.statusCode = statusCode;
+  return error;
+}
+
 /** 按内容寻址：同一句话重复发不会在磁盘上堆文件（voxd 端也有缓存）。 */
 export function ttsKey({ baseUrl, text, character, voice, style, cacheVersion }) {
   return crypto
@@ -54,8 +68,8 @@ export async function synthesizeToFile({
   fetchImpl = fetch
 } = {}) {
   const say = String(text ?? '').trim();
-  if (!say) throw new Error('要合成的内容是空的');
-  if (!outDir) throw new Error('缺少 outDir（TTS 缓存目录）');
+  if (!say) throw ttsFailure('要合成的内容是空的', 'TTS_EMPTY_TEXT', 400);
+  if (!outDir) throw ttsFailure('缺少 outDir（TTS 缓存目录）', 'TTS_INTERNAL', 500);
   fs.mkdirSync(outDir, { recursive: true });
 
   const url = String(baseUrl || DEFAULT_BASE_URL).replace(/\/+$/, '');
@@ -80,11 +94,11 @@ export async function synthesizeToFile({
       signal: AbortSignal.timeout(timeoutMs)
     });
   } catch (error) {
-    const hint =
-      error?.name === 'TimeoutError'
-        ? `合成超时（>${Math.round(timeoutMs / 1000)}s）`
-        : 'TTS 服务没起来（voxd 是否在运行？）';
-    throw new Error(`${hint}：${error?.message ?? error}`);
+    const timedOut = error?.name === 'TimeoutError';
+    const hint = timedOut
+      ? `合成超时（>${Math.round(timeoutMs / 1000)}s）`
+      : 'TTS 服务没起来（voxd 是否在运行？）';
+    throw ttsFailure(`${hint}：${error?.message ?? error}`, timedOut ? 'TTS_TIMEOUT' : 'TTS_UNAVAILABLE', timedOut ? 504 : 502);
   }
 
   if (!res.ok) {
@@ -93,10 +107,10 @@ export async function synthesizeToFile({
       const j = await res.json();
       detail = j?.detail ?? j?.error ?? '';
     } catch {}
-    throw new Error(`TTS 服务返回 ${res.status}${detail ? `：${detail}` : ''}`);
+    throw ttsFailure(`TTS 服务返回 ${res.status}${detail ? `：${detail}` : ''}`, 'TTS_HTTP_ERROR', 502);
   }
   const buf = Buffer.from(await res.arrayBuffer());
-  if (buf.length <= 44) throw new Error('TTS 返回了空音频');
+  if (buf.length <= 44) throw ttsFailure('TTS 返回了空音频', 'TTS_EMPTY_AUDIO', 502);
 
   const tmp = `${file}.${process.pid}.tmp`;
   fs.writeFileSync(tmp, buf);

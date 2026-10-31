@@ -2848,3 +2848,27 @@ return list[0] ?? pool[0];
   里，但**该脚本与 `test-agent-preset-patches.mjs` 当前是既有基线红**（2026-10-29 本地工具改 owner-only
   后测试旧期望未同步，与本次无关；全量 `npm run test:audit` 改动前后同为 72/83、失败清单相同）。
   以后新增任何第三方插件工具，都照此同步名单与断言。
+
+
+## 语音「合成超时」被中文正则兜底成 HTTP 400，模型以为参数错了
+
+- **现象**：QQ 里让她发语音，桥接日志 `发送语音失败：合成超时（>60s）：The operation was aborted due to timeout`；
+  模型收到的同一条错误在 AI 通道被返回 **HTTP 400**（不是 5xx），于是按「参数不对」处理。
+  2026-10-30 23:22/23:29 连发两条都这样，AI 只好改文字。
+- **根因**：`src/voice-tts.js` 只 `throw new Error(message)`，没有 `code/statusCode`；
+  `src/bridge.js` 用中文正则 `/语音合成|TTS/` 猜状态码，而超时文案「合成超时」两个词都不含 → 兜底 400。
+  引擎侧为什么慢：本地 GSV 是 **CPU 推理**（`.venv-gsv` 为 `torch 2.5.1+cpu`，`tts_infer.yaml: device: cpu`），
+  主人自己的重训流水线把 CPU 压满时，6~14 字要 **70~126 秒**（分阶段 BERT 16~21s / T2S 42~82s / 音频 12~24s），
+  超过桥接默认 60s 预算。GPU 不是原因（故障期 GPU 12~28%、显存 4.1/8.1GB、无热降频）。
+- **修法（2026-10-31）**：`voice-tts.js` 新增 `ttsFailure(message, code, statusCode)`（超时 `TTS_TIMEOUT`/504、
+  连不上 `TTS_UNAVAILABLE`/502、voxd 非 2xx `TTS_HTTP_ERROR`/502）；`bridge.js` 新增 `voiceSynthError()`
+  统一分类（优先 `statusCode`，中文文案只兜底旧错误），AI 通道 5xx 文案追加「请改回打字，不要重试」
+  （MCP 层会丢状态码，文案是模型唯一能看到的），合成耗时进日志；顺手修了群聊 `trigger.who="list"`
+  引用未定义 `last`（R37）。本机 `config.json` 的 `tts.timeoutMs` 60000→150000。
+- **注意**：客户端 60s 放弃后 voxd 的合成**不会停**（`/v1/speak/file` 无 finally cancel、GSV 阻塞 urllib），
+  会继续占单 worker —— 所以「超时后立刻重试/换条发」只会排队，别指望 `/v1/stop`（无 job_id 会误伤桌宠，
+  且单句中途取消无效）。精确取消要改走 `/v1/speak` 流式（Phase 2）。
+- **验证**：`node scripts/test-voice-tts.mjs`（⑧⑨⑩ 断言 code/statusCode）、
+  `node scripts/test-voice-route-errors.mjs`（超时→504、引擎→502、旧式错误按文案兜底→504、失败不发消息）；
+  引擎侧看 `state/voice-packs/voice-local/logs/gsv/api.log` 每请求四段耗时，桥接侧看
+  `[voice] TTS 合成完成/失败 <ms>` 日志。完整复盘见 `docs/cases/2026-10-31-voice-tts-timeout.md`。

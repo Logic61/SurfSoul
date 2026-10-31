@@ -4,6 +4,22 @@
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 发布规则见 [docs/guides/VERSIONS.md](docs/guides/VERSIONS.md)。
 
+## [未发布] - 2026-10-31（语音合成超时，P0）
+
+### 修复
+
+- **语音「合成超时」被中文正则兜底成 HTTP 400**：`src/voice-tts.js` 的合成失败现在带
+  `code/statusCode`（超时 `TTS_TIMEOUT`→504、连不上 `TTS_UNAVAILABLE`→502、voxd 非 2xx
+  `TTS_HTTP_ERROR`→502、空音频→502）；`src/bridge.js` 新增 `voiceSynthError()` 统一分类，
+  AI/操作者两条路由共用；AI 通道 5xx 文案追加「请改回打字，不要重试」（MCP 层丢状态码，文案是
+  模型唯一能看到的）。顺手修群聊 `trigger.who="list"` 引用未定义 `last`（R37）。
+- **合成耗时/失败进桥接日志**：`[voice] TTS 合成完成 <ms>（N 字…）` / `[voice] TTS 合成失败 <ms>：<code> <msg>`，
+  下次再遇「超时」能直接分清「引擎慢」还是「引擎挂」。
+- **本机配置**：`socialV2.voice.tts.timeoutMs` 60000 → 150000（本地包是 CPU 版 GSV，2026-10-30 事故里
+  单条合成观测到 70~126s；MCP 外层 300s 仍是硬上限）。**需重启桥接生效**。
+- 测试：`scripts/test-voice-tts.mjs` 增 ⑧⑨⑩；新增 `scripts/test-voice-route-errors.mjs`
+  （进 `test:audit` 与 `npm run test-voice:errors`）。复盘：`docs/cases/2026-10-31-voice-tts-timeout.md`。
+
 ## [未发布] - 2026-10-30（P0 + P1 修复，未发版）
 
 ### 新增

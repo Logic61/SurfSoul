@@ -304,22 +304,35 @@ voxd 的请求模型（仓库外，只读参考 `<语音工程>/packages/voice-l
 | 501 | 要 ogg/mp3 但没 ffmpeg | `voxd/api.py:601-603`、`voxd/codec.py:110-111` |
 | 503 | 引擎合成失败（含 strict 音色失败、云端错误） | `voxd/api.py:595-597` |
 
-桥接侧只做了两层映射（`src/bridge.js:6573`、`:6702`）：
+桥接侧现在**优先用结构化错误码**（`voice-tts.js` 抛 `error.code/statusCode`，`src/bridge.js` 的 `voiceSynthError()` 分类）：
 
 ```
-错误文本匹配 /语音合成|TTS/  → 502（服务不可用，模型应改回打字）
-匹配 /频率超限/              → 429
-其余                         → 400
+error.statusCode 存在        → 直接用它（400/413/429/5xx）
+TTS_TIMEOUT（超时）          → 504（服务慢/卡住，模型应改回打字）
+TTS_UNAVAILABLE（连不上）    → 502
+TTS_HTTP_ERROR（voxd 非 2xx）→ 502，detail 透传
+TTS_EMPTY_AUDIO / 空文本     → 502 / 400
+文本匹配 /频率超限/          → 429
+旧错误（无 statusCode）兜底：/合成超时/→504、/TTS 服务…/→502、其余→400
 ```
 
-⚠️ 已知不一致：合成**超时**的消息是「合成超时（>60s）：…」（`src/voice-tts.js:83-87`），既不含「语音合成」也不含「TTS」，因此会被映射成 **400** 而不是 502。模型看到的提示语会说「参数不对」，而真实原因是服务慢/卡住（见 §10.6 #5）。
+> 2026-10-31 修：之前只有中文正则 `/语音合成|TTS/` 一层，超时文案「合成超时」不含这两个词 → 被兜底成 **400**
+> （见 §10.6 #5）。现在两条通道（AI / 操作者）都走 `voiceSynthError()`；AI 通道 5xx 文案会追加
+> 「请改回打字，不要重试」（MCP 层丢状态码，文案是模型唯一能看到的）。
+> 完整复盘：`docs/cases/2026-10-31-voice-tts-timeout.md`。
 
 ### 4.4 超时与失败
 
-- 客户端超时：`AbortSignal.timeout(tts.timeoutMs)`，默认 60s（`src/voice-tts.js:80`、`src/bridge.js:1979`）；桌宠把它夹到 3s–180s（`plugins/surfcore/lib/pet-chat.js:223`）。
-- **不重试**：一次 fetch，失败即抛（`src/voice-tts.js:74-88`）。重试会由模型决定（工具说明明确要求「不要重试」`src/mcp-snowluma-safe.js:1195`）。
-- 失败信息必须可读：连不上 → 「TTS 服务没起来（voxd 是否在运行？）」；超时 → 「合成超时」；HTTP 非 2xx → 「TTS 服务返回 503：detail」；空音频（≤44 字节）→ 「TTS 返回了空音频」（`src/voice-tts.js:82-99`）。
-- 落盘是**原子**的：先写 `<key>.wav.<pid>.tmp` 再 `renameSync`（`:101-103`），避免并发读到半截文件。
+- 客户端超时：`AbortSignal.timeout(tts.timeoutMs)`，默认 60s（`src/voice-tts.js`、`src/bridge.js` `voiceCfg()`）；桌宠把它夹到 3s–180s（`plugins/surfcore/lib/pet-chat.js:223`）。
+  **本机运行值 150000ms**（2026-10-31 起，`config.json`）：本地包是 CPU 推理，主人训练流水线把 CPU 压满时
+  单条合成观测到 70~126s；150s 覆盖该最坏值，MCP 外层 300s 是硬上限（合成 150s + 探测 2s + 网关 60s + 回读 30s ≈ 242s）。
+- **不重试**：一次 fetch，失败即抛（`src/voice-tts.js`）。重试会由模型决定（工具说明明确要求「不要重试」`src/mcp-snowluma-safe.js`）。
+  注意：客户端超时后 voxd 的合成任务**不会停**（`/v1/speak/file` 无 finally cancel、GSV 阻塞 urllib），
+  会继续占单 worker；超时后立刻重发同一条只会排队。`/v1/stop` 无 job_id 时会取消 active+全部 queued（会误伤桌宠），
+  且对单句中途的阻塞合成无效 —— 精确取消需改走 `/v1/speak` 流式（Phase 2）。
+- 失败信息必须可读：连不上 → 「TTS 服务没起来（voxd 是否在运行？）」；超时 → 「合成超时」；HTTP 非 2xx → 「TTS 服务返回 503：detail」；空音频（≤44 字节）→ 「TTS 返回了空音频」（`src/voice-tts.js`）。
+- 合成耗时/失败都进桥接日志：`[voice] TTS 合成完成 <ms>（N 字…）` / `[voice] TTS 合成失败 <ms>：<code> <message>`。
+- 落盘是**原子**的：先写 `<key>.wav.<pid>.tmp` 再 `renameSync`（`src/voice-tts.js`），避免并发读到半截文件。
 
 ### 4.5 缓存（两层）
 
@@ -659,7 +672,7 @@ voice.enabled 检查（仅这里，底层不查）          src/bridge.js:2323
 | `autoReadback` | bool | `true` | 默认是否做 `get_msg` 回读（AI 工具层会强制 true） | 重启桥接 |
 | `tts.enabled` | bool | `false` | 允许 `text` 现场合成；不影响发库文件 | 重启桥接（桌宠立即） |
 | `tts.baseUrl` | string | `http://127.0.0.1:8765` | 兜底地址；**通常被 `endpoints` 覆盖** | 重启桥接 |
-| `tts.timeoutMs` | number | `60000` | 合成超时；`<=0` 回落 60s | 重启桥接 |
+| `tts.timeoutMs` | number | `60000` | 合成超时；`<=0` 回落 60s。**慢引擎（CPU 推理）建议 150000**：本地包是 CPU 版 GSV，主人训练/重活并行时单条合成观测到 70~126s（2026-10-30 事故）；150s 覆盖该值，MCP 外层 300s 是硬上限 | 重启桥接 |
 | `tts.maxChars` | number | `120` | 单条合成字数上限；`<=0` 回落 120 | 重启桥接 |
 | `tts.character` | string | `""` | voxd 角色名（如 `xiaoyu`） | 重启桥接 |
 | `tts.route` | `"local"`/`"cloud"` | `"local"` | 选哪个包；非法值回落 local | 重启桥接（桌宠立即） |
@@ -750,7 +763,7 @@ voice.enabled 检查（仅这里，底层不查）          src/bridge.js:2323
 |---|---|---|---|
 | 文本超 `tts.maxChars` | 「要说的话最多 120 字（收到 N）」→ 400 | 分次说或改打字 | `src/bridge.js:2003-2005` |
 | 文本超 voxd `max_chars` | voxd 413 → 「TTS 服务返回 413」→ 502 | 同上 | `src/voice-tts.js:90-96` |
-| 合成超时（60s） | 「合成超时（>60s）」→ **400**（映射缺陷） | 检查 GPU/模型是否卡死 | `src/voice-tts.js:83-87`、`src/bridge.js:6702` |
+| 合成超时 | 「合成超时（>150s）」→ **504**（`TTS_TIMEOUT`；2026-10-31 前会兜底成 400） | 看桥接 `[voice] TTS 合成失败` 耗时与 CPU 负载；引擎没挂只是慢，别连发重试（会排队） | `src/voice-tts.js`、`src/bridge.js` `voiceSynthError()` |
 | voxd 未启动 | 「TTS 服务没起来（voxd 是否在运行？）」→ 502 | 启动语音包 | `src/voice-tts.js:83-88` |
 | 返回空音频 | 「TTS 返回了空音频」→ 502 | 查 voxd 日志 | `src/voice-tts.js:99` |
 | 队列满 | voxd 429 → 502（注意：不是 429） | 稍后重试/降并发 | `voxd/api.py:576`、`src/voice-tts.js:90-96` |
@@ -798,15 +811,15 @@ voice.enabled 检查（仅这里，底层不查）          src/bridge.js:2323
 | 设置页没有完整的 TTS 字段 | 「全部参数」页只有 `enabled/dir/max*/allowAbsolutePath/defaultVolume/loudness/ffmpegPath/autoReadback`（`plugins/surfcore/lib/client.js:1707-1718`）；`tts.enabled` 在语音页的「允许 AI 主动发语音」（`:3103-3105`）；`baseUrl/character/route` 没有输入框 | 直接改 `config.json`，或在语音页切包（会写 `route`） | `plugins/surfcore/lib/client.js:1707-1718`、`:3091-3108` |
 | 语音页切包不生效 | 桥接内存配置没更新 | 重启桥接（见 §3.2） | `src/bridge.js:6445`、`src/voice-packs.js:363` |
 
-### 10.6 已知的代码/文档缺陷清单（只记录，不改）
+### 10.6 已知的代码/文档缺陷清单（只记录；标 ✅ 的已修）
 
 | # | 问题 | 影响 | 证据 |
 |---|---|---|---|
 | 1 | 安装进度/失败不可见（实例每请求重建） | 失败只能靠「一直没装好」判断；并发安装可能互删 | `src/bridge.js:6459`、`src/voice-packs.js:179` |
-| 2 | 群聊 `who=list` 引用未定义变量 `last` | 抛 `ReferenceError`（路由报错，通常 500），名单模式在群里不可用 | `src/bridge.js:1946-1949` |
+| 2 | ✅ 群聊 `who=list` 引用未定义变量 `last` | 抛 `ReferenceError`（路由报错，通常 500），名单模式在群里不可用。**2026-10-31 已修**：改读 `voiceLastSpeaker.get(key)` | `src/bridge.js` `voiceTriggerBlock()` |
 | 3 | `trigger.groups` 解析但从不使用 | 配了没效果 | `src/bridge.js:1971` |
 | 4 | `voiceLastSpeaker` 只写不读 | 死状态（判定实际用 `voiceOwnerAt`） | `src/bridge.js:1911`、`:13504` |
-| 5 | 合成超时被映射成 400 而非 502 | 模型误判为参数错误 | `src/bridge.js:6702`、`src/voice-tts.js:83-87` |
+| 5 | ✅ 合成超时被映射成 400 而非 502 | 模型误判为参数错误。**2026-10-31 已修**：`voice-tts.js` 打 `code/statusCode`，`bridge.js` `voiceSynthError()` 统一分类（超时→504、引擎→502），AI 通道 5xx 文案追加「改回打字」 | `src/bridge.js` `voiceSynthError()`、`src/voice-tts.js` `ttsFailure()` |
 | 6 | 文档写「sha256 校验」但代码没有 | 安装完整性无保证 | `docs/VOICE-PACKS.md:128` vs `src/voice-packs.js:134-176` |
 | 7 | 文档/UI 写「5 分钟」，代码是 10 分钟 | 用户预期错位 | `docs/VOICE-PACKS.md:171`、`plugins/surfcore/lib/client.js:3108` vs `src/bridge.js:1938` |
 | 8 | 文档暗示「两个包可同时跑」（指 UI 操作） | `activate()` 会停另一个 | `docs/VOICE-PACKS.md:13` vs `src/voice-packs.js:345-348` |

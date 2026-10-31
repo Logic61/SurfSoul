@@ -159,7 +159,7 @@
 | `autoReadback` | `true` | 发完回读校验 |
 | `tts.enabled` | **`false`** | 本地 TTS 现场合成开关 |
 | `tts.baseUrl` | `http://127.0.0.1:8765` | 合成服务地址 |
-| `tts.timeoutMs` / `maxChars` | 60000 / 120 | 超时与单次合成字数 |
+| `tts.timeoutMs` / `maxChars` | 60000 / 120 | 超时与单次合成字数。**慢引擎（本地包是 CPU 推理）建议 150000**：高 CPU 负载下单条合成观测到 70~126s（见 `SUBSYSTEM-VOICE.md` §4.4） |
 | `tts.character` | 空 | 音色/角色 |
 | `tts.route` + `tts.endpoints` | `local` / 8765+8767 | **本地 / 云端切换**；桌宠每次合成前重读磁盘，**桥接要重启才生效**（见 §1.11.1 末注） |
 | `trigger.who` / `groups` / `members` | `owner` / `[]` / `[]` | 谁能触发语音（默认只主人） |

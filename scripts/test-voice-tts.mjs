@@ -109,7 +109,6 @@ let calls = 0;
 }
 
 fs.rmSync(dir, { recursive: true, force: true });
-console.log('test-voice-tts: ok');
 
 
 // ⑦ 缓存清理：超过上限按最旧删，留下的必须是最新的那批
@@ -126,3 +125,48 @@ console.log('test-voice-tts: ok');
   assert.deepEqual(fs.readdirSync(d2).sort(), ['f6.wav', 'f7.wav', 'f8.wav', 'f9.wav']);
   fs.rmSync(d2, { recursive: true, force: true });
 }
+
+// ⑧ 合成超时：必须抛结构化错误（code=TTS_TIMEOUT / statusCode=504），
+//    桥接据此映射 HTTP 504 —— 2026-10-30 事故就是这里没标记，被中文正则兜底成 400。
+{
+  const srv = await serve((req, res) => {
+    req.resume();
+    // 故意拖过客户端 timeout；客户端放弃后服务端再回（模拟 voxd 合成完成）
+    setTimeout(() => {
+      try {
+        res.writeHead(200, { 'content-type': 'audio/wav' });
+        res.end(WAV);
+      } catch {}
+    }, 800);
+  });
+  await assert.rejects(
+    () => synthesizeToFile({ text: '超时验证', baseUrl: srv.url, outDir: dir, timeoutMs: 250 }),
+    (e) => e.code === 'TTS_TIMEOUT' && e.statusCode === 504 && /合成超时/.test(e.message)
+  );
+  await srv.close();
+}
+
+// ⑨ 服务没起来：TTS_UNAVAILABLE / 502（桥接映射成 5xx，而不是 400）
+{
+  await assert.rejects(
+    () => synthesizeToFile({ text: '断连验证', baseUrl: 'http://127.0.0.1:1', outDir: dir, timeoutMs: 800 }),
+    (e) => e.code === 'TTS_UNAVAILABLE' && e.statusCode === 502 && /TTS/.test(e.message)
+  );
+}
+
+// ⑩ voxd 非 2xx：TTS_HTTP_ERROR / 502，并把 detail 透传出来
+{
+  const srv = await serve((req, res) => {
+    req.resume();
+    res.writeHead(503, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ detail: '引擎 piper 不可用' }));
+  });
+  await assert.rejects(
+    () => synthesizeToFile({ text: '503 验证', baseUrl: srv.url, outDir: dir }),
+    (e) => e.code === 'TTS_HTTP_ERROR' && e.statusCode === 502 && e.message.includes('引擎 piper 不可用')
+  );
+  await srv.close();
+}
+
+fs.rmSync(dir, { recursive: true, force: true });
+console.log('test-voice-tts: ok');

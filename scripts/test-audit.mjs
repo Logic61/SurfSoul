@@ -124,6 +124,8 @@ const tests = [
   'test-voice-tts.mjs',
   // 真实 bridge.js 的 text→TTS→record 链路（假网关 + 本地假 TTS，不发 QQ）
   'test-voice-route.mjs',
+  // 语音合成错误分类（超时→504 / 引擎→502 / 参数→400；假 bridge，不发 QQ）
+  'test-voice-route-errors.mjs',
   // SnowLuma 账号/token 自发现（换 QQ 账号后 token 会变，写死的工具会 401）
   'test-snowluma-conn.mjs',
   // 启动器与编码（乱码根因：.cmd 里的非 ASCII 会被 cmd 按 ANSI 解码）

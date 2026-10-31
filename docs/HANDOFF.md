@@ -5,6 +5,63 @@
 
 ---
 
+## 快照（2026-10-31 09:30–10:30，语音「合成超时」修复：错误分类 + 150s 预算）
+
+### 用户原话
+
+> （2026-10-30 23:22/23:29 两次发语音都报「合成超时（>60s）」，AI 改文字）→ DSH 里只有一句「修复语音功能」。
+
+### 现象与根因（完整复盘 `docs/cases/2026-10-31-voice-tts-timeout.md`，只读诊断 `state/agents/voice-fix/DIAGNOSIS.md`）
+
+- 直接原因：`tts.timeoutMs` 默认 60s，那两次引擎侧实际用了 **126.4s / 70.0s**，客户端先放弃。
+- 环境原因（**不是 GPU**）：本地 GSV 是 **CPU 推理**（`.venv-gsv` 的 torch 是 `2.5.1+cpu`、
+  `tts_infer.yaml: device: cpu`）；主人自己的「犬类项目」重训流水线（22:46–00:19，峰值 7~8 个 python）
+  把 CPU 调度/内存压满，GSV 整段请求只拿到 0.24~0.61 core，三阶段同步劣化 5~30 倍。
+  GPU 故障期只有 12~28%、显存 4.1/8.1GB、无热降频。训练 **00:19:29 全部结束**后同一探针立刻回到 9~17s。
+- 代码放大缺陷：`voice-tts.js` 只抛 `Error(message)` 没有 `code/statusCode`，`bridge.js` 用中文正则
+  `/语音合成|TTS/` 猜状态码 → 超时文案不含这两个词 → **HTTP 400**（§10.6 #5）。
+- 附带发现：客户端放弃后 voxd 合成**不会停**（`/v1/speak/file` 无 finally cancel、GSV 阻塞 urllib），
+  继续占单 worker；`/v1/stop` 无 job_id 会取消 active+全部 queued（误伤桌宠）且对单句中段无效；
+  `/v1/speak/file` 完成前拿不到 `X-Job-Id`，精确取消要改流式（Phase 2）。
+
+### 做到哪
+
+| 改动 | 内容 |
+| --- | --- |
+| `src/voice-tts.js` | 新增 `ttsFailure(message, code, statusCode)`；空文本 400 / 超时 `TTS_TIMEOUT` 504 / 连不上 `TTS_UNAVAILABLE` 502 / voxd 非 2xx `TTS_HTTP_ERROR` 502 / 空音频 502 |
+| `src/bridge.js` | 新增 `voiceSynthError()` 统一分类（优先 `statusCode`，中文只兜底旧错误）；AI/操作者两路由改用它；AI 5xx 文案追加「请改回打字，不要重试」；`synthesizeVoiceText` 记耗时/失败日志；修 `voiceTriggerBlock` 的 `last` ReferenceError（R37） |
+| `config.json` | `socialV2.voice.tts.timeoutMs` 60000 → 150000（**本机运行值**；改完要重启桥接） |
+| 测试 | `scripts/test-voice-tts.mjs` 增 ⑧（超时结构化）⑨（连不上）⑩（voxd 503 detail）；新增 `scripts/test-voice-route-errors.mjs`（超时→504、引擎→502、旧错误按文案→504、超字数→400、失败不发消息）；已登记 `test-audit.mjs` + `npm run test-voice:errors` |
+| 文档 | `docs/cases/2026-10-31-voice-tts-timeout.md`（新）、`docs/cases/README.md`、`PITFALLS.md` 新条目、`SUBSYSTEM-VOICE.md` §4.3/§4.4/§10.2/§10.6/config 表、`AGENT-TOOLS-AND-PRESETS.md` 排障行、`CHANGELOG.md` |
+
+### 已验证
+
+- `node scripts/test-voice-tts.mjs` → exit 0；`node scripts/test-voice-route-errors.mjs` → exit 0。
+- 既有语音测试：`test-voice.mjs` 83/0、`test-voice-route.mjs` ok、`test-voice-edge.mjs` 12/0、
+  `test-voice-volume.mjs` 14/0、`test-voice-gui.mjs` 20/0、`test-voice-packs-default.mjs` ok；
+  `test-voice-system.mjs` 44/1（既有基线红：preset 文案「默认关闭」drift，与本次无关）。
+- 引擎侧（训练结束后、未重启任何服务）：`/v1/health` ok / 队列空；直探 7 字 8.6~11.6s；
+  桥接 dry-run `node scripts/voice-send-test.mjs --key private:<owner>` → 预演通过（不发消息）。
+- **没验证**：桥接重启后的真机语音（重启窗口、QQ 正在聊天时未做）；MCP 层的状态码/工具说明改动
+  （要 DSH 重启，本轮故意没动，见下）。
+
+### 没做 / 下一步
+
+1. **重启桥接**让 `timeoutMs=150000` + 新代码生效（`restart.bat` 或设置页「保存并重启桥接」；
+   `voiceCfg()` 读启动内存，无热读；agentToken 在 `state/social-v2.json` 会恢复，DSH 会话不断）。
+   然后真机发一条 7~20 字语音确认 `verified=true`。
+2. MCP 层（`src/mcp-snowluma-safe.js`）透传 HTTP 状态码 + 工具说明第⑤条补「504/合成超时」分支 +
+   preset 文案同步（`plugins/surfcore/presets/*.patch.yml` 防漂移测试）——需要 DSH 重启，下一轮做。
+3. **可选・语音提速（真正根治，需拍板）**：给 `.venv-gsv` 换 cu128 torch（RTX 5070 是 sm_120，
+   当前 `torch 2.5.1+cpu` 根本用不了 GPU），预期 1~3s/句；代价 ~3-5GB 下载 + GPT-SoVITS 兼容性验证，
+   建议新开隔离 venv，失败保留 CPU 环境回退。**风险：8GB 显存 + 桌宠/浏览器共用**。
+4. **可选・Phase 2**：`/v1/speak` 流式改造（拿 `X-Job-Id`、客户端断开自动 cancel、可精确 `/v1/stop`）。
+5. 既有基线红（`test-voice-system` 1 条、`test-preset-local-tools`/`test-agent-preset-patches`）与本轮无关，
+   建议单开一轮修。
+6. 回滚：`git revert <本轮 commit>` + `config.json` 的 `timeoutMs` 改回 60000 + 重启桥接。
+
+---
+
 ## 快照（2026-10-30 20:45–21:05，QQ 会话工具白名单放行梗记忆）
 
 ### 用户原话
