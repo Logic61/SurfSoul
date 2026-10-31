@@ -2872,3 +2872,19 @@ return list[0] ?? pool[0];
   `node scripts/test-voice-route-errors.mjs`（超时→504、引擎→502、旧式错误按文案兜底→504、失败不发消息）；
   引擎侧看 `state/voice-packs/voice-local/logs/gsv/api.log` 每请求四段耗时，桥接侧看
   `[voice] TTS 合成完成/失败 <ms>` 日志。完整复盘见 `docs/cases/2026-10-31-voice-tts-timeout.md`。
+
+
+## 重启桥接报「启动后 12 秒仍未监听控制台端口」，其实约 30 秒后才起来（state/ 6.9GB + icacls 超时）
+
+- **现象**：设置页「重启桥接」/插件 `restart()` 返回
+  `{ok:false, error:'启动后 12 秒仍未监听控制台端口，请查看桥接日志'}` —— 看起来启动失败；
+  但再等十几秒，`http://127.0.0.1:3100` 正常、QQ 也连上了。2026-10-31 实测（PID 44752）。
+- **根因**：桥接启动先 `hardenStateDirAcl()`（`src/state-acl.mjs`），对 `state/` 递归跑 `icacls /T /C`，
+  默认超时 **30s**（`icacls(args, timeout = 30000)`）；本机 `state/` 已 **6.9GB**（其中 voice-packs 6.8GB，
+  几万个文件）→ `icacls` 跑不完，`spawnSync ... ETIMEDOUT`，白等 30s 才继续启动。
+  而插件 supervisor 的 `start()` 只等 **12s**（`plugins/surfcore/lib/bridge.js`）。
+- **影响**：每次重启都要 ~30s+；插件误报失败（设置页红字），可能诱导用户连点「启动/重启」。
+  端口检查能挡住双实例，但会拖更久。
+- **怎么办**：看到这句先等 30~40s，再查 `state/bridge.log` 是否出现「本地控制台已启动」与端口 3100；
+  不要连点重启。根治方向（未做，独立小修）：ACL 收紧跳过 `voice-packs/` 等大目录、
+  或把 supervisor 等待放宽到 40~60s、或把 `state/voice-packs` 移出统一步骤。

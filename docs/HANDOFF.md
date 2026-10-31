@@ -42,16 +42,24 @@
   `test-voice-system.mjs` 44/1（既有基线红：preset 文案「默认关闭」drift，与本次无关）。
 - 引擎侧（训练结束后、未重启任何服务）：`/v1/health` ok / 队列空；直探 7 字 8.6~11.6s；
   桥接 dry-run `node scripts/voice-send-test.mjs --key private:<owner>` → 预演通过（不发消息）。
-- **没验证**：桥接重启后的真机语音（重启窗口、QQ 正在聊天时未做）；MCP 层的状态码/工具说明改动
-  （要 DSH 重启，本轮故意没动，见下）。
+- **2026-10-31 10:29 已重启桥接并验证新代码生效**：用插件自己的 `stop→start`（等同设置页「重启桥接」）重启后，
+  `bridge.log` 出现 `[voice] TTS 合成完成 13809ms（12 字）`（旧代码没有这行），dry-run 预演通过；
+  模式恢复 **reserved2**、SnowLuma 已连接、单实例（PID 44752 / 端口 3100）。
+  ⚠️ 重启时插件 supervisor 报「启动后 12 秒仍未监听控制台端口」，**实际约 30 秒后才起来** ——
+  原因是 `state/` 现在 6.9GB（voice-packs 6.8GB），启动时 `hardenStateDirAcl()` 的 `icacls /T` 30s 超时；
+  别因为这句报错连点重启（端口检查会挡双实例，但会白等）。见 PITFALLS 新条目。
+- **没验证**：真机 QQ 语音发送（重启后没有替主人发测试语音——对外发送需授权；请主人在 QQ 里让她发一条，
+  或授权后用 `node scripts/voice-send-test.mjs --key private:<owner> --yes`）；
+  MCP 层的状态码/工具说明改动（要 DSH 重启，本轮故意没动，见下）。
 
 ### 没做 / 下一步
 
-1. **重启桥接**让 `timeoutMs=150000` + 新代码生效（`restart.bat` 或设置页「保存并重启桥接」；
-   `voiceCfg()` 读启动内存，无热读；agentToken 在 `state/social-v2.json` 会恢复，DSH 会话不断）。
-   然后真机发一条 7~20 字语音确认 `verified=true`。
+1. ~~重启桥接~~（已完成，见上）；主人侧待办：QQ 里发一条语音确认 `verified=true`。
 2. MCP 层（`src/mcp-snowluma-safe.js`）透传 HTTP 状态码 + 工具说明第⑤条补「504/合成超时」分支 +
    preset 文案同步（`plugins/surfcore/presets/*.patch.yml` 防漂移测试）——需要 DSH 重启，下一轮做。
+3. **启动慢（12s supervisor 误报）**：`state-acl.mjs` 的 `icacls` 默认 30s 超时 + `state/` 6.9GB →
+   重启要 ~30s；建议（未做）：ACL 收紧跳过 `voice-packs/` 等大目录 / 或插件 `start()` 等待放宽到 40s /
+   或把 `state/voice-packs` 挪出 state 统一 ACL 范围。属独立小修。
 3. **可选・语音提速（真正根治，需拍板）**：给 `.venv-gsv` 换 cu128 torch（RTX 5070 是 sm_120，
    当前 `torch 2.5.1+cpu` 根本用不了 GPU），预期 1~3s/句；代价 ~3-5GB 下载 + GPT-SoVITS 兼容性验证，
    建议新开隔离 venv，失败保留 CPU 环境回退。**风险：8GB 显存 + 桌宠/浏览器共用**。
