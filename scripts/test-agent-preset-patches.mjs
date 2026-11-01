@@ -107,7 +107,16 @@ console.log('## 4. bundle 声明与安全边界');
   let guardFn;
   const restricted = [];
   canonicalMod.apply({ tools: { restrict: ({ deny }) => restricted.push(...deny), guard: (fn) => { guardFn = fn; } } });
-  ok(restricted.includes('pwsh') && restricted.includes('dev_install_package'), 'restrict 名单含本地执行面与开发注入器工具');
+  // 口径（2026-10-29 起）：本地执行工具分两类——
+  //   · 仅主人私聊可用（pwsh/read/write/…/subagent_codex）：**不进 restrict**（进了模型就看不见，
+  //     私聊里也用不了），靠执行期 guard 逐次鉴权；
+  //   · 其余危险能力（派生第二个 agent 家族、插件装载、开发注入器…）：必须 restrict 隐藏。
+  ok(
+    restricted.includes('dev_install_package') && restricted.includes('plugin_manager')
+      && restricted.includes('subagent_claude_code')
+      && !restricted.includes('pwsh') && !restricted.includes('read') && !restricted.includes('subagent_codex'),
+    'restrict 名单含开发注入器/危险工具，且不隐藏「仅主人私聊」的本地工具',
+  );
   for (const name of ['ask_user_question', 'todo_write', 'mcp__snowluma__qq_send_message', 'mcp__web-search-safe__web_fetch']) {
     assert.equal(guardFn({ name }), undefined, `白名单应放行 ${name}`);
   }

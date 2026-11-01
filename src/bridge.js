@@ -27,6 +27,10 @@ import {
   selectMissedHistory, summarizeHistoryCatchup,
 } from './history-catchup.js';
 import { safeFetchBuffer, looksLikeImageBuffer } from './safe-fetch.js';
+import {
+  findCredentialInYamlText, generateImageNow, imageGenQuotaStatus, normalizeImageGenConfig,
+  recordImageGenTime, resolveImageGenApiKey as resolveImageKeyFromConfig, saveGeneratedImage,
+} from './imagegen.js';
 import { discoverDshBaseUrl, isLoopbackBaseUrl, probeDshBaseUrl } from './dsh-port.js';
 import { AUDIO_EXTS, cleanupTemp, describeAudio, inspectAudio, listAudioFiles, parseTargetKey, processAudioVolume, resolveAudioProcessing, resolveAudioSource, safeJoinLibrary } from './send-voice-lib.js';
 import { createVoicePacks } from './voice-packs.js';
@@ -937,6 +941,9 @@ function loadConfig() {
         getStickerImage: true,
         sendSticker: true,
         sendImage: true,
+        // 快速生图（2026-11-01）：qq_generate_image 调 Agnes 图像模型现场画一张，
+        // 比 Codex 子智能体快一个数量级（约 15 秒 vs 4~5 分钟）。只在主人私聊可用。
+        imageGen: true,
         setGroupCard: true,
         // 她自己的资料/空间（2026-10-31 主人要求）：改个性签名、发 QQ 空间说说。
         // 只动机器人自己的 QQ 账号，由 MCP 工具 qq_set_signature / qq_send_qzone 触发。
@@ -1098,6 +1105,8 @@ function loadConfig() {
     listStickers: true,
     getStickerImage: true,
     sendSticker: true,
+    // 快速生图（Agnes）：默认开；实际调用仍由「仅主人私聊」路由鉴权把关。
+    imageGen: true,
     setStickerRemark: false,
     stickerNote: true,
     collectSticker: true,
@@ -1140,6 +1149,11 @@ function loadConfig() {
     autoReadback: true,
     ...(cfg.socialV2?.voice ?? {})
   };
+
+  // socialV2.imagegen：快速生图（Agnes / OpenAI 兼容 /images/generations）。
+  // 为什么放在桥接而不是 MCP：密钥解析（config/env/DSH 凭据）与「只给主人私聊」的鉴权
+  // 都在桥接这一层做，MCP 工具只负责转发一次 HTTP 调用，不接触密钥。
+  cfg.socialV2.imagegen = normalizeImageGenConfig(cfg.socialV2?.imagegen ?? {});
 
   // socialV2.sticker.collect 也需要深度合并，避免旧配置缺失 collect 子项时丢默认值。
   cfg.socialV2.sticker = {
@@ -2588,6 +2602,7 @@ async function main() {
     }
     let buffer;
     let via;
+    let localPathForFileUri = null;
     try {
       if (forwarded?.buffer) {
         buffer = forwarded.buffer;
@@ -2606,6 +2621,7 @@ async function main() {
         const localPath = rawSource.startsWith('file://') ? fileURLToPath(rawSource) : rawSource;
         buffer = fs.readFileSync(localPath);
         via = 'path';
+        localPathForFileUri = path.resolve(localPath);
       }
     } catch (error) {
       throw new Error(`图片读取失败：${error?.message ?? error}`);
@@ -2615,7 +2631,21 @@ async function main() {
       throw new Error(`图片太大（${(buffer.length / 1024 / 1024).toFixed(1)}MB > ${SEND_IMAGE_MAX_BYTES / 1024 / 1024}MB）`);
     }
     if (!looksLikeImageBuffer(buffer)) throw new Error('这个文件不是图片（文件头不认识），请给 jpg/png/gif/webp');
-    segments.push({ type: 'image', data: { file: 'base64://' + buffer.toString('base64') } });
+    // SnowLuma 的 OneBot HTTP 对请求体有 **2MiB 硬上限**（index.mjs 的
+    // `readRequestBody(req, maxBytes = 2 * 1024 * 1024)`，超了直接 req.destroy()，
+    // 客户端只看到没有信息的 `fetch failed`）。base64 会再放大 4/3 ⇒ 本地图片一旦
+    // 超过约 1.5MB 就必然发不出去，而 Codex/AI 生成的图常见 1~4MB（2026-11-01 实测
+    // 1.9MB PNG → 2.44MB payload → ECONNRESET）。实测 SnowLuma 接受 image segment 的
+    // `file://` 本机绝对路径（它自己读文件，payload 只有几十字节），所以大图改走
+    // file:// 通道；小图保持 base64（不改变旧行为，也不依赖 SnowLuma 能读该路径）。
+    // 注意：读盘与图片头校验仍在这里做（file:// 只是传输方式，不是绕过校验）。
+    const SNOWLUMA_ONEBOT_MAX_BODY = 2 * 1024 * 1024;
+    const IMAGE_FILE_URI_THRESHOLD = 1_300_000; // base64(4/3)+JSON 后 < 2MiB 的安全余量
+    const useFileUri = via === 'path' && localPathForFileUri !== null && buffer.length > IMAGE_FILE_URI_THRESHOLD;
+    const imageFile = useFileUri
+      ? `file:///${localPathForFileUri.replace(/\\/g, '/')}`
+      : `base64://${buffer.toString('base64')}`;
+    segments.push({ type: 'image', data: { file: imageFile } });
     const action = kind === 'private' ? 'send_private_msg' : 'send_group_msg';
     const params = kind === 'private' ? { user_id: Number(id), message: segments } : { group_id: Number(id), message: segments };
     const httpUrl = String(cfg.snowluma?.httpUrl || 'http://127.0.0.1:3000').replace(/\/+$/, '');
@@ -2630,20 +2660,37 @@ async function main() {
       try {
         await sleep(randInt(600, 1800));
         assertSendAllowed();
-        const res = await fetch(`${httpUrl}/${action}`, {
-          method: 'POST',
-          headers: {
-            'content-type': 'application/json',
-            ...(cfg.snowluma?.accessToken ? { authorization: `Bearer ${cfg.snowluma.accessToken}` } : {})
-          },
-          body: JSON.stringify(params),
-          signal: AbortSignal.timeout(30000)
-        });
-        const body = await res.json().catch(() => ({}));
-        if (!res.ok || body.status !== 'ok' || body.retcode !== 0) {
-          throw new Error(`OneBot ${action} 失败: ${body.wording || body.retcode || res.status}`);
+        const postOnce = async () => {
+          const res = await fetch(`${httpUrl}/${action}`, {
+            method: 'POST',
+            headers: {
+              'content-type': 'application/json',
+              ...(cfg.snowluma?.accessToken ? { authorization: `Bearer ${cfg.snowluma.accessToken}` } : {})
+            },
+            body: JSON.stringify(params),
+            signal: AbortSignal.timeout(30000)
+          });
+          const body = await res.json().catch(() => ({}));
+          if (!res.ok || body.status !== 'ok' || body.retcode !== 0) {
+            throw new Error(`OneBot ${action} 失败: ${body.wording || body.retcode || res.status}`);
+          }
+          return body.data;
+        };
+        let data;
+        try {
+          data = await postOnce();
+        } catch (error) {
+          if (!useFileUri) throw error;
+          // file:// 通道失败（SnowLuma 不在本机 / 旧版本不认 file://）→ base64 再试一次。
+          // 大图兜底多半仍会撞 2MiB 上限，但错误里带上明确可操作的提示，而不是只剩 fetch failed。
+          params.message[params.message.length - 1] = { type: 'image', data: { file: `base64://${buffer.toString('base64')}` } };
+          try {
+            data = await postOnce();
+          } catch (fallbackError) {
+            throw new Error(`${error?.message ?? error}（file:// 通道失败后用 base64 兜底也失败：${fallbackError?.message ?? fallbackError}。SnowLuma OneBot HTTP 请求体上限 2MiB，大图请先压缩到约 1.4MB 以内）`);
+          }
         }
-        sendResolve(body.data);
+        sendResolve(data);
       } catch (error) {
         sendReject(error);
       }
@@ -3932,6 +3979,33 @@ async function main() {
   // 模式/角色/静默状态都存 state/*.json，桥接即时感知；此服务只读写这些文件。
   function v2ToolEnabled(flag) {
     return cfg.socialV2?.tools?.[flag] !== false;
+  }
+
+  /**
+   * 从 DSH 的凭据文件里按名字取密钥（例如 AGNES_API_KEY）。
+   *
+   * 为什么在桥接里读：DSH 的 `ctx.credentials` 只在 DSH 插件上下文可用，桥接是独立进程；
+   * 而 `qq_generate_image` 的密钥解析不能放到 MCP 工具里（那会把密钥暴露给模型工具层）。
+   * 失败一律返回空串，由调用方报「未配置密钥」，绝不影响桥接启动。
+   */
+  function readDshCredential(name) {
+    try {
+      const dshHome = process.env.DSH_HOME || path.join(os.homedir(), '.dsh');
+      const file = path.join(dshHome, '.credentials.yaml');
+      const text = fs.readFileSync(file, 'utf8');
+      return findCredentialInYamlText(text, name, (raw) => yaml.load(raw));
+    } catch {
+      return '';
+    }
+  }
+
+  /** 生图密钥解析：config.apiKey → 环境变量 → DSH 凭据文件。 */
+  function resolveImageGenKey() {
+    return resolveImageKeyFromConfig({
+      config: cfg.socialV2?.imagegen,
+      env: process.env,
+      credentialLookup: readDshCredential,
+    });
   }
 
   function startConsoleServer() {
@@ -7563,6 +7637,104 @@ async function main() {
           }
           return;
         }
+        // ── 快速生图（Agnes /images/generations）────────────────────────────────
+        // 2026-11-01：主人要求「用 agnes 生图」。这是**花外部 API 额度**的动作，并且
+        // prompt 会发给第三方服务，所以：reserved2 + 有效会话令牌 + 工具开关开着的前提下，
+        // **群聊（命中 allow.groups）与主人私聊可用**（别人私聊 403），群聊再叠会话配额
+        // （默认 3/小时、10/天，0=不限）。生成结果落 state/generated-images/ 并返回绝对路径，
+        // 由模型再调 qq_send_image 发出。
+        if (req.method === 'POST' && url.pathname === '/api/socialV2/generate-image') {
+          const body = await readBody();
+          const key = String(body.key ?? '').trim();
+          const prompt = String(body.prompt ?? '').trim();
+          const model = body.model === undefined || body.model === null ? '' : String(body.model).trim();
+          const size = body.size === undefined || body.size === null ? '' : String(body.size).trim();
+          if (!key || !prompt) { sendJson({ ok: false, error: 'key 和 prompt 不能为空' }, 400); return; }
+          if (req.headers['x-agent-token'] && !agentTokenOk(key, req.headers['x-agent-token'])) { sendJson({ ok: false, error: 'agent token 无效' }, 403); return; }
+          if (req.headers['x-agent-token'] && !v2SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
+          if (req.headers['x-agent-token'] && !v2ToolEnabled('imageGen')) { sendJson({ ok: false, error: '工具未启用：qq_generate_image' }, 403); return; }
+          if (currentMode !== 'reserved2') { sendJson({ ok: false, error: '该接口仅 reserved2 模式可用' }, 403); return; }
+          if (!req.headers['x-agent-token']) { sendJson({ ok: false, error: 'reserved2 模式调用必须携带 agent token' }, 403); return; }
+          const keyMatch = /^(group|private):(\d+)$/.exec(key);
+          if (!keyMatch) { sendJson({ ok: false, error: 'key 格式应为 group:群号 或 private:QQ号' }, 400); return; }
+          const kind = keyMatch[1];
+          const id = Number(keyMatch[2]);
+          if (!Number.isFinite(id) || id <= 0 || !modeAllowed(key, kind, id, cfg, currentMode)) {
+            sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403);
+            return;
+          }
+          // 2026-11-01 主人要求「允许群聊画图」：群聊与主人私聊都可用；别人私聊仍不可用。
+          // 成本与滥用边界放在**会话配额**（群聊默认 3/小时、10/天；0=不限），而不是一刀切禁止。
+          const genCfg = cfg.socialV2?.imagegen ?? normalizeImageGenConfig({});
+          const ownerKey = cfg.ownerQQ ? `private:${cfg.ownerQQ}` : '';
+          const isOwnerPrivate = Boolean(ownerKey) && key === ownerKey;
+          const isGroup = kind === 'group';
+          if (!isOwnerPrivate && !isGroup) {
+            sendJson({ ok: false, error: '画图只对群聊与主人私聊开放（别人私聊不开放）' }, 403);
+            return;
+          }
+          if (genCfg.enabled === false) { sendJson({ ok: false, error: '快速生图已关闭（socialV2.imagegen.enabled=false）' }, 403); return; }
+          const quotaCfg = isGroup ? (genCfg.group ?? {}) : (genCfg.owner ?? {});
+          if (isGroup && quotaCfg.enabled === false) { sendJson({ ok: false, error: '群聊画图已关闭（socialV2.imagegen.group.enabled=false）' }, 403); return; }
+          if (prompt.length > (Number(genCfg.maxPromptChars) || 2000)) {
+            sendJson({ ok: false, error: `prompt 过长（${prompt.length} > ${genCfg.maxPromptChars} 字）` }, 400);
+            return;
+          }
+          const st = getSocialV2State(key);
+          const quota = imageGenQuotaStatus(st.imageGenTimes, {
+            now: Date.now(),
+            maxPerHour: quotaCfg.maxPerHour,
+            maxPerDay: quotaCfg.maxPerDay,
+          });
+          if (!quota.ok) {
+            const waitMs = Math.max(0, Number(quota.retryAfterMs) || 0);
+            const waitText = waitMs >= 60 * 60 * 1000 ? `${Math.ceil(waitMs / 3600000)} 小时` : `${Math.max(1, Math.ceil(waitMs / 60000))} 分钟`;
+            sendJson({
+              ok: false,
+              error: `画得有点多了：${isGroup ? '群聊' : '私聊'}限制约每小时 ${quota.maxPerHour} 张 / 每天 ${quota.maxPerDay} 张（${quota.reason === 'day' ? '今日额度' : '本小时额度'}用完，约 ${waitText}后恢复）。不要刷图，先把已有的发完。`,
+              quota
+            }, 429);
+            return;
+          }
+          const apiKey = resolveImageGenKey();
+          if (!apiKey) {
+            sendJson({ ok: false, error: '未配置生图密钥：socialV2.imagegen.apiKey / 环境变量 AGNES_API_KEY / DSH 凭据里都没找到' }, 500);
+            return;
+          }
+          try {
+            const result = await generateImageNow({ config: genCfg, prompt, model, size, apiKey, fetchImpl: fetch });
+            const saved = saveGeneratedImage({ rootDir: ROOT, config: genCfg, buffer: result.buffer });
+            // 生成成功才记配额（失败不占额度）；先落盘再记账，避免记账成功但文件写失败。
+            st.imageGenTimes = recordImageGenTime(st.imageGenTimes, Date.now());
+            saveSocialV2State();
+            const after = imageGenQuotaStatus(st.imageGenTimes, {
+              now: Date.now(), maxPerHour: quotaCfg.maxPerHour, maxPerDay: quotaCfg.maxPerDay,
+            });
+            log(`[imagegen] 生成图片 ${key}: ${result.model} ${saved.bytes}B ${result.ms}ms -> ${saved.path}`);
+            appendActivity(`${key} [imagegen] 生成图片（${result.model}，${Math.round(saved.bytes / 1024)}KB，${Math.round(result.ms / 1000)}s）`);
+            sendJson({
+              ok: true,
+              key,
+              path: saved.path,
+              bytes: saved.bytes,
+              model: result.model,
+              size: result.size,
+              ms: result.ms,
+              revisedPrompt: result.revisedPrompt || undefined,
+              quota: {
+                usedHour: after.hourCount,
+                usedDay: after.dayCount,
+                maxPerHour: after.maxPerHour,
+                maxPerDay: after.maxPerDay,
+              },
+              hint: '用 mcp__snowluma__qq_send_image(image=path) 把这张图发出去'
+            });
+          } catch (error) {
+            log(`[imagegen] 生成失败 ${key}: ${error?.message ?? error}`);
+            sendJson({ ok: false, error: `画图失败：${error?.message ?? error}` }, 502);
+          }
+          return;
+        }
         if (req.method === 'POST' && url.pathname === '/api/socialV2/collect-sticker') {
           if (!stickerEnabled()) { sendJson({ ok: false, error: '表情包体系已关闭' }, 403); return; }
           const body = await readBody();
@@ -10249,6 +10421,8 @@ async function main() {
         wakeTimes: [],
         sendTimes: [],
         stickerCollectTimes: [],
+        // 快速生图配额（2026-11-01 允许群聊画图后加）：跨重启保留，否则每次重启都能刷额度。
+        imageGenTimes: [],
         pendingWakeTimer: null,
         sleepTimer: null,
         replyCheckTimer: null,
@@ -10323,6 +10497,7 @@ async function main() {
             wakeTimes: Array.isArray(val.wakeTimes) ? val.wakeTimes : [],
             sendTimes: Array.isArray(val.sendTimes) ? val.sendTimes : [],
             stickerCollectTimes: Array.isArray(val.stickerCollectTimes) ? val.stickerCollectTimes : [],
+            imageGenTimes: Array.isArray(val.imageGenTimes) ? val.imageGenTimes : [],
             pendingWakeTimer: null,
             sleepTimer: null,
             replyCheckTimer: null,
@@ -10448,6 +10623,8 @@ async function main() {
           wakeTimes: st.wakeTimes.slice(-200),
           sendTimes: st.sendTimes.slice(-500),
           stickerCollectTimes: Array.isArray(st.stickerCollectTimes) ? st.stickerCollectTimes.slice(-500) : [],
+          // 快速生图配额（群聊画图放开后的成本边界）：只存时间戳，最多 200 条。
+          imageGenTimes: Array.isArray(st.imageGenTimes) ? st.imageGenTimes.slice(-200) : [],
           lastIncomingAt: st.lastIncomingAt || 0,
           lastHistoryMessageTime: st.lastHistoryMessageTime || 0,
           lastHistoryCheckedAt: st.lastHistoryCheckedAt || 0,

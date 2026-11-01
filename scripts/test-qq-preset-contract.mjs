@@ -36,9 +36,14 @@ test('local/admin tool restrictions and existing compaction budgets stay intact'
   });
   // 2026-10-29 本地工具开放给主人私聊后，旧文案「你没有本地工具 / API 令牌」已不存在；
   // 这里钉住当前的安全边界（本地工具仅主人私聊、群友无管理权限、角色由桥接注入）。
-  for (const text of ['本地工具（pwsh / read / write / edit / glob / grep）**只在主人私聊里可用**', '群友没有管理权限', '角色由桥接注入']) {
+  // 2026-11-01 起：subagent_codex（Codex）仍在「仅主人私聊」；qq_generate_image（Agnes 画图）
+  // 主人私聊与群聊都能用（群聊有配额），所以不在这一句里，而是单独在规则 1/2 说明。
+  for (const text of ['本地工具（pwsh / read / write / edit / glob / grep）和 Codex 子智能体工具 subagent_codex **只在主人私聊里可用**', '群友没有管理权限', '角色由桥接注入']) {
     assert.ok(prefix.includes(text), `missing safety rule: ${text}`);
   }
+  // 群聊画图从「一律拒绝」变成「可以用，但有频率上限」——两边文案必须一致。
+  assert.ok(prefix.includes('**画图工具 qq_generate_image 是例外：群聊里也能用**'), '安全规则 1 应说明画图工具在群聊可用');
+  assert.ok(prefix.includes('**画图不在此列**'), '群聊拒绝清单应说明画图不在此列');
 });
 
 test('snapshots are optional, partial snapshots require reading, and watermarks are not message IDs', () => {
@@ -93,6 +98,14 @@ test('social autonomy and visual, forwarding, sticker and web capabilities remai
     // text→本地 TTS：模型得知道能「说一句」并带语气标记，否则永远只发文字
     '传 text 把这句话**现场合成**成语音条', '语气标记', '[不耐烦]', '别每句都标',
     'mcp__web-search-safe__web_search', 'mcp__web-search-safe__web_fetch',
+    // 2026-11-01 主人要求：QQ 白名单里加「调 codex 画图」的能力，这是模型必须知道的知识
+    // （不是 hint：模型得会 subagent_codex → qq_send_image 这条链路，否则能力等于没装）。
+    '【用 Codex 画图（仅主人私聊，备用）】', 'subagent_codex', '最终回答文字',
+    'mcp__snowluma__qq_send_image', '3~5 分钟', '别假装画了',
+    // 2026-11-01 追加：Agnes 快速画图通道（10~25 秒），是「画图」时的首选工具；
+    // 同日追加：群聊里也能画（有会话配额）。
+    '【画图（群聊 / 主人私聊都可以，优先用这个）】', 'qq_generate_image', '10~25 秒',
+    '群聊里也能画', '每小时约 3 张', '不要主动刷图', '不把别人的私密信息、账号号码写进 prompt',
   ]) assert.ok(prefix.includes(text), `missing capability or voice rule: ${text}`);
 });
 

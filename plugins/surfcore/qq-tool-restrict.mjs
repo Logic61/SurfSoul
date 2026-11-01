@@ -217,7 +217,11 @@ function debugLocalDeny(exec, candidates, reason) {
  *        这正是 L7 要挡的那类越权路径，因此必须从 schema 里隐藏。
  *   ② 会派生 agent / 执行外部代码（当前只在 DSH 自带 preset 里挂载，QQ preset 不挂；
  *      列进来是**回归网**：别的 composition 一旦把它们推进全局层就被挡住）：
- *      · `subagent_codex` / `subagent_claude_code`（Codex / Claude Code 子智能体）
+ *      · `subagent_claude_code`（Claude Code 子智能体）
+ *      · `subagent_codex`（Codex 子智能体）：**2026-11-01 起改由下面的「主人私聊白名单」
+ *        放行**（主人要求 QQ 里能调 Codex 生成图片）。它仍然会 spawn 独立进程、在子会话
+ *        工作区里读写文件，因此按 `pwsh`/`read`/`write` 同一档处理：schema 里可见，
+ *        执行期逐次鉴权，只有 `private:<ownerQQ>` 能调，其它场合 fail-closed。
  *      · `spawn_teammate` / `team_task_create|get|list|update`（实验性 Team 模式）
  *   ③ 等于把插件装载权交出去 ⇒ 任意代码执行：
  *      · `plugin_manager`（安装/卸载/启停插件，内部会 spawn pnpm）
@@ -233,11 +237,22 @@ function debugLocalDeny(exec, candidates, reason) {
 //   · 映射拿不到（会话还没建好、文件读失败）一律**拒绝**——fail-closed。
 //   · 群聊 / 别人私聊里她即便想调也过不去，而且群里有人要求她「执行命令」时，
 //     人格规则另有一条明确要求拒绝。
-const LOCAL_OWNER_ONLY_TOOLS = new Set([
+//
+// 2026-11-01 追加：主人要求「把调用 codex 的能力加给 QQ 白名单工具，告诉 ta 可以调
+// codex 做图片生成」。`subagent_codex` 会 spawn 真正的 Codex 子进程，能力面 ≈ 本地执行
+// （能跑 shell、写文件），所以**不**进全局 SAFE 名单，而是并进下面这张「仅主人私聊」表：
+// schema 里看得见（restrict 名单已移除它），执行期只有 `private:<ownerQQ>` 放行。
+// 导出 `OWNER_PRIVATE_TOOL_NAMES` 供 `scripts/test-preset-local-tools.mjs` 逐名对账，
+// 防止以后只改 guard、忘了测试与文档（与 MEMEWIKI_TOOL_NAMES 同一模式）。
+export const OWNER_PRIVATE_TOOL_NAMES = Object.freeze([
   'pwsh', 'bash',                      // shell / 进程
   'read', 'read_image', 'write', 'edit', 'str_replace_editor', // 文件读写
   'glob', 'grep',                      // 文件检索
+  // 派生真正的 Codex 子进程（图片生成 / 代码任务）；只会把最终文本回给父会话，
+  // 但子进程本身能在工作区跑命令，所以仍属本地执行能力。
+  'subagent_codex',
 ])
+const LOCAL_OWNER_ONLY_TOOLS = new Set(OWNER_PRIVATE_TOOL_NAMES)
 
 /** 模型 schema 里要隐藏的工具：真的危险、且不该给她留一口子。 */
 const LOCAL_EXECUTION_TOOLS = [
@@ -259,8 +274,9 @@ const LOCAL_EXECUTION_TOOLS = [
   // 0.2.0 新增对账（见上方长注释的 4 类判定）：
   //   ① 全局层默认启用 ⇒ 真的会进仿真会话
   'list_mcp_resources', 'list_mcp_resource_templates', 'read_mcp_resource',
-  //   ② 派生 agent / 执行外部代码
-  'subagent_codex', 'subagent_claude_code',
+  //   ② 派生 agent / 执行外部代码（`subagent_codex` 已于 2026-11-01 移入主人私聊白名单，
+  //      不进 restrict，否则模型看不到它；只有 `subagent_claude_code` 仍整体隐藏）
+  'subagent_claude_code',
   'spawn_teammate', 'team_task_create', 'team_task_get', 'team_task_list', 'team_task_update',
   //   ③ 插件装载权（= 任意代码执行）
   'plugin_manager',

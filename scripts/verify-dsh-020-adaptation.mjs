@@ -113,11 +113,12 @@ check('守卫：拒绝 0.1.7 已删除的 cordis 旧工具名（避免静默失�
 // 0.2.0 工具面重新对账的结果（扫描器与守卫必须一致）。
 // 三类必须覆盖，来源见 plugins/surfcore/qq-tool-restrict.mjs 的长注释：
 //   ① 全局层默认启用、仿真会话真的会继承的 MCP 资源工具
-//   ② 派生 agent / 执行外部代码
+//   ② 派生 agent / 执行外部代码（`subagent_codex` 2026-11-01 起是**主人私聊白名单**：
+//      不进 restrict、由 OWNER_PRIVATE_TOOL_NAMES 单独放行，见下面的追加断言）
 //   ③ 插件装载权（= 任意代码执行）与无人值守的自我调度
 const GUARD_020_NAMES = [
   'list_mcp_resources', 'list_mcp_resource_templates', 'read_mcp_resource',
-  'subagent_codex', 'subagent_claude_code',
+  'subagent_claude_code',
   'spawn_teammate', 'team_task_create', 'team_task_get', 'team_task_list', 'team_task_update',
   'plugin_manager',
   'schedule_create', 'schedule_list', 'schedule_update', 'schedule_delete',
@@ -126,6 +127,13 @@ const guardMod = await import(pathToFileURL(canonicalGuardPath).href);
 const guardNames = new Set(guardMod.RESTRICTED_TOOL_NAMES ?? []);
 const missingFromGuard = GUARD_020_NAMES.filter((n) => !guardNames.has(n));
 check('守卫已覆盖 0.2.0 新增的危险工具名', missingFromGuard.length === 0, missingFromGuard.join(', ') || `${guardNames.size} 个名字`);
+// subagent_codex 例外：主人 2026-11-01 要求 QQ 私聊里能调 Codex 生成图片 ⇒ 它必须在
+// 「仅主人私聊」名单里（schema 可见 + 执行期只放 private:<ownerQQ>），且**不能**被 restrict 隐藏。
+{
+  const ownerOnly = new Set(guardMod.OWNER_PRIVATE_TOOL_NAMES ?? []);
+  check('守卫把 subagent_codex 放进「仅主人私聊」名单', ownerOnly.has('subagent_codex'));
+  check('subagent_codex 不被 restrict 隐藏（否则模型看不到、功能等于没装）', !guardNames.has('subagent_codex'));
+}
 
 // 守卫名单里的每个名字都必须是 DSH 真实注册的工具：`tools.restrict()` 对未知名字会抛错，
 // 而守卫逐个 try/catch 只打日志 ⇒ 拼错的名字 = 静默 no-op。

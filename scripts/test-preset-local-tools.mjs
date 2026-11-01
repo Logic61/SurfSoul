@@ -36,14 +36,13 @@ const SIMULATION_PRESETS = ['qq-chat', 'qq-chat-v2'];
 const CLOSED_AGENT_PRESETS = ['qsh-closed'];
 
 /**
- * 本地执行能力清单。
+ * 本地执行能力的**两张名单**（2026-11-01 起口径，对应守卫里的同名概念）：
  *
- * ⚠️ 这里**必须**含每一个能执行本地命令、读写本地文件或派生 agent 的工具名。
- * 名字取自 DSH 0.1.7-rc.2 实际注册的工具（见 qq-tool-restrict.mjs 的注释）。
- * 2026-09-27 的对账替换：`cordis_define`/`cordis_undefine`/`cordis_run`/`cordis_stop`
- * 在 0.1.7 里已不存在（dsh-tool-cordis 现在只注册 cordis_inspect_list/query），
- * 同一轮补上 `load_workspace_dependencies`（自带 Python/Node/pnpm 路径）与
- * `list_subagent_models`（派生 agent 家族）。
+ * ① `OWNER_PRIVATE_TOOLS` —— 只在「主人私聊」这一条会话里可用。它们**故意不进** restrict
+ *    名单（否则模型 schema 里看不见、私聊也用不了），靠执行期 guard 逐次鉴权：
+ *    `state/sessions.json` 映射不到 `private:<ownerQQ>` 就 fail-closed。
+ * ② `RESTRICTED_LOCAL_TOOLS` —— 连 schema 都不该出现的危险能力：派生的第二个 agent
+ *    家族、宿主运行期检查、插件装载、无人值守调度等。
  *
  * 两类失败模式，本文件都要防：
  *   ① **漏**（本地工具不在守卫名单里 ⇒ 留在 schema）——由 test 3 对账 RESTRICTED_TOOL_NAMES 防；
@@ -58,11 +57,18 @@ const CLOSED_AGENT_PRESETS = ['qsh-closed'];
  *     spawn_teammate / team_task_*（现只在 DSH 自带 preset 里挂，列进来当回归网）；
  *   · plugin_manager（插件装载权 = 任意代码执行）；
  *   · schedule_*（无人值守的自我调度）。
+ *
+ * 2026-11-01 口径变化：主人要求「QQ 白名单工具加上调用 codex 的能力（图片生成）」。
+ * `subagent_codex` 会 spawn 真 Codex 子进程 ⇒ 归到 ①（仅主人私聊），从 ② 移出。
  */
-const LOCAL_EXECUTION_TOOLS = [
+const OWNER_PRIVATE_TOOLS = [
   'pwsh', 'bash',
   'read', 'read_image', 'write', 'edit', 'str_replace_editor',
   'glob', 'grep',
+  'subagent_codex',
+];
+
+const RESTRICTED_LOCAL_TOOLS = [
   'load_workspace_dependencies',
   'subagent', 'subagent_fork', 'list_subagent_models',
   'send_message', 'interrupt_agent', 'list_agents',
@@ -74,7 +80,7 @@ const LOCAL_EXECUTION_TOOLS = [
   'dev_mode_set', 'dev_mode_status', 'dev_mode_subagent',
   // 0.2.0 新增对账
   'list_mcp_resources', 'list_mcp_resource_templates', 'read_mcp_resource',
-  'subagent_codex', 'subagent_claude_code',
+  'subagent_claude_code',
   'spawn_teammate', 'team_task_create', 'team_task_get', 'team_task_list', 'team_task_update',
   'plugin_manager',
   'schedule_create', 'schedule_list', 'schedule_update', 'schedule_delete',
@@ -149,7 +155,7 @@ test('模拟会话的 preset 不得挂载 tool-web 的 search/fetch', () => {
   }
 });
 
-test('守卫的 restrict 名单覆盖每一个已知本地执行工具', async () => {
+test('restrict 覆盖危险工具，且「仅主人私聊」的本地工具不被隐藏', async () => {
   for (const id of SIMULATION_PRESETS) {
     const { dir } = readPreset(id);
     const guardPath = path.join(dir, 'qq-tool-restrict.mjs');
@@ -164,20 +170,30 @@ test('守卫的 restrict 名单覆盖每一个已知本地执行工具', async (
     const mod = await import(pathToFileURL(guardPath).href);
     mod.apply({ tools: fakeTools });
 
-    const violations = LOCAL_EXECUTION_TOOLS.filter((t) => !restricted.has(t));
+    const violations = RESTRICTED_LOCAL_TOOLS.filter((t) => !restricted.has(t));
     assert.deepEqual(
       violations, [],
-      `${id}: 以下本地执行工具未出现在 restrict 名单里，会留在模型的工具清单中：`
+      `${id}: 以下危险工具未出现在 restrict 名单里，会留在模型的工具清单中：`
       + `${violations.join(', ')}。注册期隐藏失败 ⇒ §5.2 的 L7 断言不成立。`,
     );
 
-    // 执行期白名单也必须拒绝它们（restrict 与 guard 是两道，不能只靠一道）。
+    // 反方向（2026-11-01 主人要求）：pwsh/fs/codex 等「仅主人私聊」工具**不能**被 restrict，
+    // 否则模型 schema 里看不见——私聊里也用不了，等于功能没装。
+    const wronglyHidden = OWNER_PRIVATE_TOOLS.filter((t) => restricted.has(t));
+    assert.deepEqual(
+      wronglyHidden, [],
+      `${id}: 以下工具应在主人私聊可用（schema 可见、执行期鉴权），不应被 restrict 隐藏：`
+      + `${wronglyHidden.join(', ')}`,
+    );
+
+    // 执行期白名单：两类都必须拒绝（这里没有会话上下文 ⇒ fail-closed；群聊/他人私聊同理）。
     assert.equal(typeof fakeTools._guard, 'function', `${id}: 守卫注册了执行期白名单`);
-    for (const tool of LOCAL_EXECUTION_TOOLS) {
+    for (const tool of [...RESTRICTED_LOCAL_TOOLS, ...OWNER_PRIVATE_TOOLS]) {
       const verdict = fakeTools._guard({ name: tool });
       assert.ok(
         typeof verdict === 'string' && verdict.length > 0,
-        `${id}: 本地工具 "${tool}" 必须在执行期被拒绝，实际返回 ${JSON.stringify(verdict)}`,
+        `${id}: 本地工具 "${tool}" 必须在执行期被拒绝（拿不到会话一律 fail-closed），`
+        + `实际返回 ${JSON.stringify(verdict)}`,
       );
     }
   }
@@ -193,9 +209,21 @@ test('守卫导出的名单与本测试的清单一致（防两份名单各自�
       Array.isArray(mod.RESTRICTED_TOOL_NAMES) && mod.RESTRICTED_TOOL_NAMES.length > 0,
       `${id}: 守卫必须导出 RESTRICTED_TOOL_NAMES，供测试对账`,
     );
-    const missing = LOCAL_EXECUTION_TOOLS.filter((t) => !mod.RESTRICTED_TOOL_NAMES.includes(t));
+    const missing = RESTRICTED_LOCAL_TOOLS.filter((t) => !mod.RESTRICTED_TOOL_NAMES.includes(t));
     assert.deepEqual(missing, [],
       `${id}: 守卫导出的名单缺少本地执行工具：${missing.join(', ')}`);
+    // 「仅主人私聊」的工具（2026-11-01 起含 subagent_codex）：必须单独导出、且不在
+    // restrict 名单里。逐名对账是为了防止下次改守卫只加名字、忘了接线与测试。
+    assert.ok(
+      Array.isArray(mod.OWNER_PRIVATE_TOOL_NAMES) && mod.OWNER_PRIVATE_TOOL_NAMES.length > 0,
+      `${id}: 守卫必须导出 OWNER_PRIVATE_TOOL_NAMES（仅主人私聊的本地工具），供对账`,
+    );
+    for (const tool of OWNER_PRIVATE_TOOLS) {
+      assert.ok(mod.OWNER_PRIVATE_TOOL_NAMES.includes(tool),
+        `${id}: ${tool} 属于「仅主人私聊」能力，必须出现在 OWNER_PRIVATE_TOOL_NAMES 里`);
+      assert.ok(!mod.RESTRICTED_TOOL_NAMES.includes(tool),
+        `${id}: ${tool} 在主人私聊里要可用，不应出现在 restrict 名单里（模型会看不见）`);
+    }
     // 反向：名单里不该混入"允许的无害工具"。
     for (const allowed of ['ask_user_question', 'todo_write']) {
       assert.ok(!mod.RESTRICTED_TOOL_NAMES.includes(allowed),

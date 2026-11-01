@@ -22,7 +22,9 @@ for (const preset of ['qq-chat', 'qq-chat-v2']) {
     'mcp__snowluma-host__snowluma_status', 'mcp__web-search-safe__web_fetch']) {
     assert.equal(guard({ name }), undefined, `${preset}: expected allowed ${name}`);
   }
-  for (const name of ['web_fetch', 'web_search', 'bash', 'read_file', 'dev_future_tool',
+  // 2026-11-01：subagent_codex 归入「仅主人私聊」——没挂会话时也必须是 fail-closed
+  // （把它放进 deny 列表一起断言，防止有人图省事直接加进 SAFE_EXACT）。
+  for (const name of ['web_fetch', 'web_search', 'bash', 'read_file', 'subagent_codex', 'dev_future_tool',
     'mcp__untrusted__web_fetch', '', null, undefined]) {
     try { assert.equal(typeof guard({ name }), 'string', `${preset}: must reject ${String(name)}`); }
     catch (error) { failures++; console.error(`FAIL ${error.message}`); }

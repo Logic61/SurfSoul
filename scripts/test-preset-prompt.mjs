@@ -120,7 +120,10 @@ test('删掉安全不变量或正文过短时阻断保存（保护 AI 效果与�
   assert.throws(() => renderPresetPromptYaml(source, '太短了'), /过短/);
   // 逐条移除安全不变量，必须被拦住
   for (const needle of PRESET_BLOCKING_SUBSTRINGS) {
-    const tampered = originalPrefix.replace(needle, '（已删除）');
+    // 同一句不变量可能在预设正文里出现多次（例如「只在主人私聊里可用」同时出现在
+    // 安全规则和画图工具条目里）。要验证「删掉这个边界」必须删干净所有出现位置——
+    // 只删第一处的话，剩下的那处仍满足不变量，保存被允许是正确行为。
+    const tampered = originalPrefix.split(needle).join('（已删除）');
     assert.throws(
       () => renderPresetPromptYaml(source, tampered),
       new RegExp(`缺少安全不变量「${needle}」`),

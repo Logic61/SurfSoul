@@ -344,6 +344,7 @@ const TOOL_CONFIG_FLAGS = {
   qq_get_sticker_image: 'getStickerImage',
   qq_send_sticker: 'sendSticker',
   qq_send_image: 'sendImage',
+  qq_generate_image: 'imageGen',
   qq_set_group_card: 'setGroupCard',
   qq_set_signature: 'setSignature',
   qq_send_qzone: 'sendQzone',
@@ -1307,6 +1308,40 @@ if (cfg.socialV2?.tools?.sendImage !== false) {
         return { content: [{ type: 'text', text: serializeModelData(data) }] };
       } catch (error) {
         return { content: [{ type: 'text', text: `发送图片失败：${error?.message ?? error}` }], isError: true };
+      }
+    }
+  );
+}
+
+// 快速生图（Agnes）：2026-11-01 主人要求「用 agnes 生图」，同日要求「允许群聊画图」。
+// 群聊与主人私聊都可用（别人私聊会被桥接 403）；群聊有会话配额；生成约 10~25 秒，比 Codex 快得多。
+if (cfg.socialV2?.tools?.imageGen !== false) {
+  server.tool(
+    'qq_generate_image',
+    '用图像模型现场画一张图（Agnes，通常 10~25 秒；比 Codex 子智能体快一个数量级）。**群聊和主人私聊都能用**（别人私聊不行）；群聊有会话配额（默认每小时 3 张 / 每天 10 张，超了返回 429），所以只在有人明确要画时画、不要主动刷图或连着画。成功后返回里带本机绝对路径 `path`，**必须再用 qq_send_image(image=path) 把图发出去**——一条消息只能一张图、不能带文字；想先说话就先用 qq_send_message 单独发一条。prompt 要写清主体/风格/构图/颜色，越具体越好（最多 2000 字）；一次只画一张，也不要把别人的私密信息/账号信息写进 prompt。照片级质感、复杂构图或需要大幅面时，改用 subagent_codex（仅主人私聊，约 4~5 分钟）。',
+    {
+      key: z.string().describe('会话 key，格式 group:群号 或 private:QQ号（群聊与主人私聊可以画；别人私聊不行）'),
+      token: z.string().describe('会话令牌（见唤醒提示中的【会话令牌】）'),
+      prompt: z.string().describe('画面描述：主体、风格、构图、颜色、光线等，越具体越好（≤2000 字）'),
+      model: z.string().optional().describe('可选：图像模型名（默认 agnes-image-2.5-flash；一般不用填）'),
+      size: z.string().optional().describe('可选：尺寸，如 1024x1024（默认 1024x1024）')
+    },
+    async ({ key, token, prompt, model, size }) => {
+      try {
+        const data = await agentApi('/api/socialV2/generate-image', {
+          method: 'POST',
+          body: JSON.stringify({
+            key,
+            prompt: String(prompt),
+            ...(model ? { model: String(model) } : {}),
+            ...(size ? { size: String(size) } : {})
+          }),
+          headers: { 'x-agent-token': token },
+          timeoutMs: 300000
+        });
+        return { content: [{ type: 'text', text: serializeModelData(data) }] };
+      } catch (error) {
+        return { content: [{ type: 'text', text: `画图失败：${error?.message ?? error}` }], isError: true };
       }
     }
   );
