@@ -1687,6 +1687,101 @@ F("toolsPath", "bili.mjs 路径", "留空 = 用合体插件自带的 tools/", "t
           "硬闸门：安静时段 / 每天上限 / 你正在聊天 / token 额度 / 好友关系，任一不过都不会发。"));
     }
 
+    // ── 目的机制 · 看屏幕（2026-11-01）────────────────────────────────────
+    // 截图只是判断依据：由视觉模型给出「在做什么 / 可打扰度 / 有没有私人内容」，
+    // 插件据此决定这一轮主动搭话要不要出发。默认关；失败按 fail-open 放行。
+    function ScreenWatchCard({ cfg, set, busy, toast }) {
+      const P = cfg?.purpose && typeof cfg.purpose === "object" ? cfg.purpose : {};
+      const S = P.screen && typeof P.screen === "object" ? P.screen : {};
+      const setS = (key, value) => set(["purpose", "screen", key], value);
+      const [status, setStatus] = useState(null);
+      const [msg, setMsg] = useState("");
+      const [looking, setLooking] = useState(false);
+      const pv = (key, fallback) => (S[key] === undefined || S[key] === null || S[key] === "" ? fallback : S[key]);
+      const enabled = S.enabled === true;
+
+      const load = async () => {
+        try {
+          const r = await api("/purpose/screen");
+          setStatus(r?.screen ?? null);
+        } catch (e) { setMsg(`✗ ${e.message}`); }
+      };
+      useEffect(() => { void load(); }, []);
+
+      const doLook = async () => {
+        setLooking(true);
+        setMsg("");
+        try {
+          const r = await api("/purpose/screen/look", { method: "POST" });
+          setStatus(r?.screen ?? null);
+          const v = r?.verdict;
+          if (v?.ok) {
+            const activity = {
+              working: "在干活", study: "在学习", entertainment: "在娱乐", gaming: "打游戏",
+              video: "看视频", meeting: "开会/共享", chat: "聊天", idle: "空闲", away: "人不在", unknown: "看不清",
+            }[v.activity] ?? v.activity;
+            setMsg(`✓ 看到了：${v.summary || "（无摘要）"} · ${activity} · 可打扰度 ${Number(v.interruptible).toFixed(2)}` +
+              `${v.privacy === "sensitive" ? " · 私人内容（不会搭话）" : ""}`);
+          } else {
+            setMsg(`✗ 没看到：${r?.error || "视觉模型不可用"}（按 fail-open 继续原来的排程）`);
+          }
+        } catch (e) {
+          setMsg(`✗ ${e.message}`);
+        } finally { setLooking(false); }
+      };
+
+      const last = status?.last;
+      const atText = (ms) => (ms ? new Date(ms).toLocaleString("zh-CN", { hour12: false }) : "—");
+      const numRow = (label, key, fallback, hint, { min = 1, max = 180 } = {}) => h(Row, { label, hint },
+        h("input", {
+          className: "qbw-input", type: "number", min, max,
+          value: pv(key, fallback),
+          onChange: (e) => setS(key, e.target.value === "" ? undefined : Number(e.target.value)),
+        }));
+
+      return h("div", { className: "qbw-card", style: { marginBottom: "10px" } },
+        h("div", { style: { display: "flex", justifyContent: "space-between", gap: "10px", alignItems: "flex-start", flexWrap: "wrap" } },
+          h("div", null,
+            h("h4", { style: { margin: 0 } }, "看屏幕再决定要不要搭话",
+              h("span", { className: "qbw-badge " + (enabled ? "ok" : "warn") }, enabled ? "开" : "关")),
+            h("p", { style: { marginTop: "4px" } },
+              "每隔一段时间截一张屏幕，让视觉模型判断你此刻在做什么、适不适合被打扰；不适合就这一轮不说话。",
+              "在桌宠对话框里问到屏幕（「能看得到我屏幕吗 / 看看我桌面」）也会现截一张再回答；没看清会如实说没看清。",
+              "截图只用来判断/回答，不写进记忆卡；默认用完即删。")),
+          h(Btn, { kind: "qbw-btn2", onClick: load, disabled: !!busy }, "刷新")),
+        h(Row, { label: "启用看屏幕", hint: "默认关。打开后截图会发给下面配置的视觉模型（离开本机）" },
+          h("input", { className: "qbw-switch", type: "checkbox", checked: enabled, onChange: (e) => setS("enabled", e.target.checked) })),
+        numRow("每隔多久看一眼（分钟）", "intervalMin", 10, "默认 10；只在桌宠在线且非安静时段时截", { min: 1, max: 180 }),
+        numRow("觉得不适合时多久再看（分钟）", "retryMin", 10, "判定「这会别说话」后，隔这么久再瞄一眼", { min: 1, max: 180 }),
+        h("div", { className: "qbw-actions", style: { borderTop: "none", marginTop: "4px", paddingTop: "0", flexWrap: "wrap" } },
+          h(Btn, { kind: "qbw-btn2", onClick: doLook, disabled: looking || !!busy }, looking ? "看屏幕中…" : "现在看一眼（会发图）")),
+        msg ? h("div", { className: msg.startsWith("✗") ? "qbw-err" : "qbw-hint", style: { marginTop: "6px" } }, msg) : null,
+        h("div", { className: "qbw-hint", style: { marginTop: "6px" } },
+          last
+            ? `最近一次：${atText(last.at)} · ${last.ok ? (last.summary || "（无摘要）") : `失败：${last.error || "不可用"}`}` +
+              (last.ok ? ` · 可打扰度 ${last.interruptible === null ? "?" : Number(last.interruptible).toFixed(2)}${last.privacy === "sensitive" ? " · 私人内容" : ""}${last.cached ? " · 复用同一画面" : ""}` : "")
+            : "还没有看过屏幕。",
+          status?.lastError ? h("div", null, `最近错误：${status.lastError}`) : null),
+        h("details", { style: { marginTop: "8px" } },
+          h("summary", { style: { cursor: "pointer", fontWeight: 600 } }, "视觉模型与截图参数"),
+          h(Row, { label: "视觉接口地址", hint: "OpenAI 兼容的 /chat/completions 前缀" },
+            h("input", { className: "qbw-input", value: pv("baseUrl", "https://api.deepseek.com"), onChange: (e) => setS("baseUrl", e.target.value) })),
+          h(Row, { label: "视觉模型", hint: "要能看图；默认 deepseek-flash（DeepSeek-V4.1-Flash，声明支持图片输入）" },
+            h("input", { className: "qbw-input", value: pv("model", "deepseek-flash"), onChange: (e) => setS("model", e.target.value) })),
+          h(Row, { label: "密钥引用名", hint: "从 DSH 凭据里按这个名字取（默认 DEEPSEEK_API_KEY）；不会显示明文" },
+            h("input", { className: "qbw-input", value: pv("apiKeyRef", "DEEPSEEK_API_KEY"), onChange: (e) => setS("apiKeyRef", e.target.value) })),
+          numRow("截图最大宽度（像素）", "maxWidth", 1280, "越小越省视觉 token；默认 1280", { min: 480, max: 2560 }),
+          numRow("JPEG 质量", "quality", 70, "默认 70；40~90", { min: 40, max: 90 }),
+          numRow("可打扰度阈值（0~1）", "minInterruptible", 0.55, "低于这个值就不说话；默认 0.55", { min: 0, max: 1 }),
+          h(Row, { label: "视觉失败也照常搭话", hint: "关掉 = 看不了屏幕就不搭话（不推荐：会让排程停摆）" },
+            h("input", { className: "qbw-switch", type: "checkbox", checked: S.failOpen !== false, onChange: (e) => setS("failOpen", e.target.checked) })),
+          h(Row, { label: "保留截图（排障）", hint: "默认关；打开后截图会留在 ~/.dsh/surfcore/pet/screen/" },
+            h("input", { className: "qbw-switch", type: "checkbox", checked: S.keepScreenshots === true, onChange: (e) => setS("keepScreenshots", e.target.checked) }))),
+        h("div", { className: "qbw-hint", style: { marginTop: "6px" } },
+          "判定为私人内容时：这一轮不搭话，摘要也不会进提示词；截图默认读完即删。",
+          "开关 / 间隔改完点页面底部「保存」生效（和「目的」页共用同一份配置，只在这里改就够了）。"));
+    }
+
     // ── 目的机制 · 载体选择（桌宠 / QQ）──────────────────────────────────
     // 2026-10-25 用户要求：目的机制独立成一个栏目；载体可选桌宠或 QQ，
     // 未安装桌宠的用户默认 QQ。同一时刻只有一个载体在发，避免两边同时收到。
@@ -1828,6 +1923,16 @@ F("toolsPath", "bili.mjs 路径", "留空 = 用合体插件自带的 tools/", "t
           "没装桌宠的用户默认走 QQ；装了桌宠后可以切到桌宠，同一时间只会有一个载体收到。"),
         h(PurposeCarrierCard, { cfg: qq, set: setQq, busy, toast }),
         h(PurposeCard, { cfg: qq, set: setQq, busy, setBusy, toast, carrier: qq?.purpose?.carrier }),
+        // 看屏幕的设置 2026-11-01 按用户要求移到「桌宠」页（截图是桌宠自己的能力）；这里只留指路 + 当前值。
+        h("div", { className: "qbw-card", style: { marginBottom: "10px" } },
+          h("h4", { style: { margin: 0 } }, "看屏幕",
+            h("span", { className: "qbw-badge " + (qq?.purpose?.screen?.enabled === true ? "ok" : "warn") },
+              qq?.purpose?.screen?.enabled === true ? "开" : "关")),
+          h("div", { className: "qbw-hint", style: { marginTop: "4px" } },
+            `开关、每隔多久主动看一眼（当前 ${Number(qq?.purpose?.screen?.intervalMin) || 10} 分钟）、视觉模型与「现在看一眼」，都在「桌宠」页的「看屏幕」卡片里。`,
+            "这里的主动搭话出发前也会参考那份看屏幕判定；私人内容 / 游戏 / 会议时这一轮不打扰。"),
+          goTab ? h("div", { className: "qbw-actions", style: { borderTop: "none", marginTop: "6px", paddingTop: "0" } },
+            h(Btn, { kind: "qbw-btn2", onClick: () => goTab("pet") }, "去「桌宠」页设置看屏幕")) : null),
         h(PetChatTestCard, { toast }),
         h("div", { className: "qbw-hint", style: { marginTop: "6px" } },
           "桌宠的安装/启动、对话参数在「桌宠」页；人设与记忆在「角色 / 记忆」页。",
@@ -2898,14 +3003,14 @@ F("socialV2.voice.ffmpegPath", "ffmpeg 路径", "留空走 PATH", "text", { wide
       };
       const fmtDate = (iso) => { try { return new Date(iso).toLocaleDateString("sv-SE"); } catch { return ""; } };
       const clarityLabel = { vivid: "清晰", clear: "清楚", fuzzy: "模糊", trace: "只剩印象", forgotten: "已遗忘" };
-      const platformLabel = { qq: "QQ", bili: "B站", shared: "共享" };
+      const platformLabel = { qq: "QQ", bili: "B站", shared: "共享", pet: "桌宠" };
       const summary = h("div", null,
         h("div", { className: "qbw-infobox" },
           h("b", null, "当前提示词加载："),
           status.loadedLabel || "衰减记忆卡（日常加载）",
           "。全量记忆卡（所有记忆保持清晰、永不遗忘）只存档，不会自动注入；在下方「全量记忆卡」里查看 / 搜索。",
           h("div", { className: "qbw-hint", style: { marginTop: "4px" } },
-            `QQ 注入文件：${status.paths?.promptQq ?? "—"} · B站 注入文件：${status.paths?.promptBili ?? "—"}`)),
+            `QQ 注入文件：${status.paths?.promptQq ?? "—"} · B站 注入文件：${status.paths?.promptBili ?? "—"} · 桌宠 注入文件：${status.paths?.promptPet ?? "—"}`)),
         h("div", { className: "qbw-card", style: { borderColor: level >= 2 ? "rgba(229,72,77,.45)" : level >= 1 ? "rgba(255,176,32,.45)" : undefined } },
           h("div", { className: "qbw-meter-head" },
             h("div", null, h("b", null, "记忆卡"), h("span", { className: "qbw-hint" }, "长期记忆 · 角色卡管“她是谁”，这张卡管“她记得什么”")),
@@ -2921,7 +3026,7 @@ F("socialV2.voice.ffmpegPath", "ffmpeg 路径", "留空走 PATH", "text", { wide
               : "建议压缩：会先把最不重要的旧记忆模糊化，置顶的、和主人相关的重要记忆不会动。",
             !status.unlimited && level >= 3 ? "（已满 100%，新记忆会自动压缩，但仍建议检查。）" : "") : null,
           h("div", { className: "qbw-hint" },
-            `最近整理：${fmtTime(status.lastMaintenanceAt)} · 上次每日遗忘：${status.lastDecayDate || "还没跑"} · 注入预算 QQ ${config.injectMaxChars?.qq ?? 0} / B站 ${config.injectMaxChars?.bili ?? 0} 字`),
+            `最近整理：${fmtTime(status.lastMaintenanceAt)} · 上次每日遗忘：${status.lastDecayDate || "还没跑"} · 注入预算 QQ ${config.injectMaxChars?.qq ?? 0} / B站 ${config.injectMaxChars?.bili ?? 0} / 桌宠 ${config.injectMaxChars?.pet ?? 0} 字`),
           h("div", { className: "qbw-search", style: { marginTop: "8px" } },
             h("span", { className: "qbw-label" }, "衰减卡字数上限"),
             h("input", {
@@ -2976,6 +3081,8 @@ F("socialV2.voice.ffmpegPath", "ffmpeg 路径", "留空走 PATH", "text", { wide
             h("input", { className: "qbw-input", type: "number", min: 400, max: 8000, value: config.injectMaxChars?.qq ?? 2200, onChange: (e) => setInject("qq", Number(e.target.value)) })),
           h(Row, { label: "B站 注入上限（字）", hint: "B站每次醒来注入的记忆预算" },
             h("input", { className: "qbw-input", type: "number", min: 400, max: 8000, value: config.injectMaxChars?.bili ?? 2000, onChange: (e) => setInject("bili", Number(e.target.value)) })),
+          h(Row, { label: "桌宠 注入上限（字）", hint: "桌宠每次对话注入的记忆预算（桌宠专用块：桌宠/今天/和主人/最近在前，叙事尾巴在后）" },
+            h("input", { className: "qbw-input", type: "number", min: 400, max: 8000, value: config.injectMaxChars?.pet ?? 4200, onChange: (e) => setInject("pet", Number(e.target.value)) })),
           h(Row, { label: "最近 N 天保持清楚", hint: "这段时间内的事至少是「清楚」" },
             h("input", { className: "qbw-input", type: "number", min: 1, max: 60, value: config.recentDays ?? 7, onChange: (e) => setConfig("recentDays", Number(e.target.value)) })),
           h(Row, { label: "多少天后开始模糊", hint: "新记忆的保护期；到期后每天降一档" },
@@ -3079,7 +3186,10 @@ F("socialV2.voice.ffmpegPath", "ffmpeg 路径", "留空走 PATH", "text", { wide
             h("div", { className: "qbw-scroll" }, h("pre", null, data.promptQq || "（还没有记忆；点「立即整理」）"))),
           h("div", null,
             h("div", { className: "qbw-group" }, "B站 注入预览 ", h("small", null, `${status.promptChars?.bili ?? 0} 字`)),
-            h("div", { className: "qbw-scroll" }, h("pre", null, data.promptBili || "（还没有 B站 记忆）")))),
+            h("div", { className: "qbw-scroll" }, h("pre", null, data.promptBili || "（还没有 B站 记忆）"))),
+          h("div", null,
+            h("div", { className: "qbw-group" }, "桌宠 注入预览 ", h("small", null, `${status.promptChars?.pet ?? 0} 字`)),
+            h("div", { className: "qbw-scroll" }, h("pre", null, data.promptPet || "（还没有桌宠记忆；点「立即整理」）")))),
         h(Section, { title: "完整记忆卡（memory-card.md）", note: `${data.markdown?.length ?? 0} 字`, collapsible: false },
           h("div", { className: "qbw-scroll" }, h("pre", null, data.markdown || "（空）"))),
         (data.backups ?? []).length ? h(Section, { title: "记忆卡备份", note: `${data.backups.length} 份`, collapsible: false },
@@ -3108,7 +3218,7 @@ F("socialV2.voice.ffmpegPath", "ffmpeg 路径", "留空走 PATH", "text", { wide
       useEffect(() => { load(q); }, [load, reloadKey]);
       const status = data?.status ?? {};
       const fmtDate = (iso) => { try { return new Date(iso).toLocaleDateString("sv-SE"); } catch { return ""; } };
-      const platformLabel = { qq: "QQ", bili: "B站", shared: "共享" };
+      const platformLabel = { qq: "QQ", bili: "B站", shared: "共享", pet: "桌宠" };
       const search = async () => { await load(q); };
       return h("div", { className: "qbw-card" },
         h("div", { className: "qbw-meter-head" },
@@ -4489,7 +4599,9 @@ F("socialV2.voice.ffmpegPath", "ffmpeg 路径", "留空走 PATH", "text", { wide
     }
 
     // ── 桌宠页：独立栏目，默认不安装，用户自己装 ───────────────────────────
-    function PetTab({ toast, unified, setUnified }) {
+    // 2026-11-01：按用户要求把「每隔多久主动看屏幕」等看屏幕设置从「目的」页挪到这里（桌宠自己的能力），
+    // 配置仍写 QQ config 的 purpose.screen（和目的页共用一份），底部「保存」一起提交。
+    function PetTab({ toast, unified, setUnified, cfg, set }) {
       const [st, setSt] = useState(null);
       const [busy, setBusy] = useState("");
       const [err, setErr] = useState("");
@@ -4587,6 +4699,25 @@ F("socialV2.voice.ffmpegPath", "ffmpeg 路径", "留空走 PATH", "text", { wide
             st && st.installed && !st.running ? h(Btn, { onClick: () => act("start"), disabled: !!busy }, "启动") : null,
             st && st.installed && st.running ? h(Btn, { kind: "qbw-btn2", onClick: () => act("stop"), disabled: !!busy }, "停止") : null,
             st && st.installed ? h(Btn, { kind: "qbw-btn2", onClick: () => act("remove"), disabled: !!busy }, "卸载") : null)),
+        // 启动方式（2026-11-01）：DSH 每次起来时自动把桌宠拉起来（装好才可设）。
+        h("div", { className: "qbw-card", style: { marginTop: "10px" } },
+          h("h4", null, "启动",
+            st?.autoStart ? h("span", { className: "qbw-badge ok" }, "随 DSH 自动打开") : null),
+          h(Row, { label: "DSH 启动时自动打开桌宠", hint: "开启后：每次 DeepSeek Harness 启动会把桌宠拉起来；插件启动时只检查一次，手动停止后不会被反复拉起" },
+            h("input", {
+              className: "qbw-switch",
+              type: "checkbox",
+              checked: st?.autoStart === true,
+              disabled: !st?.installed || busy === "autoStart",
+              onChange: (e) => act("config", { autoStart: e.target.checked }, "autoStart"),
+            })),
+          h("div", { className: "qbw-hint" },
+            st?.installed
+              ? (st?.autoStart ? "已开启：下次 DSH 启动时自动打开桌宠。" : "已关闭：每次需要手动点上面的「启动」。")
+              : "先装好桌宠，再打开这个开关。")),
+        // 看屏幕（2026-11-01 用户要求从「目的」页挪到桌宠页）：开关 / 每隔多久看一眼 / 立即测试。
+        // 配置写在 QQ config 的 purpose.screen；改完点底部「保存」生效（和目的页同一份）。
+        h(ScreenWatchCard, { cfg, set, busy, toast }),
         h("div", { className: "qbw-card", style: { marginTop: "10px" } },
           h("h4", null, "安装设置"),
           h("div", { className: "qbw-hint", style: { margin: "4px 0 8px" } }, "安装包：zip 的本地路径或 http(s) 链接；Electron：本机 electron.exe 的完整路径（安装包不带运行时）。"),
@@ -4872,7 +5003,7 @@ F("socialV2.voice.ffmpegPath", "ffmpeg 路径", "留空走 PATH", "text", { wide
         if (tab === "tokens") return h(TokenTab, { budget, limits: limitDraft, onChange: setLimitDraft, disabled: !!busy, alertedToday: tokenAlerted, onSave: () => save(false), busy, toast: notify });
         if (tab === "watch") return h(WatchTab, { busy, setBusy, toast: notify, goTab: setTab });
         if (tab === "voice") return h(VoiceTab, { toast: notify, qq, setQqPath });
-        if (tab === "pet") return h(PetTab, { toast: notify, unified, setUnified: setUnifiedPath });
+        if (tab === "pet") return h(PetTab, { toast: notify, unified, setUnified: setUnifiedPath, cfg: qq, set: setQqPath });
         if (tab === "memory") return h(MemoryTab, { qq: normalizedQq, unified, setUnified: setUnifiedPath, overview, busy, setBusy, toast: notify, reload });
         if (tab === "align") return h(AlignTab, { busy, setBusy, toast: notify, reload });
         if (tab === "extensions") return h(ExtensionsTab, { busy, setBusy, toast: notify, reload });

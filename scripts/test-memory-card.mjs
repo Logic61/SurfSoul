@@ -14,7 +14,7 @@ import {
   resolveMemoryCardPaths, saveMemoryCardOutputs, scoreMemory, shouldNotifyOwner, targetClarity,
   trimMemoryCard, safeSlice,
 } from '../src/memory-card.js';
-import { loadNarrative, saveNarrative } from '../src/memcard-narrative.js';
+import { DEFAULT_NARRATIVE_CONFIG, loadNarrative, runNarration, saveNarrative } from '../src/memcard-narrative.js';
 
 const temps = [];
 function tempDir() {
@@ -643,6 +643,80 @@ test('桌宠记忆在提示词预算里不会被普通最近记忆挤掉', () =>
   const out = renderMemoryCard(card, { platform: 'qq', config: cfg, maxChars: 900, now: NOW + 60_000 });
   assert.match(out, /桌宠（私下相处）/, '桌宠小节必须出现在 QQ 注入块里');
   assert.match(out, /桌宠预算验证/, '预算紧张时也不能先砍掉桌宠记忆');
+});
+
+test('桌宠注入块：桌宠/今天在前、叙事当尾巴，预算内不丢最近记忆（2026-11-01）', () => {
+  const dir = tempDir();
+  const paths = resolveMemoryCardPaths(dir);
+  const card = createEmptyCard(NOW);
+  addMemoryRecord(card, {
+    source: 'qq-owner',
+    text: '今天在 QQ 里说：晚上一起看那部片子，别忘了。',
+    isOwner: true, isPrivate: true, direct: true,
+    createdAt: NOW - 60_000, lastSeenAt: NOW - 60_000,
+  }, CFG, NOW);
+  ingestInboxLines(card, [JSON.stringify({
+    at: new Date(NOW - 30_000).toISOString(), platform: 'pet', kind: 'private', sender: '主人',
+    isOwner: true, private: true, direct: true, conversationKey: 'pet',
+    text: '桌宠专用块验证：这句话必须排在叙事前面',
+  })], CFG, NOW);
+  const episodes = [];
+  for (let i = 0; i < 10; i += 1) {
+    episodes.push({
+      id: `ep_pet_${i}`, date: '2026-09-01', conv: '私聊', title: `旧回忆 ${i}`,
+      text: `很久以前我们一起经历过的一件小事，第 ${i} 条，专门占叙事预算。`,
+      covers: [], at: NOW - DAY_MS * (30 + i),
+    });
+  }
+  saveNarrative(dir, { episodes });
+  const cfg = normalizeMemoryCardConfig({ maxChars: 0, injectMaxChars: { qq: 900, bili: 700, pet: 900 } });
+  const narrative = loadNarrative(dir);
+  const out = renderMemoryCard(card, { platform: 'pet', config: cfg, maxChars: cfg.injectMaxChars.pet, now: NOW + 60_000, narrative });
+  assert.ok(out.length <= cfg.injectMaxChars.pet, `桌宠注入块不能超过预算：${out.length}`);
+  const petIndex = out.indexOf('## 桌宠（私下相处）');
+  const todayIndex = out.indexOf('## 今天聊过的');
+  const episodeIndex = out.indexOf('## 我们一起经历过的');
+  assert.ok(petIndex >= 0, '桌宠小节必须在桌宠注入块里');
+  assert.ok(todayIndex > petIndex, `今天聊过的应排在桌宠小节之后：pet=${petIndex} today=${todayIndex}`);
+  assert.ok(episodeIndex < 0 || episodeIndex > todayIndex, '叙事尾巴必须排在原始事实之后（或预算不足时不出现）');
+  assert.match(out, /桌宠专用块验证/, '桌宠记忆内容要进桌宠注入块');
+  assert.match(out, /晚上一起看那部片子/, '最近 QQ 记忆要进桌宠注入块');
+  assert.doesNotMatch(out, /B站 冲浪/, '桌宠块不放 B站 大模块');
+  const saved = saveMemoryCardOutputs(paths, card, cfg, NOW + 60_000);
+  assert.ok(saved.promptPet.length > 0, '维护写盘要生成 promptPet');
+  assert.equal(fs.readFileSync(paths.promptPet, 'utf8').trim(), saved.promptPet);
+  assert.match(saved.promptPet, /桌宠（私下相处）/);
+  assert.equal(saved.status.promptChars.pet, saved.promptPet.length);
+});
+
+test('叙事层：回忆上限 120→300，到顶不再永久停更（2026-11-01）', async () => {
+  const dir = tempDir();
+  const paths = resolveMemoryCardPaths(dir);
+  const card = createEmptyCard(NOW);
+  for (let i = 0; i < 12; i += 1) {
+    addMemoryRecord(card, {
+      source: 'qq-group',
+      text: `旧记录 ${i}：很早以前发生的一件事，内容足够长，可以被叙事层压缩成回忆。`,
+      createdAt: NOW - (200 + i) * 60_000,
+      lastSeenAt: NOW - (200 + i) * 60_000,
+    }, CFG, NOW);
+  }
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(paths.json, `${JSON.stringify(card, null, 2)}\n`);
+  const episodes = [];
+  for (let i = 0; i < 121; i += 1) {
+    episodes.push({ id: `ep_cap_${i}`, date: '2026-09-01', conv: '群里', title: `回忆 ${i}`, text: `第 ${i} 条旧回忆，专门用来撞旧上限。`, covers: [], at: i });
+  }
+  saveNarrative(dir, { episodes });
+  const calls = [];
+  const res = await runNarration({
+    memoryDir: dir,
+    dryRun: true,
+    complete: async (args) => { calls.push(args); return { text: '不是 JSON', usage: null }; },
+  });
+  assert.equal(DEFAULT_NARRATIVE_CONFIG.maxEpisodes, 300, '叙事层默认上限应为 300（旧值 120 会永久停更）');
+  assert.notEqual(res.skipped, 'full', '121 条回忆时不应再被旧上限 120 挡住');
+  assert.equal(calls.length, 1, '过了上限检查后应该真的挑记录并调模型');
 });
 
 test('容量口径唯一：状态/写盘/注入按同一份「含叙事」渲染算（P1-1）', () => {

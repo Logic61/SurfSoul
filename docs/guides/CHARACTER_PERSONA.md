@@ -19,6 +19,7 @@
     │   ├── memory-card.md
     │   ├── memory-card-prompt-qq.md
     │   ├── memory-card-prompt-bili.md
+    │   ├── memory-card-prompt-pet.md   # 桌宠专用（2026-11-01）
     │   ├── memory-inbox.jsonl
     │   ├── memory-card-full.jsonl      # 全量记忆（append-only，不生成 prompt）
     │   ├── memory-card-full-stats.json
@@ -71,7 +72,7 @@
 | 数据 | 隔离 | 说明 |
 | --- | --- | --- |
 | 人格卡 | ✅ 按角色 | `persona.md`；QQ/B站 每次注入都读当前角色 |
-| 衰减/全量记忆 | ✅ 按角色 | `memory/`；QQ 注入块、B站 记忆都由当前角色生成 |
+| 衰减/全量记忆 | ✅ 按角色 | `memory/`；QQ/B站/桌宠 三份注入块都由当前角色生成 |
 | QQ 记忆 inbox | ✅ 按角色 | 桥接启动时解析当前角色路径 |
 | B站 额度/评论/动态/评分/收藏/日记 | ✅ 按角色 | `tools/lib/state-paths.mjs` 每次进程启动解析当前角色 |
 | 分享排期/已用素材 | ✅ 按角色 | 迁移时从 `repo/state` 拷进角色包，避免当天重发 |
@@ -90,7 +91,7 @@
 - **自动存档**：启动 10 秒后 + 每 6 小时检查一次；每天最多一份 `auto-YYYY-MM-DD`。
 - **12 个自动槽**：`before-switch` + 180 / 90 / 60 / 30 / 15 / 10 / 7 / 5 / 3 / 2 / 1 天。
   每次自动检查时，按快照时间就近保留这 11 个年龄档 + 切换前槽；多余自动档删除。
-- **回档**：先给当前状态拍 `pre-restore-*`，再覆盖 `persona.md`、衰减卡与两份 prompt、B站 行为账本；
+- **回档**：先给当前状态拍 `pre-restore-*`，再覆盖 `persona.md`、衰减卡与三份 prompt、B站 行为账本；
   全量记忆 JSONL **不截断**（append-only，回档不删后来真正发生过的记忆）。回档后 `epoch +1` 并重启平台。
 
 快照里的大文件优先**硬链接**（同一卷），不复制 10GB；删除快照只删链接。

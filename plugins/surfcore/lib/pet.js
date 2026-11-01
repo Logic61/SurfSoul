@@ -12,7 +12,22 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn, execFile } from 'node:child_process';
 
-const EMPTY_CONFIG = { source: '', electronPath: '', appDir: '', mirror: '', installedAt: null };
+const EMPTY_CONFIG = { source: '', electronPath: '', appDir: '', mirror: '', installedAt: null, autoStart: false };
+
+/**
+ * 「DSH 启动时自动打开桌宠」的判定（纯函数，便于单测）。
+ *
+ * 只做最小判断：**装好了 + 用户打开了自动启动 + 现在没在跑** 才启动。
+ * 失败/异常一律调用方处理（自动启动失败只记日志，不能让插件起不来）。
+ * @param {{installed?:boolean, running?:boolean, autoStart?:boolean}} status petService.status()
+ * @returns {{start:boolean, reason:'ok'|'not-installed'|'disabled'|'already-running'}}
+ */
+export function shouldAutoStartPet(status = {}) {
+  if (status?.installed !== true) return { start: false, reason: 'not-installed' };
+  if (status?.autoStart !== true) return { start: false, reason: 'disabled' };
+  if (status?.running === true) return { start: false, reason: 'already-running' };
+  return { start: true, reason: 'ok' };
+}
 
 /** 安装成功后写进安装目录的标记文件：证明"这个目录是本程序装的"，删除前必须有它。 */
 export const PET_MARKER = '.surfcore-pet.json';
@@ -398,6 +413,8 @@ export function createPetService({ stateDir, pluginLog = () => {}, subprocess = 
       electronPath: cfg.electronPath || '',
       mirror: cfg.mirror || '',
       installedAt: cfg.installedAt || null,
+      // DSH 启动时自动打开（2026-11-01）：默认关，用户显式打开才生效。
+      autoStart: cfg.autoStart === true,
       sizeBytes: pkg ? dirSize(resolveAppDir()) : 0,
       version: pkg?.version || null,
       skins: pkg ? readSkins() : [],
@@ -413,6 +430,7 @@ export function createPetService({ stateDir, pluginLog = () => {}, subprocess = 
     if (typeof patch.electronPath === 'string') next.electronPath = patch.electronPath.trim();
     if (typeof patch.mirror === 'string') next.mirror = patch.mirror.trim();
     if (typeof patch.appDir === 'string') next.appDir = patch.appDir.trim();
+    if (typeof patch.autoStart === 'boolean') next.autoStart = patch.autoStart;
     writeConfig(next);
     return status();
   }

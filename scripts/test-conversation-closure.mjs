@@ -14,6 +14,7 @@ import {
   formatClosureRecord,
   closureStatus,
   reopenClosure,
+  shouldRotateSessionAfterClosure,
 } from '../src/conversation-closure.js';
 
 let passed = 0;
@@ -216,6 +217,30 @@ test('关掉开关：不注入、不收尾、不冷却', () => {
   assert.equal(closeGate(a, { enabled: false }).blocked, true);
   const rec = makeClosureRecord({ key: 'private:1', kind: 'private', assessment: a, now, config: { enabled: false } });
   assert.equal(closureSuppressesWake(rec, 'probability', now), true, '显式关闭不会自动取消已写入的冷却；由 bridge 决定是否写记录');
+});
+
+// 2026-11-01 主人定的会话轮换规则：不按 token，数「自然收尾次数」——收尾 5 次后换 session。
+test('会话轮换阈值：默认自然收尾 5 次后换；0 = 关闭；可配', () => {
+  assert.equal(DEFAULT_CLOSURE_CONFIG.rotateAfterClosures, 5);
+  assert.equal(normalizeClosureConfig({}).rotateAfterClosures, 5);
+  assert.equal(normalizeClosureConfig({ rotateAfterClosures: 0 }).rotateAfterClosures, 0);
+  assert.equal(normalizeClosureConfig({ rotateAfterClosures: 2 }).rotateAfterClosures, 2);
+  // 坏值收敛到 0..100
+  assert.equal(normalizeClosureConfig({ rotateAfterClosures: -3 }).rotateAfterClosures, 0);
+  assert.equal(normalizeClosureConfig({ rotateAfterClosures: 999 }).rotateAfterClosures, 100);
+
+  // 计数是「本会话内成功收尾的次数」：第 5 次收尾才换，4 次不换。
+  assert.equal(shouldRotateSessionAfterClosure(5, {}), true);
+  assert.equal(shouldRotateSessionAfterClosure(6, {}), true);
+  assert.equal(shouldRotateSessionAfterClosure(4, {}), false);
+  assert.equal(shouldRotateSessionAfterClosure(0, {}), false);
+  assert.equal(shouldRotateSessionAfterClosure(5, { rotateAfterClosures: 0 }), false);
+  assert.equal(shouldRotateSessionAfterClosure(2, { rotateAfterClosures: 2 }), true);
+  assert.equal(shouldRotateSessionAfterClosure(6, { rotateAfterClosures: 8 }), false);
+  // 计数缺失/坏值 → 不换，绝不因为读不到计数就把会话拆了。
+  assert.equal(shouldRotateSessionAfterClosure(undefined, {}), false);
+  assert.equal(shouldRotateSessionAfterClosure(null, {}), false);
+  assert.equal(shouldRotateSessionAfterClosure('x', {}), false);
 });
 
 console.log(`\n${process.exitCode ? 'FAILED' : 'OK'}（conversation-closure ${passed} 组）`);

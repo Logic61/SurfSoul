@@ -44,12 +44,12 @@ const mod = await import('../lib/memory-card.js');
 const paths = mod.memoryCardPaths();
 
 try {
-  // 1) 维护：写入 4 份文件
+  // 1) 维护：写入 5 份文件（QQ / B站 / 桌宠 三份注入块）
   const maintained = await mod.runMemoryCardMaintenance({ forceDecay: false });
   assert.equal(maintained.ok, true);
   assert.equal(maintained.addedQq, 2);
   assert.equal(maintained.addedBili, 1);
-  for (const file of [paths.json, paths.markdown, paths.promptQq, paths.promptBili]) {
+  for (const file of [paths.json, paths.markdown, paths.promptQq, paths.promptBili, paths.promptPet]) {
     assert.equal(fs.existsSync(file), true, `缺少输出文件：${file}`);
   }
   // 全量卡：JSONL + stats + md，没有 prompt 文件（日常不加载）
@@ -72,6 +72,10 @@ try {
   assert.equal(snap.promptBili.includes('一家人'), false);
   assert.ok(mod.memoryCardPromptBlock('qq').includes('记忆卡'));
   assert.ok(mod.memoryCardPromptBlock('bili').includes('B站') || mod.memoryCardPromptBlock('bili').includes('鲸鱼娘'));
+  // 桌宠专用注入块（2026-11-01）：独立文件、可读，且和 QQ 块不是同一份内容。
+  assert.ok(snap.promptPet.includes('【记忆卡'), '桌宠专用注入块必须可读');
+  assert.ok(mod.memoryCardPromptBlock('pet').includes('【记忆卡'), 'memoryCardPromptBlock(pet) 必须读到桌宠专用块');
+  assert.notEqual(snap.promptPet, snap.promptQq, '桌宠块和 QQ 块必须是两份不同的注入块');
   // 全量卡检索
   const fullSnap = mod.fullMemoryCardSnapshot({ q: '鲸鱼娘', limit: 10 });
   assert.equal(fullSnap.fullLoaded, false);
@@ -158,6 +162,7 @@ try {
   assert.equal(fs.existsSync(paths.fullJsonl), true, '关掉日常记忆卡不应删除全量存档');
   assert.equal(fs.readFileSync(paths.promptQq, 'utf8'), '');
   assert.equal(fs.readFileSync(paths.promptBili, 'utf8'), '');
+  assert.equal(fs.readFileSync(paths.promptPet, 'utf8'), '', '关掉记忆卡也要清空桌宠注入块');
   console.log('memory-card plugin integration: OK');
 } finally {
   try { fs.rmSync(tempRoot, { recursive: true, force: true }); } catch {}

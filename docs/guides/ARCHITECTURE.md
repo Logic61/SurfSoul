@@ -120,7 +120,7 @@ SurfCore 让一个 **DeepSeek Harness（DSH）agent** 活在一个真实的人�
 三个共享引擎（`src/`）：
 
 1. **记忆卡（`memory-card.js`）**：一份衰减卡（会遗忘、有清晰度、有容量告警）+ 一份全量卡（append-only 存档，不进提示词）。
-   QQ / B站 / 桌宠 都往同一个 inbox 里写，由**插件**统一维护、渲染出两份场景化的注入块。
+   QQ / B站 / 桌宠 都往同一个 inbox 里写，由**插件**统一维护、渲染出**三份**场景化的注入块（QQ / B站 / 桌宠）。
 2. **目的机制（`purpose-engine.js`）**：从近期记忆里提炼"我想弄明白/想做点什么"，定期主动找主人。
    载体可切 QQ / 桌宠，**互斥、可回落**。
 3. **每日 token 额度（`token-budget.js` + `token-ledger.js`）**：按 QQ / B站 / 其他 / 总额四个口径记账，
@@ -202,7 +202,8 @@ agent 调 qq_send_message / qq_reply / qq_send_burst / qq_send_voice / qq_send_s
 QQ 消息 ─┐
 B站 行为 ─┼─► memory-inbox.jsonl ─►（插件，每 10 分钟）─► memory-card.json（衰减卡）
 桌宠对话 ─┘                                              ├─► memory-card-prompt-qq.md   （桥接读）
-                                                         └─► memory-card-prompt-bili.md （调度器读）
+                                                         ├─► memory-card-prompt-bili.md （调度器读）
+                                                         └─► memory-card-prompt-pet.md  （桌宠读；2026-11-01）
                         └─► memory-card-full.jsonl（全量存档，永不遗忘，**不进提示词**）
 ```
 
@@ -215,7 +216,7 @@ B站 行为 ─┼─► memory-inbox.jsonl ─►（插件，每 10 分钟）�
   另有可选 `audience`（any / private-only / group-only）在桥接注入时按当前场合整行过滤（默认 any）。
   「规矩」不靠删记忆：轻记忆有带 scope 的 `rule`（global/private/group/group:<id>），style-notes 行首可写
   `[全局]/[私聊]/[群]/[群:123]`；每轮唤醒再注入一张【场合】卡（当前是哪种场合、档位、边界）。详见
-  [`MEMORY_CARD.md`](MEMORY_CARD.md) §3.1 与 [`../RULES.md`](../../RULES.md)「记忆共同、分清场合」。
+  [`MEMORY_CARD.md`](MEMORY_CARD.md) §3.2 与 [`../RULES.md`](../../RULES.md)「记忆共同、分清场合」。
 
 ### 5.5 目的机制：主动找主人
 

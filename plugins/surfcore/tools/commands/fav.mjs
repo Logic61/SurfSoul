@@ -72,8 +72,24 @@ if (opt.list) {
 }
 
 // ── 取她的默认收藏夹 id ────────────────────────────────────
+// 2026-10-31：config 里 self.mid 为空时，这里会拿 up_mid= 空去查，永远查不到，
+// 报「还没有任何收藏夹」——可实际收藏夹早就有了（主人在网页上收藏过）。
+// 补一个兜底：self.mid 空就用 nav 接口问当前登录号要 mid。
+async function resolvedSelfMid() {
+  if (selfMid) return selfMid
+  try {
+    const r = await fetch('https://api.bilibili.com/x/web-interface/nav', { headers: H })
+    const j = await r.json()
+    return String(j?.data?.mid ?? '')
+  } catch {
+    return ''
+  }
+}
+
 async function defaultFavId() {
-  const r = await fetch(`https://api.bilibili.com/x/v3/fav/folder/created/list-all?up_mid=${selfMid}`, { headers: H })
+  const mid = await resolvedSelfMid()
+  if (!mid) throw new Error('拿不到当前账号的 mid（config self.mid 为空，nav 也没取到）')
+  const r = await fetch(`https://api.bilibili.com/x/v3/fav/folder/created/list-all?up_mid=${mid}`, { headers: H })
   const j = await r.json()
   const list = j.data?.list ?? []
   const pick = list.find((f) => /默认/.test(f.title)) ?? list[0]

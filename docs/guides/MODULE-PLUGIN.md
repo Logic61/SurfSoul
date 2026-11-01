@@ -648,7 +648,7 @@ byReason/groups/policyVersion`（`:112-123`）。
 | 谁 | 做什么 | 位置 |
 | --- | --- | --- |
 | QQ 桥接（独立进程） | 只做两件事：把事件 append 到 `memory-inbox.jsonl`；把 `memory-card-prompt-qq.md` 注入提示词 | `lib/memory-card.js:4-7` |
-| 插件宿主（本模块） | 定时摄取 inbox + `bili-memory.json`，跑遗忘/压缩，写 `memory-card.json/.md` 与两份 prompt，80/90/100% 告警 | `:7-9` |
+| 插件宿主（本模块） | 定时摄取 inbox + `bili-memory.json`，跑遗忘/压缩，写 `memory-card.json/.md` 与三份 prompt（QQ/B站/桌宠），80/90/100% 告警 | `:7-9` |
 | B站 调度器 | 每次醒来读 `memory-card-prompt-bili.md` | `:9` |
 
 **只有本模块写卡**，单进程内用 promise 链串行化；桥接只 append（`:11`、`:48-52`）。

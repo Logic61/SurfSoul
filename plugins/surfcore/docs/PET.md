@@ -73,13 +73,17 @@ SurfCore 的「桌宠」是一个**独立栏目**，和 QQ / B站 / 记忆 / 语
 桌宠 /chat 成功 → 插件追加两条 inbox 事件（platform=pet：主人说的 / 她回的）
   → 记忆卡维护器把「她回的」并进最近一条 pet-owner，形成一问一答
   → 同一套重要度评分 / 脱敏 / 每日遗忘 / 容量压缩
-  → 「## 桌宠（私下相处）」小节注入 QQ 与桌宠提示词
+  → 「## 桌宠（私下相处）」小节进 QQ 注入块；桌宠自己的提示词则读专用块 memory-card-prompt-pet.md（2026-11-01）
 ```
 
 - 开关：设置 → 桌宠 → **「把桌宠对话写进记忆卡」**（默认开）。关掉就只留在聊天记录里，不写卡。
 - 记忆卡总开关（设置 → 记忆）关掉时不会写；已存在的记录不删。
 - `scope=pet`：**默认不注入 B站**（B站只看公开/共享记忆）；QQ 和桌宠都能读到。
 - 提示词预算紧张时，桌宠小节优先于「最近记得的」被保留（有回归测试钉住），不会被普通最近记忆挤掉。
+- **桌宠读的是自己的注入块**（2026-11-01）：`memory-card-prompt-pet.md`，顺序「桌宠 → 今天聊过的 →
+  和主人的记忆 → 最近记得的 → 永远不会忘的 → 叙事尾巴」，预算 `memoryCard.injectMaxChars.pet`（默认 **4200** 字，
+  设置 → 记忆 可调）。文件不存在（旧数据/还没维护）时回退旧的 QQ 注入块前 2600 字。
+  以前她「刚在 QQ 聊完的事转头就不知道」就是旧实现只截 QQ 块前 2600 字（叙事层占满、桌宠小节在 3189 字处）。
 - 全量卡里单独归到「桌宠（私下相处）」；原始 inbox 行仍保留在 `memory-inbox.jsonl`，去重靠 `inboxSeen`。
 - 主动搭话也会落一条 `pet-self`（她主动说的那句），和问答案件分开。
 
@@ -91,6 +95,27 @@ SurfCore 的「桌宠」是一个**独立栏目**，和 QQ / B站 / 记忆 / 语
 - 切换动作本身就是语音页的启动按钮（`POST /api/voice/packs/activate`，会写 `route` 并只留一个引擎在跑）；
 - 合成失败（引擎没起、依赖服务没起）→ 只降级成文字，气泡照常显示，不会假装发了语音；
 - 桌宠设置页/目的页会显示当前路由与地址，便于核对。
+
+### 看屏幕：主动判断 + 对话里按需看（2026-11-01）
+
+载体 = 桌宠时，设置 → **桌宠** 页有一张 **「看屏幕再决定要不要搭话」** 卡片
+（2026-11-01 按用户要求从「目的」页移到这里：截图是桌宠自己的能力；「目的」页只留指路和当前间隔）：
+
+- **每隔多久主动看屏幕**：`screen.intervalMin`（默认 10 分钟，1~180），就在这张卡片的第二行；
+- 每隔该间隔截一张屏幕，下采样成 JPEG，发给配置的视觉模型
+  （OpenAI 兼容端点，默认 DeepSeek `https://api.deepseek.com` + `deepseek-flash`，密钥按 `screen.apiKeyRef`
+  从 DSH 凭据取，默认 `DEEPSEEK_API_KEY`）；
+- 视觉模型只回一个 JSON：在做什么 / 忙不忙 / 可打扰度 0~1 / 有没有私人内容；
+- 判定不通过（私人内容 / 游戏 / 视频 / 会议 / 可打扰度低）→ **这一轮不搭话**，摘要也不进提示词；
+- 判定通过 → 摘要以「你刚才瞥了一眼屏幕」写进主动搭话提示词；她也可以只输出 `SILENT` 表示这轮不说；
+- **对话里按需看**：你在对话框里问「能看得到我屏幕吗 / 看看我桌面 / 我在干嘛」，她会**现截一张**再回答；
+  截图/视觉失败时提示词要求她**如实说「这次没看清」、不许编造屏幕内容**；
+- 截图默认**读完即删**；失败按 `screen.failOpen`（默认 true）退回纯排程，不会因为看不了屏幕就永远不说话。
+- 视觉请求带 `thinking:{type:'disabled'}`（DeepSeek：reasoning 0、约 40 completion tokens、~1.3s）与
+  `chat_template_kwargs.enable_thinking=false`（Qwen 系兼容端点）；不认这些参数的老端点会 400/422 后自动去掉重试一次。
+
+> 开关默认关：截图会离开本机，必须用户显式打开。数据流与配置见
+> [../../../docs/guides/PURPOSE_OUTREACH.md](../../../docs/guides/PURPOSE_OUTREACH.md) 的「看屏幕」一节。
 
 ---
 
@@ -123,7 +148,7 @@ SurfCore 的「桌宠」是一个**独立栏目**，和 QQ / B站 / 记忆 / 语
 
 ```
 ~/.dsh/surfcore/pet/
-  config.json          { source, electronPath, appDir, installedAt }
+  config.json          { source, electronPath, appDir, mirror, installedAt, autoStart }
   app/                 解压后的桌宠应用（package.json + dist/ + skins/ + assets/）
   host.json            桌宠发现文件：{ baseUrl, token, api, pluginVersion }（插件每次启动/每 2 分钟重写）
   host-token           本地令牌（0600；host.json 里是同一把）
@@ -148,6 +173,7 @@ SurfCore 的「桌宠」是一个**独立栏目**，和 QQ / B站 / 记忆 / 语
 3. 点「安装」→ 解压到 `pet/app`（或你设置的安装目录）
 4. 填「Electron 路径」：本机 `electron.exe` 的完整路径（安装包**不带** Electron 运行时；留空会尝试从 PATH 找）
 5. 点「启动」/「停止」；「卸载」只清 `app/`
+6. 想让它每次 DSH 一起来就出现：打开「**DSH 启动时自动打开桌宠**」（默认关）
 
 安装包格式：
 
@@ -162,6 +188,15 @@ assets/            tray.png / icon.png
 
 「内置形象」列表由宿主读取 `app/skins/*/manifest.json` 的 `name` 字段得到，换皮肤不需要改插件。
 
+### 随 DSH 自动打开（2026-11-01）
+
+- 开关：设置 → 桌宠 → **启动 → DSH 启动时自动打开桌宠**，落盘在 `pet/config.json` 的 `autoStart`（默认 `false`）。
+- 行为：插件每次激活（= DSH 启动 / 插件重载）后延迟 5 秒检查一次：
+  `installed && autoStart && !running` 才启动；已经在跑就跳过，没装/没开就静默。
+- 只检查一次：你手动点「停止」后不会被反复拉起；下次 DSH 启动才再自动打开。
+- 失败只写插件日志（`[pet] 自动打开失败：…`），不影响插件其它功能。
+- 依赖本机 `electron.exe`（`pet/config.json` 的 `electronPath`）；Electron 路径丢了会自动打开失败，需要回桌宠页重新检测/下载。
+
 ---
 
 ## 7. 宿主接口
@@ -171,7 +206,7 @@ assets/            tray.png / icon.png
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/dsh-surfcore/api/pet/status` | 安装/运行状态、形象列表、**对话 / 语音 / 模型 / 在线状态** |
-| POST | `/dsh-surfcore/api/pet/config` | 保存 `{ source, electronPath, appDir }` |
+| POST | `/dsh-surfcore/api/pet/config` | 保存 `{ source, electronPath, appDir, mirror, autoStart }` |
 | POST | `/dsh-surfcore/api/pet/install` | 下载/解压安装包 |
 | POST | `/dsh-surfcore/api/pet/start` | 启动 Electron 子进程（自动去掉 `ELECTRON_RUN_AS_NODE`） |
 | POST | `/dsh-surfcore/api/pet/stop` | 结束进程树 |

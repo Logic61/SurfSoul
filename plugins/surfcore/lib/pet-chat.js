@@ -24,8 +24,9 @@ import { resolvePersonaFile } from './persona.js';
 import { memoryCardPromptBlock } from './memory-card.js';
 import { activeMemoryPaths, readCurrentCharacter } from '../../../src/character-persona.js';
 import { adminFromSources } from '../../../src/admin-identity.js';
-import { appendMemoryInboxEvent } from '../../../src/memory-card.js?rev=memfix-f0b02c2270';
+import { appendMemoryInboxEvent } from '../../../src/memory-card.js?rev=memfix-d913f4f63b';
 import { synthesizeToFile, wavDurationMs } from '../../../src/voice-tts.js';
+import { buildChatScreenBlock, wantsScreenLook } from './screen-watch-core.js';
 
 const ONE_SECOND = 1000;
 const MAX_INPUT_CHARS = 1200;
@@ -182,8 +183,9 @@ function tokenHash(text) {
  * @param {object} [opts.tokenBudget]  每日额度服务（可选，冒烟测试可不传）
  * @param {number} [opts.llmTimeoutMs] 单测/排障注入：覆盖模型调用超时（毫秒）。
  *   生产不传 —— 走 settings().chat.llmTimeoutMs（默认 90s，clamp 5s~180s）。
+ * @param {object} [opts.screen]       「看屏幕」服务（可选；对话里问到屏幕时现截一张）
  */
-export function createPetChatService({ ctx, stateDir, pluginLog = () => {}, tokenBudget = null, llmTimeoutMs = null } = {}) {
+export function createPetChatService({ ctx, stateDir, pluginLog = () => {}, tokenBudget = null, llmTimeoutMs = null, screen = null } = {}) {
   const root = path.join(stateDir, 'pet');
   const chatDir = path.join(root, 'chat');
   const voiceDir = path.join(root, 'voice');
@@ -310,7 +312,16 @@ export function createPetChatService({ ctx, stateDir, pluginLog = () => {}, toke
   function memoryBlock() {
     const unified = unifiedConfig();
     if (unified?.memoryCard?.enabled === false) return '';
-    try { return String(memoryCardPromptBlock('qq') || '').trim(); } catch { return ''; }
+    try {
+      // 2026-11-01（P0）：优先读桌宠专用注入块 memory-card-prompt-pet.md。
+      // 它由记忆卡维护器按「桌宠 → 今天 → 和主人 → 最近 → 叙事尾巴」渲染，并已裁到
+      // injectMaxChars.pet 预算内，所以这里**不再按字数切**（旧的 2600 硬编码会把
+      // 桌宠小节/最近 QQ 记忆永远切掉——叙事层一占满，2600 字里只剩旧回忆）。
+      const petBlock = String(memoryCardPromptBlock('pet') || '').trim();
+      if (petBlock) return petBlock;
+      // 兼容：还没跑到新维护（文件不存在）时退回旧的 QQ 块前缀，行为不劣化。
+      return String(memoryCardPromptBlock('qq') || '').trim().slice(0, 2600);
+    } catch { return ''; }
   }
 
   function purposeStateFile() {
@@ -741,7 +752,8 @@ export function createPetChatService({ ctx, stateDir, pluginLog = () => {}, toke
     }
     if (memory) {
       lines.push('【记忆卡（你记得的事；越早的事记得越模糊，别把模糊的事说得很确定）】');
-      lines.push(memory.slice(0, 2600));
+      // memoryBlock() 返回的已经按 injectMaxChars.pet 裁过；这里不再二次截断（P1，2026-11-01）。
+      lines.push(memory);
       lines.push('');
     }
     const bits = [];
@@ -799,12 +811,27 @@ export function createPetChatService({ ctx, stateDir, pluginLog = () => {}, toke
     const history = readHistory();
     const role = roleInfo();
     const owner = ownerInfo();
+    // 对话里问到屏幕（"能看得到我屏幕吗 / 看看我桌面"）才现截一张：
+    // 截图/视觉失败也要明确告诉她"没看清"，让她如实回答，不许编。
+    let screenBlock = '';
+    if (screen?.enabled?.() && wantsScreenLook(say)) {
+      try {
+        const look = await screen.look({ force: true, ownerName: owner.name, reason: 'chat' });
+        screenBlock = buildChatScreenBlock(look?.verdict || null);
+        pluginLog(`[pet-chat] 对话里看了一眼屏幕：${look?.verdict?.ok ? (look.verdict.summary || '（无摘要）').slice(0, 80) : (look?.error || '没看清')}`);
+      } catch (error) {
+        pluginLog('[pet-chat] 看屏幕失败（按没看清回答）：', String(error?.message ?? error).slice(0, 160));
+        screenBlock = buildChatScreenBlock(null);
+      }
+    }
     const system = buildChatSystemPrompt({ role, owner, memory: memoryBlock(), purpose: purposeBackground(), modality: mode });
-    const user = [
+    const userParts = [
       history.messages.length ? '【最近聊天】' : '',
       history.messages.length ? formatHistory(history, s.chat.historyTurns, say, owner.name) : say,
       history.messages.length ? '' : `（${owner.name}在桌面上对你说）${say}`,
-    ].filter(Boolean).join('\n');
+    ];
+    if (screenBlock) userParts.push('', screenBlock);
+    const user = userParts.filter(Boolean).join('\n');
 
     try {
       const result = await complete({

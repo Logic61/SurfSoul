@@ -84,7 +84,7 @@ model-prices ◄─ token-ledger（计价）/ token-budget（比例）◄─ DSH
 **衰减/渲染/状态**：`targetClarity`（`:1533`）、`applyDailyDecay`（`:1562`）、
 `decayDaysBetween`（`:1607`，1–30）、`needsDailyDecay`（`:1615`）、
 `compactMemoryCard`（`:1636`，默认 `targetRatio=0.85`，循环上限 5000）、
-`renderMemoryCard`（`:1769`，`full=true` 出完整 md，`platform=qq|bili` 出注入块，缺省 `all`）、
+`renderMemoryCard`（`full=true` 出完整 md，`platform=qq|bili|pet` 出注入块，缺省 `all`）、
 `readPromptBlock`（`:1846`）、`memoryCardStatus`（`:1856`）、`saveMemoryCardOutputs`（`:1906`，原子写 4 文件）、
 `maintainMemoryCard`（`:1940`）、`shouldNotifyOwner`（`:2060`，同档 12h）、`markOwnerNotified`（`:2066`）。
 
@@ -177,7 +177,8 @@ decayDaysBetween`，`:1964`）→ 状态 → ≥100% 压缩（`:1970`）→ 写�
 插件宿主是**唯一写卡者**：`plugins/surfcore/lib/memory-card.js:21`–`:26` 导入 21 个符号，
 每 10 分钟维护（`TICK_MS` `:29`、定时器 `:500`、调 `maintainMemoryCard` `:299`），
 控制台操作落在 `:377`（designate）/:382（clear）/:387（merge）/:223（recall）/:456、:466（告警）。
-B站/桌宠只读注入块：`plugins/surfcore/lib/pet-chat.js:24`、`plugins/surfcore/lib/scheduler.js:35`。
+B站/桌宠只读注入块：`plugins/surfcore/lib/pet-chat.js:24`（桌宠读 `memory-card-prompt-pet.md`，2026-11-01）、
+`plugins/surfcore/lib/scheduler.js:35`（B站 读 `memory-card-prompt-bili.md`）。
 测试：`scripts/test-memory-card.mjs:10`–`:14`（幂等 `:250`/`:257`、归档 `:307`、召回 `:339`、
 `shouldNotifyOwner` `:202`）、`scripts/test-memory-card-wiring.mjs`。
 **无生产调用方的导出**：`readPromptBlock`（`:1846`）——桥接自己读文件、插件用 `renderMemoryCard`。

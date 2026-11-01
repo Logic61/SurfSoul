@@ -30,6 +30,11 @@ export const DEFAULT_CLOSURE_CONFIG = Object.freeze({
   maxNextOpeningChars: 120,
   // 是否在每次唤醒里注入判断块（有近期对话时）。
   promptInWake: true,
+  // 自然收尾 N 次后换 DSH 会话：本次会话内累计自然收尾次数 ≥ 该值 → 收尾回合结束后退役重建。
+  // 0 = 关闭。2026-11-01 主人拍板「自然收尾 5 次后换 session」——不按 token 压力，
+  // 数的是「收尾次数」（一次自然收尾 = 一段完整对话的结束）；换会话只换 DSH session，
+  // 记忆卡/收尾记录/未读窗口都在 social-v2.json，不丢长期记忆。
+  rotateAfterClosures: 5,
 });
 
 const BOOL = (v, fallback) => (typeof v === 'boolean' ? v : fallback);
@@ -51,7 +56,28 @@ export function normalizeClosureConfig(raw = {}) {
     maxSummaryChars: NUM(src.maxSummaryChars, DEFAULT_CLOSURE_CONFIG.maxSummaryChars, 20, 500),
     maxNextOpeningChars: NUM(src.maxNextOpeningChars, DEFAULT_CLOSURE_CONFIG.maxNextOpeningChars, 10, 300),
     promptInWake: BOOL(src.promptInWake, DEFAULT_CLOSURE_CONFIG.promptInWake),
+    rotateAfterClosures: NUM(src.rotateAfterClosures, DEFAULT_CLOSURE_CONFIG.rotateAfterClosures, 0, 100),
   };
+}
+
+/**
+ * 收尾后是否该轮换 DSH 会话。
+ *
+ * 2026-11-01 主人定的规则：不按 token 压力，数「自然收尾次数」——
+ * 本次 DSH 会话内累计收尾次数 ≥ `rotateAfterClosures`（默认 5）时，在收尾回合结束后换新会话：
+ * 下一段对话从干净上下文开始，而记忆卡/收尾记录/未读窗口都从外部文件重建，不丢长期记忆。
+ *
+ * 「收尾次数」由桥接维护（`st.sessionClosures`）：每次 `qq_close_conversation` 成功 +1，
+ * 换会话时归零；`rotateAfterClosures=0` 表示关闭轮换。
+ *
+ * @param {number} closureCount - 本会话内累计自然收尾次数
+ * @param {object} [config] - socialV2.closure 配置
+ * @returns {boolean}
+ */
+export function shouldRotateSessionAfterClosure(closureCount, config = {}) {
+  const minClosures = normalizeClosureConfig(config).rotateAfterClosures;
+  if (!minClosures) return false;
+  return (Number(closureCount) || 0) >= minClosures;
 }
 
 // ── 消息分类 ────────────────────────────────────────────────────────────────

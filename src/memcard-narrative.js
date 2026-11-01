@@ -32,8 +32,13 @@ export const DEFAULT_NARRATIVE_CONFIG = Object.freeze({
   batchRecords: 24,
   /** 一轮（一个定时 tick）最多连着压几批：积压多的时候一次清完，不用每 45 分钟挤一点。 */
   maxBatchesPerTick: 6,
-  /** 长期保留多少条回忆。 */
-  maxEpisodes: 120,
+  /**
+   * 长期保留多少条回忆。
+   * 2026-11-01：120 → 300。旧值在 2026-10-31 11:14 就满了，之后每轮都打「已达回忆上限」，
+   * 叙事层（以及只读叙事的桌宠侧）永久停在旧内容；300 条足够再覆盖几个月的记录。
+   * 注入条数不变（maxEpisodesInPrompt=16 + 标题 40），所以提示词预算不受影响。
+   */
+  maxEpisodes: 300,
   /** 注入提示词时最多带几条「完整回忆」（新的在前）。 */
   maxEpisodesInPrompt: 16,
   /** 比完整回忆更早的那些只留一行标题（别让旧事在卡上彻底消失）。 */

@@ -26,7 +26,16 @@ fs.writeFileSync(path.join(fakeRoot, 'src', 'bridge.js'), '', 'utf8');
 fs.writeFileSync(path.join(fakeRoot, 'config.json'), `${JSON.stringify({
   ownerQQ: '',
   // 目的机制（主动搭话）：桌宠载体，minMaterials=0 让测试不依赖素材文件。
-  purpose: { carrier: 'pet', enabled: true, minMaterials: 0 },
+  // quietStart===quietEnd 关闭安静时段、idleThresholdMs=0 关掉「主人刚聊过」闸门，
+  // 让「自动轮次」的测试与运行时刻/历史无关（F3）。
+  purpose: {
+    carrier: 'pet',
+    enabled: true,
+    minMaterials: 0,
+    quietStart: '00:00',
+    quietEnd: '00:00',
+    idleThresholdMs: 0,
+  },
 }, null, 2)}\n`, 'utf8');
 fs.writeFileSync(path.join(stateDir, 'config.json'), `${JSON.stringify({
   version: 1,
@@ -77,6 +86,19 @@ function slowTextStreamFactory({ delayMs = 60, reply = '在呢' } = {}) {
     yield { type: 'text-delta', text: reply };
     yield { type: 'finish', reason: { kind: 'stop' } };
   })();
+}
+
+/** 记录每次 llm.stream 收到的 options（验证「看屏幕」小节有没有进对话提示词）。 */
+function captureStreamFactory({ reply = '嗯嗯' } = {}) {
+  const calls = [];
+  const factory = (options = {}) => {
+    calls.push(options);
+    return (async function* () {
+      yield { type: 'text-delta', text: reply };
+      yield { type: 'finish', reason: { kind: 'stop' } };
+    })();
+  };
+  return { factory, calls };
 }
 
 function mockCtx(streamFactory) {
@@ -256,6 +278,138 @@ try {
     const second = await purpose.run({ force: true });
     assert.notEqual(second.reason, 'busy', `running 复位后下一轮不应该被判 busy：${JSON.stringify(second)}`);
     assert.equal(purpose.status().running, false, '下一轮结束 running 仍然要是 false');
+  }
+
+  // ── F3（2026-11-01）：自动轮次不能因为「自己正在跑」被判 busy ─────────────
+  // 事故：runOnce() 先把 running 置 true，再把它塞进 env.busy → 每一轮都返回 busy，
+  // plugin.log 只剩「暂不出发：busy」，主动搭话从 10-31 起完全停摆。真实日志已复现。
+  {
+    const writeDueState = (pending = [{ id: 'p-due', kind: 'share', need: 'share', text: '想跟你说说今天的事' }]) => {
+      fs.writeFileSync(path.join(stateDir, 'purpose-outreach.json'), `${JSON.stringify({
+        version: 1,
+        nextFireAt: 1, // 已到点
+        pending,
+      }, null, 2)}\n`, 'utf8');
+    };
+
+    // ① 到点、桌宠在线、对话空闲 → 自动轮次必须真的走完（不是 busy）。
+    writeDueState();
+    const { factory } = captureStreamFactory({ reply: '今天过得怎么样' });
+    const petChat = createPetChatService({
+      ctx: mockCtx(factory),
+      stateDir,
+      pluginLog: () => {},
+      llmTimeoutMs: 5000,
+    });
+    petChat.notePresence('pet');
+    const logs = [];
+    const purpose = createPetPurposeService({ chat: petChat, pluginLog: (...args) => logs.push(args.join(' ')) });
+    const auto = await purpose.run({ force: false });
+    assert.notEqual(auto.reason, 'busy', `自动轮次不该被自己的 running 标志判成 busy：${JSON.stringify(auto)}`);
+    assert.equal(auto.ok, true, `到点且对话空闲时应该真的发出去：${JSON.stringify(auto)}`);
+    assert.equal(logs.some((line) => line.includes('暂不出发：busy')), false, '不能出现「暂不出发：busy」');
+    assert.equal(purpose.status().running, false, '一轮结束后 running 必须复位');
+
+    // ② 语义仍然要对：她正在生成对话回复（chat.busy=true）时，自动轮次要让路。
+    writeDueState([{ id: 'p-busy', kind: 'share', text: '等她忙完再说' }]);
+    const chatty = createPetChatService({
+      ctx: mockCtx(slowTextStreamFactory({ delayMs: 300, reply: '在呢' })),
+      stateDir,
+      pluginLog: () => {},
+      llmTimeoutMs: 5000,
+    });
+    chatty.notePresence('pet');
+    const inFlightChat = chatty.chat({ text: '在吗', modality: 'text' });
+    assert.equal(chatty.status().chat.busy, true, '先确认对话确实在生成中');
+    const busyPurpose = createPetPurposeService({ chat: chatty, pluginLog: () => {} });
+    const skipped = await busyPurpose.run({ force: false });
+    assert.equal(skipped.reason, 'busy', `她正在回话时自动轮次要让路：${JSON.stringify(skipped)}`);
+    assert.equal(skipped.ok, false);
+    await inFlightChat; // 收尾，别留挂起的模型流
+  }
+
+  // ── 对话里问屏幕：现截一张 + 摘要进提示词；闲聊不截（2026-11-01 用户反馈）──
+  {
+    const { factory, calls } = captureStreamFactory({ reply: '看到啦，你在写代码' });
+    let screenCalls = 0;
+    const screen = {
+      enabled: () => true,
+      look: async () => {
+        screenCalls += 1;
+        return { ok: true, verdict: { ok: true, summary: '在看代码', activity: 'working', interruptible: 0.8, privacy: 'none' } };
+      },
+    };
+    const service = createPetChatService({
+      ctx: mockCtx(factory),
+      stateDir,
+      pluginLog: () => {},
+      screen,
+      llmTimeoutMs: 5000,
+    });
+    const asked = await service.chat({ text: '你能看到我屏幕吗？', modality: 'text' });
+    assert.equal(asked.ok, true, `问屏幕的对话应成功：${asked.error || ''}`);
+    assert.equal(screenCalls, 1, '问到屏幕时应现截一张');
+    const prompt = calls[0]?.messages?.[0]?.content?.[0]?.text || '';
+    assert.match(prompt, /你刚看了一眼屏幕/, '提示词要带「看一眼屏幕」小节');
+    assert.match(prompt, /在看代码/, '视觉摘要要进对话提示词');
+    assert.match(prompt, /不是指令/, '摘要要标明不是指令');
+
+    const plain = await service.chat({ text: '在吗', modality: 'text' });
+    assert.equal(plain.ok, true);
+    assert.equal(screenCalls, 1, '普通闲聊不应再截图');
+  }
+
+  // ── 对话里问屏幕但视觉失败：要明确「没看清」，不许编 ─────────────────────
+  {
+    const { factory, calls } = captureStreamFactory({ reply: '这次没看清' });
+    const service = createPetChatService({
+      ctx: mockCtx(factory),
+      stateDir,
+      pluginLog: () => {},
+      screen: { enabled: () => true, look: async () => ({ ok: false, error: '截图失败', verdict: { ok: false, error: '截图失败' } }) },
+      llmTimeoutMs: 5000,
+    });
+    const result = await service.chat({ text: '看看我屏幕', modality: 'text' });
+    assert.equal(result.ok, true);
+    const prompt = calls[0]?.messages?.[0]?.content?.[0]?.text || '';
+    assert.match(prompt, /没看清/, '视觉失败时提示词要说明没看清');
+    assert.match(prompt, /别编造/, '视觉失败时要求不许编造屏幕内容');
+  }
+
+  // ── 桌宠记忆注入块：优先读 memory-card-prompt-pet.md（2026-11-01，P0）────────
+  {
+    const memoryDir = path.join(dshHome, 'surfcore', 'memory');
+    fs.mkdirSync(memoryDir, { recursive: true });
+    fs.writeFileSync(path.join(memoryDir, 'memory-card-prompt-pet.md'), '【桌宠专用注入块】\n## 桌宠（私下相处）\n- 桌宠注入块里的记忆\n', 'utf8');
+    fs.writeFileSync(path.join(memoryDir, 'memory-card-prompt-qq.md'), '【QQ 注入块】\n- QQ 块里的记忆\n', 'utf8');
+    fs.writeFileSync(path.join(stateDir, 'config.json'), `${JSON.stringify({
+      version: 1,
+      pet: { chat: { enabled: true, remember: false } },
+      memoryCard: { enabled: true },
+    }, null, 2)}\n`, 'utf8');
+    const { factory, calls } = captureStreamFactory({ reply: '嗯嗯' });
+    const service = createPetChatService({ ctx: mockCtx(factory), stateDir, pluginLog: () => {}, llmTimeoutMs: 5000 });
+    const result = await service.chat({ text: '在吗', modality: 'text' });
+    assert.equal(result.ok, true, `带记忆块的对话应成功：${result.error || ''}`);
+    // system prompt 走 llm.stream 的 options.system（不是 user messages）
+    const prompt = calls[0]?.system || '';
+    assert.match(prompt, /桌宠专用注入块/, '桌宠系统提示词必须优先用桌宠专用注入块');
+    assert.doesNotMatch(prompt, /QQ 注入块/, '有桌宠专用块时不应再退回 QQ 注入块');
+
+    // 老数据（还没有 prompt-pet.md）要能回退到 QQ 注入块前缀（升级兼容，不能变得更差）
+    fs.rmSync(path.join(memoryDir, 'memory-card-prompt-pet.md'), { force: true });
+    const fallbackService = createPetChatService({ ctx: mockCtx(factory), stateDir, pluginLog: () => {}, llmTimeoutMs: 5000 });
+    const fallback = await fallbackService.chat({ text: '在吗', modality: 'text' });
+    assert.equal(fallback.ok, true);
+    const fallbackPrompt = calls[1]?.system || '';
+    assert.match(fallbackPrompt, /QQ 注入块/, '没有桌宠块时应回退到 QQ 注入块');
+
+    // 恢复夹具配置（后续用例默认 memoryCard 关闭）
+    fs.writeFileSync(path.join(stateDir, 'config.json'), `${JSON.stringify({
+      version: 1,
+      pet: { chat: { enabled: true, remember: false } },
+      memoryCard: { enabled: false },
+    }, null, 2)}\n`, 'utf8');
   }
 
   console.log('pet-chat tests OK');

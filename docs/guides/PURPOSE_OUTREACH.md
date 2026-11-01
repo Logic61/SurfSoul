@@ -377,9 +377,22 @@ confidence = 0.15
 | `pendingTtlDays` | `14` | 「心里惦记的事」保留天数 |
 | `maxCandidates` | `6` | 提示词里给几个候选方向 |
 | `promptMaxChars` | `16000` | 提示词硬上限（超出截中间、保留头尾指令） |
+| `carrier` | `qq` | `qq` / `pet`：这一句从哪个载体发（同一时刻只有一个执行者） |
+| `petModality` | `text` | 桌宠载体的形式：`text` / `voice` |
+| `petFallbackToQQ` | `true` | 桌宠离线时这一轮交给 QQ 桥接 |
+| `screen.enabled` | `false` | **看屏幕**总开关（2026-11-01）：截图会发给视觉模型，默认关 |
+| `screen.intervalMin` | `10` | 每隔多久截一张并判断（分钟，1~180） |
+| `screen.retryMin` | `10` | 判定「这会别说话」后隔多久再看一眼 |
+| `screen.baseUrl` / `screen.model` | `https://api.deepseek.com` / `deepseek-flash` | OpenAI 兼容视觉端点 / 模型（DeepSeek-V4.1-Flash 声明支持图片输入） |
+| `screen.apiKeyRef` | `DEEPSEEK_API_KEY` | 从 DSH 凭据里按这个引用名取密钥 |
+| `screen.maxWidth` / `quality` | `1280` / `70` | 截图下采样与 JPEG 质量 |
+| `screen.minInterruptible` | `0.55` | 视觉模型给的「可打扰度」低于它就这轮不说话 |
+| `screen.blockActivities` | `["gaming","video","meeting"]` | 这些活动一律不搭话 |
+| `screen.failOpen` | `true` | 视觉失败时是否照常搭话（默认放行，避免排程停摆） |
 
 > 改完保存后 **要点「重启 QQ 桥接」**：桥接只在启动时读 `config.json`。
 > 重启后会先看 `nextFireAt`；如果落在安静时段，会排到当天/次日 `quietEnd` 之后。
+> 桌宠载体例外：插件每次 tick 重读配置，节奏参数保存即生效（看屏幕也是）。
 
 ### 设置页卡片
 
@@ -395,6 +408,41 @@ confidence = 0.15
 - **重试 / 上限 / 目标**：重试间隔、最多重试、提示词上限、目标 QQ（留空=ownerQQ）。
 
 所有字段都写进根 `config.json` 的 `purpose`；保存后点底部「重启 QQ 桥接」生效。
+
+### 看屏幕：根据屏幕判断要不要搭话（2026-11-01）
+
+载体 = 桌宠时，入口在 设置 → **桌宠** 页的「看屏幕再决定要不要搭话」卡片
+（2026-11-01 按用户要求从「目的」页移过去；「目的」页只保留指路和当前间隔）：
+
+```
+每隔 intervalMin 分钟（默认 10；在桌宠页「每隔多久看一眼（分钟）」里改）截一张当前屏幕
+  → JPEG 下采样到 maxWidth（默认 1280）
+  → 发给配置的视觉模型（默认 DeepSeek `deepseek-flash`：声明支持图片输入），要一个 JSON：
+    { summary / activity / busy / interruptible / privacy }
+  → 判定：
+       privacy=sensitive        → 不搭话，摘要也不进提示词
+       busy / 游戏 / 视频 / 会议 → 不搭话
+       interruptible < 阈值      → 不搭话
+       其余                     → 允许，摘要作为「你刚才瞥了一眼屏幕」写进提示词
+```
+
+要点：
+
+- **默认关**：截图会离开本机（发给你配置的视觉端点）；开关、模型、端点都在「目的」页的
+  「看屏幕再决定要不要搭话」卡片里；密钥只存 DSH 凭据（默认 `DEEPSEEK_API_KEY`），不进配置文件/日志。
+- **省 token 的关思考**：请求带 `thinking:{type:'disabled'}`（DeepSeek：reasoning 0、约 40 completion tokens、~1.3s）
+  和 `chat_template_kwargs.enable_thinking=false`（Qwen 系兼容端点）；严格端点 400/422 时自动去掉重试。
+- **失败 fail-open**：截图失败 / 视觉接口失败 / 密钥没配 → 当「没看见」，退回原来的纯排程行为
+  （想反过来：`screen.failOpen=false`）。
+- **节流与缓存**：两次「看」至少隔 `intervalMin` 分钟；同一画面（哈希相同）在 2×intervalMin
+  内复用上一次判定，不重复花视觉 token。安静时段不截图。
+- **不落盘**：截图默认读完即删；`screen.keepScreenshots=true` 只在排障时保留。
+- **SILENT**：提示词允许她看到屏幕后只输出 `SILENT`；这一轮按「她选择没说」记，不重试。
+- **对话里按需看**：同一个开关也管桌宠对话框——问到「屏幕 / 画面 / 桌面 / 看得到」时现截一张再回答；
+  截图/视觉失败会如实说「这次没看清」，不编造屏幕内容。
+- 用量：视觉调用补记到 token 额度「其他」，标签 `桌宠看屏幕`；每张约 1k prompt tokens（取决于宽度）。
+- 手动验证：「目的」页点 **现在看一眼（会发图）**，看返回的摘要/可打扰度；`GET /dsh-surfcore/api/purpose/screen`
+  可读最近一次结果，`POST /dsh-surfcore/api/purpose/screen/look` 触发一次（设置页同款）。
 
 ### 想更频繁 / 更少
 

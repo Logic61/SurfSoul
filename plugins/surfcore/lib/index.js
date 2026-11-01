@@ -65,9 +65,10 @@ import { ExtensionHost } from './extensions.js';
 import { isLoopbackReq, json, readBody, sameOrigin } from './http-guard.js';
 import { startScheduler } from './scheduler.js';
 import { createTokenBudgetService } from './token-budget.js';
-import { createPetService, detectElectronPath, installElectronRuntime, ELECTRON_VERSION, electronDownloadUrl } from './pet.js';
+import { createPetService, detectElectronPath, installElectronRuntime, shouldAutoStartPet, ELECTRON_VERSION, electronDownloadUrl } from './pet.js';
 import { createPetChatService } from './pet-chat.js';
 import { createPetPurposeService } from './pet-purpose.js';
+import { createScreenWatchService } from './screen-watch-service.js';
 import { createPetApiService } from './pet-api.js';
 import { createUpdatesService, resumePendingApply } from './updates.js';
 import {
@@ -217,9 +218,12 @@ export function apply(ctx) {
   });
   // ── 桌宠（独立栏目，默认不安装；用户自己安装才生效）────────────────────
   const petService = createPetService({ stateDir: STATE_DIR, pluginLog, getSubprocess: () => ctx.get('subprocess') });
+  // 看屏幕（2026-11-01，默认关）：截图 → 视觉模型判断适不适合打扰。
+  // 两处使用：①「目的」载体的出发门控；② 对话里问到屏幕时现截一张（见 pet-chat.js）。
+  const screenWatch = createScreenWatchService({ ctx, stateDir: STATE_DIR, pluginLog, tokenBudget });
   // 桌宠对话与「目的机制」的桌宠载体：和 QQ / B站 共用当前角色的人格卡、记忆卡、目的状态。
-  const petChat = createPetChatService({ ctx, stateDir: STATE_DIR, pluginLog, tokenBudget });
-  const petPurpose = createPetPurposeService({ chat: petChat, tokenBudget, pluginLog, callBridge });
+  const petChat = createPetChatService({ ctx, stateDir: STATE_DIR, pluginLog, tokenBudget, screen: screenWatch });
+  const petPurpose = createPetPurposeService({ chat: petChat, tokenBudget, pluginLog, callBridge, screen: screenWatch });
   const petApi = createPetApiService({
     chat: petChat,
     purpose: petPurpose,
@@ -2211,6 +2215,22 @@ if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output 
         json(res, remote?.status || 200, { ...(remote?.data ?? {}), source: 'qq', carrier: 'qq', availability });
         return;
       }
+      // 看屏幕（2026-11-01）：设置页「目的」页读状态 / 手动看一眼（会真的截图并发给视觉模型）。
+      if (suffix === '/screen' && method === 'GET') {
+        json(res, 200, { ok: true, source: carrier, screen: screenWatch.status() });
+        return;
+      }
+      if (suffix === '/screen/look' && method === 'POST') {
+        const result = await screenWatch.look({ force: true, ownerName: petChat.ownerInfo().name, reason: 'manual' });
+        json(res, 200, {
+          ok: Boolean(result?.verdict?.ok),
+          screen: screenWatch.status(),
+          gate: screenWatch.gate(),
+          verdict: result?.verdict || null,
+          error: result?.error || '',
+        });
+        return;
+      }
       if (suffix === '/pet-chat' && method === 'POST') {
         // 设置页测一句话（不占主动搭话额度）。
         const body = JSON.parse((await readBody(req)) || '{}');
@@ -2825,6 +2845,27 @@ if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output 
   // 目的机制（桌宠载体）：carrier=pet 时由这里每 60 秒 tick；carrier=qq 时它自己会退出。
   try { petPurpose.start(); } catch (error) { pluginLog('[pet-purpose] 启动失败：', String(error?.message ?? error)); }
 
+  // 桌宠自动打开（2026-11-01）：装好 + 用户打开「DSH 启动时自动打开桌宠」时，插件每次启动自动拉起。
+  // 延迟 5 秒：等 host.json / 路由就绪，桌宠一起来就能连上；失败只记日志，不影响插件本身。
+  let petAutoStartTimer = setTimeout(async () => {
+    try {
+      const st = petService.status();
+      const decision = shouldAutoStartPet(st);
+      if (!decision.start) {
+        // 没装 / 用户没开：静默；已经在跑也别重复拉起。
+        if (decision.reason === 'already-running') pluginLog('[pet] 自动打开跳过：已经在运行');
+        return;
+      }
+      pluginLog('[pet] DSH 启动：按设置自动打开桌宠…');
+      const result = await petService.start();
+      if (result?.ok === false) pluginLog('[pet] 自动打开失败：', result.error || '未知错误');
+      else pluginLog(`[pet] 自动打开成功 pid=${result?.pid ?? '?'}`);
+    } catch (error) {
+      pluginLog('[pet] 自动打开异常：', String(error?.message ?? error).slice(0, 160));
+    }
+  }, 5000);
+  petAutoStartTimer.unref?.();
+
   // 启动后异步做的事（不阻塞插件激活）
   void activateExtensions();
   void maybeAutoStartBridge();
@@ -2850,6 +2891,7 @@ if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output 
     try { scheduler?.stop?.(); } catch {}
     try { updates.dispose(); } catch {}
     try { petPurpose.stop?.(); } catch {}
+    if (petAutoStartTimer) clearTimeout(petAutoStartTimer);
     if (petHostTimer) clearInterval(petHostTimer);
     try { sessionEventOff?.(); } catch {}
     try { tokenBudget.dispose(); } catch {}

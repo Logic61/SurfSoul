@@ -2990,6 +2990,266 @@ return list[0] ?? pool[0];
   已进 `test:audit`；`test-memory-card-wiring` 更新为带 key 的记忆卡注入断言；`test-core-rev-sync` 在
   `npm run sync:engine-rev` 后通过。
 
+## #79（2026-11-01）在 pwsh 里 `Get-Content -Raw` + `Set-Content` 回写 UTF-8 源码 = 编码损坏
+
+- **现象**：`test-host-smoke` / `test-pet-dir-guard` 突然报 `SyntaxError: Invalid or unexpected token`，
+  指到 `lib/pet.js:83` 的中文字符串；`git diff` 显示 pet.js「172 行变更」，整份文件的中文注释/字符串变成
+  `目录不可�?`、`设计原则（和语音栏目一致）�?` 这类半截字，还丢了 BOM、CRLF 变 LF。
+- **根因**：为了验证「改插件文件会不会热重载」，我用一次 shell 探测对 `pet.js` 做了
+  `$c = Get-Content -Raw; Set-Content -Value $c`（还加了 `-NoNewline`）的**往返**。这个工具的 `pwsh`
+  对 UTF-8 多字节字符会丢字节（实测 `读` 的 `E8 AF BB` 变成 `E8 AF 3F`），回写后文件不再是合法 UTF-8；
+  Node 一 import 就语法错。**不是**插件代码问题，也不是 DSH 问题。
+- **修复**：`git diff` 确认没有未提交的实质改动（对比重建内容：与 HEAD 只差 BOM）→ `git checkout -- plugins/surfcore/lib/pet.js`。
+  先备份坏文件到 `state/agents/_pet.corrupted.js` 便于复盘（现已清理）。
+- **教训**：
+  1. **改文件只用 `read`/`edit`/`write` 工具**（它们有版本守卫）；shell 只做只读探测（`git`/`Select-String`/`node --check`）。
+  2. 确需 shell 写文件时：先 `Copy-Item` 备份，写完立刻 `node --check`，并用 `git diff --stat` 确认只有预期改动。
+  3. 文件"看起来中文正常"不等于合法 UTF-8；`git diff` 里出现 `�?` 就是警报。
+  4. 判断能不能恢复：和 `git show HEAD:<file>` 做行级 diff；若只差 BOM，直接 checkout 最安全（别手抄重建）。
+- **同一天第二次踩**：只想改一个**临时小脚本**的两行 URL，又顺手用了
+  `$c = Get-Content -Raw; $c.Replace(...); Set-Content -Encoding utf8`，文件立刻变成同一类乱码
+  （`node --check` 直接报错）。结论升级：**这条命令在任何含中文的文件上都不要用**，
+  临时脚本也一律 `write` 工具整份重写（成本比修乱码低）。
+
+## #80（2026-11-01）桌面版写 `cordis.patch.yml` 不会热重载：插件被卸载后只能重启 DSH
+
+- **现象**：用本机 plugin-manager 网关 `POST http://127.0.0.1:<port>/api/plugin-manager/set-enabled`
+  把 `surfcore` 行 disable→enable 后，`/dsh-surfcore/api/*` 与 `/dsh-surfcore/pet-api/*` 全部 404，
+  `plugin.log` 没有新的「已激活」行；手动改 `cordis.patch.yml` 也不会重新加载。
+- **根因**：桌面 profile 里 `GET /api/plugin-manager/mode` 返回 `{"official":null}`，官方 in-process
+  plugin-manager 没挂；该第三方网关的 `set-enabled` 只**写文件**。桌面版没有 `dsh-app-boot:watchUserPatches`
+  依赖的 Cordis HMR 服务（release 构建），所以「禁用」那一刻的卸载能发生，但「启用」不会重新装载——
+  **只有重启 DSH 才会按新 patch 重建 loader 树**。`dsh web` 这类 long-lived surface 才支持 patch 热重载。
+- **处置**：改完插件代码 / 配置后**直接重启 DeepSeek Harness 桌面应用**；别用写 patch 的方式试探热重载。
+  万一已经卸载：确认 `cordis.patch.yml` 里没有残留的 `disabled: true` 行，重启即可恢复。
+- **测试坑**：`node plugins/surfcore/scripts/test-*.mjs` 里凡是 spawn 子进程读 stdout 的，在这台机器上
+  要在仓库根/插件目录下跑；`test-host-smoke` 还会开本地假服务器，别和真 DSH 端口冲突。
+
+## #81（2026-11-01）subagent-codex 被「版本门禁」整包静默跳过 + 0.153.4 的模型门禁（QQ 白名单放行却没工具）
+
+- **现象**：`profile/package.json` 的 `dsh.profile.bundles` 里明明有 `@deepseek-ai/dsh-subagent-codex`
+  （`enabled:true`、包也装好），但运行中的 DSH 里**根本没有 `subagent_codex` 工具**：用 RPC 建
+  standard 会话问模型两次都说「没有」，`pluginInventory` 里该 bundle 的 `rows: []`。
+  表现就是「QQ 白名单放行了、模型也被告知了，但一调就 403/看不见」——先查工具到底注册没有。
+- **根因 1（整包被跳过）**：运行时实际是 **0.2.1-rc.5**
+  （`app.asar/dsh/node_modules/@deepseek-ai/dsh-app-boot/package.json`），profile 装的是 **rc.3**；
+  `app-boot` 的 `evaluatePluginCompatibility()` 用 bundle 的 `peerDependencies`（精确钉 `0.2.1-rc.3`）
+  比对 runtime → `incompatible-version` → `loadProfileDirectory()` 把它 catch 进 `skippedBundles`，
+  **不打印、不报错**。`pluginManager/listBundles` 里能看到 `problem`/`rows=[]`。
+- **根因 2（模型门禁）**：升级到 rc.5 后工具能注册，但 bundle 自带 `@openai/codex@0.153.4` 的模型目录
+  只有 `gpt-6-astra` / `gpt-5.6-sol` / `gpt-5.6-terra` / `gpt-5.6-luna` / `gpt-reserve` / `codex-auto-review`；
+  `~/.codex/config.toml` 的默认 `gpt-6.1-sol` 不在其中 → 子会话报
+  `model_not_found: The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account`。
+  ⚠️ 桌面版 Codex app（0.165.0-alpha.1.2）用 gpt-6.1-sol 是能跑的——**CLI/app-server 的模型目录与 app 不同**，
+  别拿 app 能跑来假定 bundle 能跑。
+- **修法（本机已做）**：
+  1. 用 plugin manager 把 bundle 升到与 runtime **完全一致**的版本：`installBundle` 对已存在依赖会
+     `already-installed`，正确姿势是先 `pluginManager/removeBundle` 再 `installBundle`（pnpm 会改
+     package.json/pnpm-lock；失败会自动还原）。rc.3 → rc.5。
+  2. 在 profile `cordis.patch.yml` 给 `- id: subagent-codex` 加
+     `config: { model: gpt-6-astra, permissionMode: approve-for-me }`
+     （默认 `never` 不传 sandbox，Codex 把生成图从 `$CODEX_HOME/generated_images` 复制到工作区可能被拦）。
+  3. **重启 DSH**：bundle 是 unmanaged-plugin，install/enable 都返回 `restart-required`；
+     profile patch 也只在启动时读。
+- **验证**：重启后 `pluginManager/listBundles` 该行 `rows` 非空、`pluginInventory` 出现
+  `tool-subagent-codex` 行；会话工具清单里有 `subagent_codex`；画图链路见
+  `docs/guides/AGENT-TOOLS-AND-PRESETS.md` §4「Codex 画图的运行时前提」。
+- **另两个坑**：
+  - 只改 `dsh/agent-presets/*` 或重建 `plugins/surfcore/presets/*.patch.yml` **不会**在运行中的桌面版生效
+    （patch 只在启动 `composeProfile()` 读；HMR 只监听 profile package.json 与两个 `cordis.patch.yml`，
+    不监听 bundle patch）。**preset 改动必须重启 DSH**。
+  - 官方 README 里「在 profile cordis.patch.yml 插 `tool-subagent-codex` 行」是**不选 bundle 层**时的做法；
+    选了 bundle 时它插的是 Host 行（全局工具），preset 里再加同名行会等不到 provider。
+- **回滚**：改动前备份在 `state/agents/codex-qq/backup-profile/`（package.json / pnpm-lock /
+  cordis.patch.yml 带时间戳）；恢复后在该 profile 用 DSH 自带 pnpm 跑一次 install，再重启。
+- **安全备注（画图功能依赖）**：`qq_send_image` 的本机路径**没有目录白名单**（只校验存在、
+  ≤10MB、图片文件头）——这是「把她画/截的图发出来」的设计口径，但也意味着**知道路径文本**就能外发
+  本机图片，是模型被注入时的一条外发通道（目前靠「路径只在主人私聊里产生」间接约束，不是硬边界；
+  以后可考虑限定到 `codex-images/` 之类目录）。画图输出目录约定：
+  `C:\Users\32372\surfcore\state\agents\codex-images\`。
+
+## #82（2026-11-01）SnowLuma OneBot HTTP 请求体 2MiB 硬上限 → 大图发送只报 "fetch failed"
+
+- **现象**：`qq_send_image` 发 1.9MB 的 Codex 生成图，桥接返回
+  `发送图片失败：fetch failed`；SnowLuma 日志里**连一行发送记录都没有**；同一张图缩到 160KB 就正常。
+- **根因**：SnowLuma 的 OneBot HTTP `readRequestBody(req, maxBytes = 2 * 1024 * 1024)`
+  （`C:\Users\32372\SnowLuma\index.mjs` 里 `readRequestBody`，超限直接 `req.destroy()`）。
+  桥接把本机图片编码成 `base64://` 塞进 JSON，base64 放大 4/3 ⇒ 原图 >约 1.5MB 必然超过 2MiB，
+  服务端重置连接，客户端只看到没有信息的 `fetch failed`。桥接自己的 `SEND_IMAGE_MAX_BYTES=10MB`
+  比上游宽，所以错误在更下游才爆。
+- **修法（2026-11-01，`src/bridge.js` `sendImageV2`）**：本地文件路径且 buffer > 1.3MB 时，
+  image segment 改传 **`file:///<绝对路径>`**（SnowLuma 自己读文件，payload 只有几十字节）；
+  实测 `POST /send_private_msg {message:[{type:'image',data:{file:'file:///C:/…out.png'}}]}`
+  对 1.9MB PNG 返回 `retcode 0`。小图保持 base64（不改变旧行为）。file:// 失败时（SnowLuma 在别的机器/
+  旧版本不认）自动退回 base64 再试一次，并在两个错误都失败时给出「OneBot HTTP 上限 2MiB，先压缩到 1.4MB」
+  的可操作提示。校验仍在桥接侧做（读盘 + 图片头 + ≤10MB），file:// 只是传输方式。
+- **验证**：桥接重启后，用 `/api/socialV2/send-image` 真机发同一张 1.875MB PNG 到
+  `private:<ownerQQ>` → `{ok:true, via:"path", bytes:1920363, messageId:-1686756870}`；QQ 私聊收到图。
+- **教训**：MCP/桥接的"安全上限"要和下游实现对齐；遇到只有 `fetch failed` 的错误，先直连下游服务复现，
+  再去看下游的 body 读取实现，别在桥接侧猜。
+
+## #84（2026-11-01）桌宠记忆「只连了一半」：2600 硬截断 + 叙事层占满 + 120 条上限永久停更
+
+**现象**：QQ 里刚聊完的事，切到桌宠她不知道；她在桌宠里说过的话，QQ 侧却记得（单向连通）。
+用户要求「检验桌宠、QQ 的记忆是否连通」。
+
+**根因（三层叠加）**：
+1. `lib/pet-chat.js` 桌宠 system prompt 取的是 **QQ 注入块** `memory-card-prompt-qq.md`，再硬截前 **2600 字**；
+   而该文件 5908 字里前 2365 字被叙事层（「## 我们一起经历过的」1768 + 「## 更早还记得的」597）占满——
+   「## 桌宠（私下相处）」起始偏移 3189、「## 今天聊过的」3417，**全在 2600 之外**（桌宠小节 0/228 字可见）。
+   截断还落在句子中间（初次相遇第 32/89 字），模型会看到半句。
+2. 桌宠侧只有这一条读取通道，且只有「整块前缀」一种切法；叙事涨多少，桌宠就少看多少。
+3. `memoryCard-narrative.json` 到 `maxEpisodes: 120` 后桥接每轮返回 `skipped:'full'`（「已达回忆上限」），
+   自 2026-10-31 11:14 起冻结；桌宠只读叙事，等于记忆停更 26 小时。
+
+**修法（2026-11-01 P0/P1/P2）**：
+- 新增桌宠专用注入块 `memory-card-prompt-pet.md`（`renderMemoryCard(platform:'pet')` + `reorderSectionsForPet()`）：
+  顺序 桌宠→今天→和主人→最近→永远不忘→叙事尾巴，叙事只占预算 30%；预算 `memoryCard.injectMaxChars.pet`（默认 4200）。
+- `pet-chat.memoryBlock()` 优先读它；文件不存在回退 QQ 前缀 2600（升级不劣化）。`pet-purpose` 同步。
+- 叙事上限默认 120 → 300；本机 unified 配置覆盖（原配置已备份）。
+- 真实卡只读渲染验证：桌宠块 4141 字，桌宠/今天/和主人/最近都在，叙事尾巴 976 字。
+
+**教训**：「同一份注入文件 + 取前 N 字」= 消费者永远只能看到文件开头。给不同消费者（QQ/桌宠/主动搭话）
+不同的小节顺序/预算时应各自渲染一份文件，而不是让下游 `slice()`；新增一个「占据预算的大段」（叙事层）时，
+必须检查所有 `slice` 消费者的可见性。
+
+## #83（2026-11-01）看屏幕的视觉 JSON 被 `max_tokens` 截断 → 整轮「看不清」还白花 token
+
+- **现象**：桌宠看屏幕在真机（agnes-2.5-flash）偶发失败，`plugin.log` 里
+  `[pet-screen] 看屏幕失败（按 fail-open 继续）： 视觉模型没有返回可解析的 JSON`，
+  每次失败都花了 `1553+320` tokens（**completion 恰好打满 320**）。
+  同一台机器上有的截图能成功（11:22 成功、11:33/11:44 失败），看起来是随机坏。
+- **根因**：agnes 是推理模型，回答时先写一段 `reasoning_content`，再在 `content` 里输出要求的 JSON。
+  `max_tokens=320` 被推理段吃满，JSON 在 `content` 里**被截断**（少后半截/少 `}`），整段 `JSON.parse` 必失败；
+  而失败后 `content` 为空/半截，模型其实已经把关键字段说出来了，只是没人去捞。
+- **修法**（`plugins/surfcore/lib/screen-watch-{core,service}.js`，2026-11-01）：
+  1. `max_tokens` 320 → **800**，给推理段留余量；
+  2. `content` 解析失败（尤其为空）时，回退解析 `message.reasoning_content`；
+  3. 新增 `salvageScreenVerdict()`：从截断文本里**逐字段**正则捞
+     `summary/activity/busy/interruptible/privacy`，捞到 summary 或 interruptible 就算可用
+     （标 `repaired:true`，摘要照用）；
+  4. 失败信息带 `finish_reason`，下次能直接看出是不是被 `max_tokens` 截断。
+- **更优解（同轮实测）**：请求体带 `chat_template_kwargs: { enable_thinking: false }`（Qwen 系接口通用写法）：
+  同一条 prompt/同一张截图（agnes 端点），completion **359 → 47 tokens**、耗时 **4.5s → 2s**，`reasoning_content` 为 0、`content` 直接是 JSON，
+  从根上不再有「推理吃满预算」的截断。顶层 `enable_thinking:false` 在 agnes 上**无效**（仍会推理 722 tokens）。
+  不认这个参数的老端点会 400 → 去掉字段重试一次（`test-screen-watch` 有用例钉住）。
+- **2026-11-01 用户要求视觉端点全部换 DeepSeek 后**：默认改为 `https://api.deepseek.com` + `deepseek-flash`
+  （它的 `/models` 声明 `input_modalities: ["text","image"]`，实测可看图）。DeepSeek 上最省的是
+  `thinking: { type: 'disabled' }`（另一套写法）：同一条截图 **reasoning 0、completion 38 tokens、~0.8s**，
+  `content` 直接是 JSON；只传 `reasoning_effort:'low'` **无效**（照样推理到打满 800），顶层 `enable_thinking:false` 也无效。
+  现在请求同时带 `thinking:{type:'disabled'}` + `chat_template_kwargs.enable_thinking=false`（各家忽略对方那个），
+  400/422 时一起去掉重试。端到端实测：截图 1.15s + 视觉 1.34s、918+41 tokens、判定正确。
+- **验证**：`test-screen-watch.mjs` 新增截断 JSON / 推理夹 JSON / 空 content 回退 / 关思考请求体 / 400·422 重试用例，全绿。
+- **教训**：对接推理模型的 JSON 输出，**别只赌一次 JSON.parse**：给足输出预算 + 关掉不必要的推理 + 空/半截时的逐字段兜底，
+  否则「看不清」会被 fail-open 静默吞掉，用户只看到「她好像不看我屏幕」，日志里却只有一句没有上下文的报错。
+  换视觉后端时先打一发原始请求看 `finish_reason/usage/completion_tokens_details.reasoning_tokens`，别把「推理吃满」当成「模型不行」。
+
+## #85（2026-11-01）「调 gpt-chat 生图」走不通：freegpt 面板的 gpt-image 没有授权；能用的是 agnes
+
+- **现象**：DSH 的 `llm-pi-ai` 里配了 `freegpt` 端点（`https://035719.xyz:9443/v1`，CLI Proxy API 面板），
+  `/v1/models` 也列了 5 个 `gpt-image-*`；但 `POST /v1/images/generations` 全部
+  **503 `auth_not_found: no auth available (providers=codex, model=gpt-image-2.5)`**。
+  它的纯文本 chat 模型能“画”，但输出的是 **SVG 代码**（gpt-5.6-luna 实测返回一段 `<svg>`），不是真出图。
+  另外 OpenRouter 的 GPT/Google 图像模型从本机 IP 调会 **403 `not available in your region`**。
+- **根因**：freegpt 是「CLI Proxy API」聚合面板，图像模型被路由到它自己的 **codex 上游**，
+  这个 `sk-cpa-friend-…` key 没有生图通道/绑定账号；这是**面板侧授权问题**，客户端改参数绕不过去
+  （chat 路由也明确回 `model … is only supported on /v1/images/generations`）。
+- **解法**：换成本机**已有凭据**的 agnes 图像模型——`AGNES_API_KEY`（原本给「看屏幕」做视觉理解）的
+  `/v1/models` 里有 `agnes-image-2.5-flash` / `agnes-image-2.1-flash` / `agnes-image-2.0-flash`；
+  实测 `POST /images/generations`（`model=agnes-image-2.5-flash, size=1024x1024`）**10~15 秒**返回
+  1024×1024 PNG（b64_json）。
+- **落地（2026-11-01）**：
+  - `src/imagegen.js`：配置归一 / 请求构造 / b64·url 响应解析 / 文件头校验 / 落盘命名与过期清理 / 凭据 YAML 解析。
+  - `src/bridge.js`：`cfg.socialV2.imagegen` 默认块 + 密钥解析（`apiKey` → 环境变量 → `~/.dsh/.credentials.yaml`）
+    + 新路由 `POST /api/socialV2/generate-image`；**只对 `private:<ownerQQ>` 开放**（群里/别人私聊 403）。
+  - `src/mcp-snowluma-safe.js`：新工具 `qq_generate_image`（`imageGen` 开关，默认开），调用桥接路由。
+  - preset 第 19 条：画图**优先用 qq_generate_image**（10~25 秒），Codex 子智能体留给照片级/复杂图。
+  - 生成图落 `state/generated-images/`（默认保留 7 天）；返回绝对路径再由 `qq_send_image` 发出
+    （>1.3MB 走 file://，见 #82）。
+- **验证**：`node scripts/test-imagegen.mjs` 11/11；`node --check` 三个改动文件；真机桥接路由
+  **10.2 秒出图 1028KB** 并成功发到 `private:<ownerQQ>`（messageId 见 state/bridge.log）。
+  `qq_generate_image` 这个 MCP 工具要**重启 DSH** 才进工具面。
+- **教训**：「端点列了某个模型」≠「这个 key 能用它」。接生图前先分别打一发 `/images/generations`
+  和 `/chat/completions` 看真实错误；`model_not_found` / `auth_not_found` 都是**面板路由**层面的问题，
+  换模型/换 provider 比在客户端猜参数有效。
+
+## #86（2026-11-01）主动搭话「永久 busy」：`env.busy` 传了刚置 true 的 `running`
+
+- **现象**：桌宠挂机 4 小时一句主动搭话都没有。`~/.dsh/surfcore/plugin.log` 里从 12:35 起每 5 分钟一条
+  `[pet-purpose] 暂不出发：busy`；`characters/char-gantang/purpose-outreach.json` 的 `lastSentAt` 停在
+  10-31 18:04、`lastSkip.reason=busy`。看屏幕本身正常（`[pet-screen] 自动看一眼…` 一直在跑），
+  只是永远轮不到出发。
+- **根因**：`plugins/surfcore/lib/pet-purpose.js` 的 `runOnce()` 先把单飞标志 `running = true`
+  （`:429`），十几行后再把它塞进闸门：`env.busy = running`（`:449`）。`evaluatePurposeTick()` 里
+  `env.busy === true → waitUntil(now+5m,'busy')`（`src/purpose-engine.js:336`），且这一步在「到点之后」才判
+  ——于是每个到点的轮次都被自己判 busy，还把 `nextFireAt` 推后 5 分钟，永远出不去。
+  对照：`carrier=qq` 时桥接传的是 `isConversationBusyV2()`（对话回合是否在生成），语义本来就是
+  「她正在回话」，不是「本服务正在跑一轮」。该 bug 自 v0.6.22（10-28）就存在，但之前载体是 QQ 所以没暴露，
+  10-31 切到桌宠后立刻全停。
+- **修法**（2026-11-01）：新增 `chatBusy()` = `chat.status().chat.busy === true`（正在生成的对话回合），
+  `env.busy` 改用它；单飞保护仍由入口 `if (running) return { reason:'busy' }` 负责（手动 run 也拦）。
+- **测试**：`test-pet-chat.mjs` 新增 F3：① 到点且对话空闲 → `run({force:false})` 必须真的发出去，且日志里
+  不能出现「暂不出发：busy」；② 她正在生成对话回复时 → 自动轮次仍要 `busy` 让路。已验证删掉修复后
+  该用例失败（`{"reason":"busy"}`），恢复后通过。
+- **验证/生效**：插件宿主模块不热重载（见 #80），**必须重启 DSH 桌面应用**；重启后 `plugin.log` 应出现
+  新的目的轮次日志（`看屏幕后暂不出发：screen-*` 或 `桌宠主动搭话（text）`），状态文件 `lastSentAt` 往前。
+- **教训**：闸门 env 里每个字段都要问一句「它的语义是什么、谁会把它置真」。把内部「我正在跑」的单飞标志
+  当对外状态传出去，是最隐蔽的自锁：日志只有一句 `busy` 看起来完全正常，实际永远不出发。
+  排障顺序：先比 `lastSkip.reason` 与 `lastSentAt` 的差距，再去代码里找这个 reason 的赋值点。
+
+## #87（2026-11-01）长会话的上下文：别指望 DSH 压缩，自然收尾累计 5 次后换 session
+
+- **背景**：一个 QQ 会话一条 DSH session，历史只增不减。查完 DSH 0.2.1-rc.5 后发现：
+  - 自动压缩阈值 = `floor(min(W×0.8, (W−O)−headroom))`，deepseek-flash 上 W=1,048,576、O=256,000、
+    headroom=65,536 → **727,040 tokens** 才触发；本机 180 个 session 日志里自动成功压缩 **0 次**。
+  - 手动 `/compact` 的摘要是英文 coding agent 八段式（Primary Request / Files and Code / …），
+    对「甘棠」这种陪伴人格，规则/工具契约能保留，语气/情感/聊天细节会被压成工程笔记。
+  - 实测：私聊手动压缩后最近请求 58,893 tokens，冷启动新会话第一轮 37–38k tokens —— 换会话比压缩后的
+    常态还便宜，且外部记忆（记忆卡/收尾/轻记忆/未读窗口，都在 `social-v2.json`）不丢。
+- **规则（主人 2026-11-01 定，20:52 更正口径）**：不按 token，数**自然收尾次数**——本会话内累计
+  **自然收尾 5 次**（每次 `qq_close_conversation` 成功算 1 次，一段完整对话结束）→ 换新 DSH session。
+  注意不是「一次对话里来回几轮/对方说了几句」（14:37 的初版理解错了，20:52 主人纠正）。
+  实现：`socialV2.closure.rotateAfterClosures`（默认 5，0=关闭）、`shouldRotateSessionAfterClosure(closureCount)`
+  （纯函数）、`st.sessionClosures` 持久化计数、`scheduleSessionRotationAfterCloseV2()`（5s 定时 +
+  忙/重开/超时放弃）、`retireSession()` 复用（换会话时计数清零）。
+- **为什么不能当场退役**：收尾工具是在回合里调用的，立刻 `retireSession` 会 `stopSessionWork` + archive
+  正在跑的这个回合（日志见 `blocked`/空回复路径）。所以挂 5s 定时器，等 `isConversationBusyV2()` 为 false；
+  对方在定时器到点前又开口（`reopenedAt` 更新）必须取消，否则会把刚开始的新对话拆走。
+- **放弃条件**：有更新的一次收尾 / 映射已变 / 6 次重试（≈30s）仍在忙 —— 都不算错，只是这次不换；
+  计数不清零，下一次自然收尾会再触发（次数已 ≥ 阈值）。
+- **测试**：`test-conversation-closure.mjs`（阈值与纯函数）、`test-closure-wiring.mjs`（第 4 次不挂/第 5 次挂起/
+  重开取消/可配阈值/换会话后计数归零）；`forgetConversationCaches` 清定时器覆盖所有 reset/退役路径。
+  手动验证脚本见 `state/agents/_research/verify-rotation.mjs`（第 5 次后 5s archive 旧会话、计数归零、
+  收尾记录仍在、新会话第 1 次收尾不换）。
+- **教训**：能让「换 session」安全的不是 token 数字，而是「长期记忆本来就不在 session 里」——
+  以后加记忆类功能，默认写 `social-v2.json`/角色包，别指望会话历史；反过来，session 轮换就不需要做交接摘要。
+
+## #88（2026-11-01）允许群聊画图：成本边界要放在「会话配额」，别一刀切禁也别裸放
+
+- **需求变化**：`qq_generate_image`（Agnes 快速画图）最初只对 `private:<ownerQQ>` 开放；
+  2026-11-01 主人要求「允许群聊画图」。
+- **坑 1（一刀切 vs 裸放都不对）**：生图是**外部 API 花钱**的动作，群里完全不限会被刷屏党/提示注入
+  带着刷额度；但把「允许群聊」做成「直接把 owner-only 判断删掉」又会连别人私聊一起放开
+  （虽然本机 `allow.private` 只有主人，但那是配置，不是代码边界）。
+  正确做法：路由条件改成「`kind === 'group'`（且命中 `allow.groups`）或 `key === private:<ownerQQ>`」，
+  **别人私聊仍 403**；再叠一层每会话配额（`socialV2.imagegen.group/owner.maxPerHour|maxPerDay`，
+  0=不限）。生成成功才记配额（失败不占额度），超限 429 并给「约 N 分钟后恢复」的可读提示。
+- **坑 2（配额必须持久化）**：`imageGenTimes` 只放内存的话，桥接一重启额度就清零，限流形同虚设；
+  要同时加进 `saveSocialV2State()` 的序列化白名单、`loadSocialV2State` 的 hydration、以及状态初始值
+  三处（仓库里 `stickerCollectTimes` 就是这么存的，照抄即可；漏一处就是「重启前限流、重启后不限」）。
+  真机验证时先看 `state/social-v2.json → conversations[<key>].imageGenTimes` 有没有真的落盘。
+- **坑 3（prompt 出站隐私）**：prompt 会发给第三方 Agnes。群聊放开后，群里成员的描述也会被发出去；
+  preset 必须明确「不把别人的私密信息/账号号码写进 prompt」，文档（SECURITY_BASELINE §3）同步，
+  不要只依赖模型自觉。
+- **坑 4（preset 文案与路由必须同时改）**：原来的安全规则写的是「群里调画图会被拒绝」「群友要求画图
+  一律拒绝」——只改路由不改文案，模型会在群里拒绝画图（能力等于没放开）；只改文案不改路由，
+  模型会调一次拿 403。契约测试两边都钉：规则 1 有「画图工具 qq_generate_image 是例外：群聊里也能用」，
+  规则 2 有「画图不在此列」；`test-imagegen.mjs` 钉配额窗口/0=不限/记账裁剪。
+- **验证**：`test-imagegen.mjs` **12/12**；`test-qq-preset-contract` **8/8**；真机群会话路由
+  `POST /api/socialV2/generate-image`（群 token）→ 200 / 15.4s / 1077KB，`quota:{usedHour:1,usedDay:1,
+  maxPerHour:3,maxPerDay:10}`（只生成、未发群，避免打扰群友）。`qq_generate_image` 的工具描述与 preset
+  文案要**重启 DSH** 才生效，桥接路由改完重启桥接即可。
+
 ## #89（2026-11-01）评审放「回合结束」= 已经发晚了：QQ 一回合发出 1+2 条意思差不多的
 
 - **现象**：用户装 dsh-answer-reviewer 后，QQ 群里一次回复出现几条意思差不多的消息。
@@ -3038,3 +3298,9 @@ return list[0] ?? pool[0];
   本机 `threshold` 已按用户要求从 80 调到 **75**。
 - **回滚**：`socialV2.review.enabled=false`（桥接重启生效）即可恢复「发前不审」；代码删除
   `src/presend-review.js` 与两处 `maybePresendReview()` 调用。
+
+
+
+
+
+

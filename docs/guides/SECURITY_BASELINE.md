@@ -16,7 +16,7 @@
 | **被注入的模型** | 会尝试调用任意工具名、传任意参数、尝试外发本机内容 | —— |
 | **本机其他用户** | 能登录同一台机器，能读文件系统 | 已取得管理员/root 的主体 |
 | **本机其他进程 / 浏览器页面** | 能访问 `127.0.0.1`，能构造任意 HTTP 请求 | 已能读写本项目 `state/` 的主体 |
-| **DSH 侧 agent（QQ 会话）** | 拥有 MCP 工具面，但**没有**本地工具 | —— |
+| **DSH 侧 agent（QQ 会话）** | 拥有 MCP 工具面；本地/执行类工具（`pwsh`/`bash`/`read`/`write`/`edit`/`glob`/`grep`/`read_image`/`str_replace_editor`/`subagent_codex`）**只在主人私聊里可用**，且执行期逐次鉴权（拿不到会话映射即 fail-closed） | —— |
 
 **不在此模型的范围内**：QQ 账号本身被盗、SnowLuma 网关被攻陷、DSH 本体漏洞、
 操作系统级攻击者。这些情况下本项目无法提供额外保护，README 中已声明。
@@ -55,6 +55,7 @@
 | CQ 注入 | `onebotSend()` | 出站文本一律包成 `{type:'text'}` 段并做 `[CQ:` → `[CQ：` 转义，杜绝 CQ 码注入 |
 | @ 限制 | `onebotSend()` | `atUserId` 只接受正整数，禁止 `@all` |
 | 发送限流 | `socialV2.send.*` / `voice.*` / `sticker.collect.*` | 每分钟/每小时硬上限，超限拒绝并退避 |
+| 快速画图（外部 API 出站） | `/api/socialV2/generate-image` + `src/imagegen.js` | prompt 会发给第三方 Agnes（`apihub.agnes-ai.com`）：**群聊与主人私聊**可调（别人私聊 403）；**群聊按会话配额**（默认 3 张/小时、10 张/天，0=不限；主人私聊 20/100），超限 429，配额记在 `state/social-v2.json` 并跨重启保留；prompt ≤2000 字、一次一张；密钥只在桥接侧解析（config/环境变量/DSH 凭据），MCP 工具不接触密钥；生成图落 `state/generated-images/` 并默认 7 天清理 |
 | 发送前评审（外部 API 出站） | `/api/socialV2/send-message` / `send-burst` → `src/presend-review.js` | `socialV2.review.enabled=true` 时，真正发送前把「场合/最近对话 + 抽象记忆卡 + style-notes + 待发消息」发给 DeepSeek 文本接口打分（≤~1200 字上下文、~400 输出 token）；低于阈值**不发送**、理由作为工具错误返回给模型改写。出站内容只含聊天上下文与记忆摘要（压缩后的，不含本机路径/令牌；`.credentials` 的 key 只在桥接侧解析）；评审失败/超时/解析失败默认放行以免堵住消息。**退回兜底**：`rejectFallbackMs`（默认 90s）内没有重发成功会自动补发最后一版被退回的稿子——即「评审不过」在当前配置下等于「晚 90 秒发」，不是「永远不发」；兜底发送仍重新过静默/鱼群/token 闸门，`0` 可关闭。只评审不发送的 `POST /api/socialV2/review-preview` 需要控制台令牌，供调参/排障 |
 
 ### 4. 控制台（本机最高权限入口）

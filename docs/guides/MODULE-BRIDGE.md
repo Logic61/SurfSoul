@@ -462,6 +462,8 @@ await pumpMux();      // DSH 事件流主循环（永不返回）
 
 `reconcileSessionPolicies()`（`src/bridge.js:3388-3402`）遍历全部会话，不满足 `isCurrentSession` 的就退役。**但 `dshPresetIds` 为空时直接 return**——否则一次网络抖动会让所有会话集体退役、上下文全丢（注释 `src/bridge.js:3389-3398`）。
 
+**正常使用中的主动轮换（2026-11-01）**：`socialV2.closure.rotateAfterClosures`（默认 5，0=关闭）。每次 `qq_close_conversation` 成功，`st.sessionClosures` +1（持久化在 social-v2.json）；累计 ≥ 阈值时，`closeConversationV2` 只挂一个 5s 定时器（`sessionRotateTimers`），不打断收尾回合；定时器到点后确认会话映射没变、收尾记录没被覆盖、对方没重开、`isConversationBusyV2()` 为 false，才调用 `retireSession(key)` 换新会话并清零计数（`scheduleSessionRotationAfterCloseV2`）。放弃条件全部是「这次不换」（计数不清零，下次收尾再触发），不影响别的路径；`forgetConversationCaches` 统一清定时器。为什么按收尾次数而不是 token：DSH 自动压缩门槛 727k（1M 窗口）、手动压缩摘要不适合人格记忆（PITFALLS #87）。
+
 重建路径 `ensureSession(key)`（`src/bridge.js:9119-9212`）：
 
 1. 代际 `sessionEpoch` + 策略快照。

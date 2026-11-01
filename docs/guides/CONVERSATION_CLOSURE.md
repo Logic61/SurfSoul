@@ -75,6 +75,22 @@
 重开后 `closure.reopenedAt` 会被写上，下次唤醒提示会说「上次刚收过尾，现在是新的开始，
 别复读上次的结尾」。
 
+### 3.4 自然收尾 5 次后换 DSH 会话（2026-11-01 新规则）
+
+不按 token 压力，**数自然收尾次数**：`socialV2.closure.rotateAfterClosures`（默认 5，0=关闭）。
+
+- 本次 DSH 会话内每成功 `qq_close_conversation` 一次，`st.sessionClosures` +1；累计 ≥ 阈值
+  → 挂一个 5s 定时器；等收尾回合结束、`isConversationBusyV2()` 为 false 时执行 `retireSession(key)`：
+  停+归档旧 DSH 会话、轮换 agentToken、`bootstrapSent=false`、**收尾计数清零**，
+  而收尾记录/记忆卡/轻记忆/未读窗口全部保留（都在 `social-v2.json`）。下一段对话由
+  `ensureSession` 懒创建并走 `bootstrap` 冷启动。
+- 为什么换而不是压缩：1M 窗口下 DSH 自动压缩阈值高达 727,040 tokens（实际几乎不触发）；手动 `/compact`
+  的摘要是英文 coding agent 八段式，对陪伴人格的记忆不友好（见 PITFALLS #87）。换会话冷启动 ≈37–38k
+  tokens，比手动压缩后的常态 ≈50k 还低。
+- 放弃条件（都不算错，只是这次不换；计数不清零，下次收尾会再触发）：对方又开口（`reopenedAt` 更新）/
+  有更新的一次收尾 / 会话映射已被别的路径换掉 / 等待 6 次（约 30s）仍在忙。
+- 只在 `reserved2` 的 `qq_close_conversation` 链路生效（v1 模式没有收尾概念）。
+
 ## 4. 结束点长什么样
 
 `state/social-v2.json` 的会话状态里：
@@ -111,13 +127,17 @@
   "requireNoOpenQuestion": true,
   "promptInWake": true,
   "maxSummaryChars": 160,
-  "maxNextOpeningChars": 120
+  "maxNextOpeningChars": 120,
+  "rotateAfterClosures": 5
 }
 ```
 
 - `enabled=false`：不注入判断块、`close` 返回 403；工具也会在 MCP 注册期被过滤；
 - `promptInWake=false`：仍可 close，但唤醒不再带判断参数（不推荐）；
-- 设置页 QQ 页有「二代 · 对话收尾判断」卡片。
+- `rotateAfterClosures`（默认 **5**，0=关闭）：本会话内自然收尾累计 ≥ 该次数 → 收尾回合结束后换 DSH 会话；
+  换完计数归零重新数；设为 0 关闭轮换（继续用单个长会话，靠 DSH 压缩兜底）。
+- 计数存在 `social-v2.json` 的会话状态 `sessionClosures`（跨桥接重启保留）；换会话/任何退役路径都会清零。
+- 设置页 QQ 页有「二代 · 对话收尾判断」卡片（`rotateAfterClosures` 暂未做成 UI，改 `config.json` 生效）。
 
 ## 6. 验证与回滚
 
