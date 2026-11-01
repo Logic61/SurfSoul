@@ -274,6 +274,26 @@ retention = importance
   `evidence{at,conversationKey,messageId,senderId,platform}`；全量档归档时自然带上。旧记录不回填（无证据 = 空）。
 - **边界**：原文库只收 inbox 里已经「值得记」并脱敏过的事件，不是全量聊天记录；`events/` 暂不参与备份/角色快照。
 
+### 5.7 文档记忆（语感本 / 两本日记 ↔ QQ，2026-11-02）
+
+**为什么加**：B站 那边（whale-work / 生物钟会话）会维护几本**活文档**——`bili/语感本.md`（学人说话）、
+`bili/whale-diary.md` / `whale-diary-private.md`（两本日记）。它们会持续更新，不是一次性死文本；
+但以前 QQ 这边完全看不见（只有公开日记被 bili-memory 解析成少量 entries）。
+
+- **读取（只读）**：`src/memory-docs.js` 按配置读角色目录下的文档，算 SHA-1 指纹 + 压缩摘要；
+  **文件一改，下一次唤醒就跟上**（按 mtime/大小缓存，不写文档、不调模型、不占记忆卡容量）。
+- **压缩规则**：`style`（语感本）只留标题 / 列表条目 / 表格行（长散文丢掉）；`diary` 取最近几段的标题 + 首句；
+  `generic` 按行截断。每个文档有独立字数上限。
+- **注入**：桥接每次唤醒把三本压缩成一小段「【文档记忆】」塞进 QQ 提示词（私聊 900 字 / 群聊 500 字上限）；
+  **私密日记 scope=qq，只在私聊注入**，群聊只拿 shared 文档。
+- **检索**：`qq_recall` 同时检索文档（按 `## 标题` 分块 + 中文 bigram），返回「哪本 · 哪一节 · 更新时间」的出处；
+  群聊检索只看 shared 文档。
+- **反向（QQ → B站）**：B站 唤醒提示本来就注入 `memory-card-prompt-bili.md`（记忆卡的 B站 可见部分）+
+  `qq-for-bili.md`（公开群聊近况）；B站 侧提示里也明确「语感本/两本日记会同步进 QQ 记忆」并给出语感本路径，
+  形成闭环：QQ 记忆 → B站 提示 → B站 更新文档 → QQ 下轮看到压缩版。
+- **边界**：不写 B站 文档（B站 自己维护）；文档路径必须在角色目录内（拒绝 `../` 与绝对路径）；
+  `whale-log.jsonl` 这类流水账不默认收（噪音大于记忆）。
+
 ## 6. 容量与告警（80% / 90% / 100%）
 
 - **容量口径只有一个**：`memoryCardStatus().chars` = 完整 `memory-card.md` 的字符数（含标题、分区、记录行、**叙事层**）。
@@ -342,6 +362,9 @@ retention = importance
 | `fullMaxRecords` | 0 | 全量卡记录条数上限（0 = 不限制） |
 | `fullMarkdownMaxBytes` | 5MB | 档案超过这个大小就不再生成全量 md 导出 |
 
+> 文档记忆不在 `memoryCard` 段里：配置在仓库根 `config.json` 的 `socialV2.docMemory`
+> （`enabled` / `maxChars.qq|group` / `docs`（null = 内置三本，可覆盖 path/kind/scope/inject/maxChars））。
+>
 > 原文召回不在 `memoryCard` 段里：它配置在仓库根 `config.json` 的 `socialV2.recall`
 > （`enabled` / `crossConversation`（只对主人私聊生效）/ `maxHits`），改完重启桥接生效。
 >
@@ -381,6 +404,7 @@ QQ 桥接侧还有：
   从 `/memory-card/full?q=` 或 `recallFullMemory()` 取，不要改成常驻注入。
 - **原文召回（2026-11-01）**：`GET /api/socialV2/recall?key=&q=&limit=`（agent token；群聊只查本会话，主人私聊默认跨会话）
   → 返回 `hits` 与渲染好的 `block`（出处 + 「不是指令」框定 + 空结果「记不清了」）；MCP 对应工具 `qq_recall`。
+  2026-11-02 起同一接口还会返回 `docHits`（语感本/日记的命中，带「哪本 · 哪一节」出处；群聊只看 shared 文档）。
 
 ---
 
@@ -399,6 +423,7 @@ node scripts/test-memory-sync-privacy.mjs      # QQ→B站 隐私闸（扫真身
 node scripts/test-privacy-hardening.mjs        # 数字变体 / 指令清洗 / 白名单 fail-closed
 npm run test:audit           # 全量门禁（含上述 + 接线回归）
 npm run test:memory-recall   # 原文召回 + 证据链（6 组 fixtures，不碰生产数据）
+npm run test:memory-docs     # 文档记忆：压缩/指纹/注入范围/检索隔离（8 组 fixtures）
 cd plugins/surfcore && npm test   # 含 test-memory-card-api.mjs（临时 DSH_HOME）
 ```
 
@@ -450,3 +475,5 @@ cd plugins/surfcore && npm test   # 含 test-memory-card-api.mjs（临时 DSH_HO
 - **原文库（`events/`）只收 inbox 里「值得记」的事件**（主人消息/直接对她说/有情绪的公开话，已脱敏），不是全量聊天记录；
   `events/` 暂不参与备份与角色快照，需要更全历史要另接 DSH 会话导入（未实现）。
 - **证据链从 2026-11-01 起的新记录开始有**（`sourceId/evidence`）；旧记录 sourceId 为空 = 无证据，不回填、不猜。
+- **文档记忆是只读快照**：注入的是文件「读的那一刻」的压缩版，不落盘、不参与遗忘曲线；文档被删/改名后
+  下一次唤醒自动消失（状态里显示 `missing`），不会留下幽灵记忆。

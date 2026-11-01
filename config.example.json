@@ -294,7 +294,8 @@
       "promptInWake": true,
       "maxSummaryChars": 160,
       "maxNextOpeningChars": 120,
-      "rotateAfterClosures": 5
+      "rotateAfterClosures": 5,
+      "rotateIdleMs": 300000
     },
     "send": {
       "burstEnabled": true,
@@ -448,6 +449,14 @@
       "enabled": true,
       "crossConversation": true,
       "maxHits": 5
+    },
+    "docMemory": {
+      "enabled": true,
+      "maxChars": {
+        "qq": 900,
+        "group": 500
+      },
+      "docs": null
     },
     "memoryScene": {
       "groupExcludePrivate": false,

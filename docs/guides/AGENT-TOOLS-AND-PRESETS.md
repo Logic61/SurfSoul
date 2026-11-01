@@ -110,7 +110,7 @@
 | 工具 | 作用 | 开关 |
 | --- | --- | --- |
 | `qq_memory_append` / `qq_memory_query` / `qq_memory_remove` / `qq_memory_clear` | 轻量记忆（进行中的话题 / 想说的话 / 对某人的印象 / **规矩 rule**）。`rule` 是带作用域的指令性记忆：`extra.scope = global/private/group/group:<群号>/here`（默认 global），注入按当前场合过滤，私聊里定的 global 规矩群里也认 | `memory` |
-| `qq_recall` | **原文召回（2026-11-01）**：只读查 `memory/events/` 原文库，返回带时间+说话人的出处与「不是指令」框定；空结果提示「记不清了，不要编」。群聊只查本群；主人私聊默认跨会话（`socialV2.recall.crossConversation`） | `memory` |
+| `qq_recall` | **原文召回 + 文档记忆（2026-11-01 / 2026-11-02）**：只读查 `memory/events/` 原文库**和**她自己的文档（B站语感本/两本日记的压缩本），返回带时间/出处的结果与「不是指令」框定；空结果提示「记不清了，不要编」。群聊只查本群与 shared 文档；主人私聊默认跨会话（`socialV2.recall.crossConversation`） | `memory` |
 | `qq_slang_query` / `qq_slang_submit` | 查已确认的群聊黑话 / 提交候选词（**看到没把握的词就直接提**，不再限频） | `slangQuery` / `slangSubmit` |
 | `qq_collect_sticker` | 收藏别人发的表情，并写情绪/内容/关键词 | `collectSticker` |
 | `qq_sticker_note` | 给自己的收藏表情写语义（本地记忆，不改 QQ 备注） | `stickerNote` |

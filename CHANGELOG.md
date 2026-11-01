@@ -4,6 +4,23 @@
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 发布规则见 [docs/guides/VERSIONS.md](docs/guides/VERSIONS.md)。
 
+## [未发布] - 2026-11-02（文档记忆互通：语感本/两本日记 ↔ QQ 记忆）
+
+### 变更
+
+- **文档记忆**（新增 `src/memory-docs.js`）：把 B站 那边活着的三本本子——`bili/语感本.md`、
+  `bili/whale-diary.md`、`bili/whale-diary-private.md`——按配置读成记忆：SHA-1 指纹 + 压缩摘要
+  （style 留标题/条目/表格，diary 取最近几段首句，generic 按行截断），**文件一改下轮唤醒就跟上**；
+  按 mtime/大小缓存，只读不写、不调模型、不占记忆卡。
+- **QQ 唤醒注入**：桥接把三本压缩成一小段【文档记忆】放进唤醒提示（私聊 900 字 / 群聊 500 字；私密日记只在私聊）。
+- **qq_recall 扩展**：同一工具/接口现在也检索文档（按 `## 标题` 分块 + bigram），返回「哪本 · 哪一节 · 更新时间」出处；
+  群聊只看 shared 文档。新增响应字段 `docHits`。
+- **B站 侧闭环**：B站 唤醒提示本来就注入 `memory-card-prompt-bili.md` + `qq-for-bili.md`；这次再补语感本路径与
+  「语感本/两本日记会同步进 QQ 记忆」的说明——QQ 记忆 → B站 提示 → B站 更新文档 → QQ 下轮看到压缩版。
+- **配置**：`socialV2.docMemory { enabled, maxChars.qq|group, docs }`（`docs=null` 用内置三本，可覆盖 path/kind/scope/inject/maxChars）。
+- **测试**：新增 `scripts/test-memory-docs.mjs`（8 组：压缩/指纹/路径越界/注入范围/群聊隔离/检索出处），进 `test:audit`。
+- **文档**：`MEMORY_CARD.md` 新增 §5.7、§8/§9/§10/§11 同步；`AGENT-TOOLS-AND-PRESETS.md` 更新 qq_recall 行。
+
 ## [未发布] - 2026-11-01（记忆架构第一批：证据链 + 原文库 L0 + qq_recall）
 
 ### 变更

@@ -72,6 +72,7 @@ import {
   appendMemoryInboxEvent, looksNoteworthyMessage, readPromptBlock, resolveMemoryCardPaths,
 } from './memory-card.js';
 import { createEventRecall, formatRecallHits } from './memory-search.js';
+import { formatDocHits, readMemoryDocs, renderDocBlock, searchMemoryDocs } from './memory-docs.js';
 import { completeText } from './llm-text.js';
 import {
   createMemoryAbstractProvider, createPresendReviewer, createRejectFallback, normalizePresendReviewConfig,
@@ -1034,6 +1035,13 @@ function loadConfig() {
         enabled: true,
         crossConversation: true,
         maxHits: 5
+      },
+      // 文档记忆（2026-11-02）：B站 那边活着的文档（语感本/两本日记）压缩后注入唤醒提示；
+      // 文件一改下一轮就跟上。docs 可覆盖（path/kind/scope/inject/maxChars），null = 内置三本。
+      docMemory: {
+        enabled: true,
+        maxChars: { qq: 900, group: 500 },
+        docs: null
       },
       sticker: {
         enabled: true,             // 表情包体系总开关
@@ -8749,7 +8757,13 @@ async function main() {
           const limit = Math.min(10, Math.max(1, Number.isFinite(limitRaw) ? Math.trunc(limitRaw) : 3));
           const crossConversation = String(key).startsWith('private:') && recallCfg.crossConversation !== false;
           const hits = eventRecallForMemoryDir().search(query, { conversationKey: key, limit, crossConversation });
-          sendJson({ ok: true, key, query, hits, block: formatRecallHits(hits, { query }) });
+          // 文档记忆（2026-11-02）：语感本 / 两本日记也一起召回；群聊只看 shared 文档（私密日记不下发）。
+          const docPlatform = String(key).startsWith('private:') ? 'qq' : 'group';
+          const docHits = recallCfg.docs === false
+            ? []
+            : searchMemoryDocs(readMemoryDocs({ memoryDir: MEMORY_CARD_PATHS.dir }), query, { limit, platform: docPlatform });
+          const block = [formatRecallHits(hits, { query }), formatDocHits(docHits, { query })].filter(Boolean).join('\n\n');
+          sendJson({ ok: true, key, query, hits, docHits, block });
           return;
         }
         if (req.method === 'POST' && url.pathname === '/api/socialV2/memory-remove') {
@@ -11324,12 +11338,15 @@ async function main() {
    * 自然收尾累计到设定次数后换 DSH 会话（2026-11-01 主人定的规则）。
    *
    * 规则：「自然收尾 5 次后换 session」——本次 DSH 会话内每成功收尾一次 `st.sessionClosures` +1，
-   * 累计 ≥ `socialV2.closure.rotateAfterClosures`（默认 5）时，在这一次收尾的回合结束后退役重建。
-   * 数的不是「对话轮数/对方发言条数」，而是**收尾次数**（一次收尾 = 一段完整对话的结束）。
+   * 累计 ≥ `socialV2.closure.rotateAfterClosures`（默认 5）时，**再静置 `rotateIdleMs`
+   * （默认 5 分钟）没有新消息**，才在后台退役重建。数的不是「对话轮数/对方发言条数」，
+   * 而是**收尾次数**（一次收尾 = 一段完整对话的结束）。
    *
    * 为什么不在 closeConversationV2 里直接退役：收尾工具是在回合内调用的，当场 retire 会
-   * 停掉/归档正在跑的这个回合；这里等 5s，回合正常结束后再确认「没有新消息、没有排队工作」
-   * 才退役。会话退到下一段对话时由 ensureSession 懒创建，并走 bootstrap 冷启动。
+   * 停掉/归档正在跑的这个回合；这里先等回合正常结束（5s 轮询确认没有新消息、没有排队工作），
+   * 再等静置窗口满了才退役。会话退到下一段对话时由 ensureSession 懒创建，并走 bootstrap 冷启动。
+   * （2026-11-02 修：以前「回合结束就换」，活跃聊天时几分钟换一次 session，每次都要重发长
+   * bootstrap，见 docs/PITFALLS.md #90；现在有新消息就顺延，不会打断正在进行的对话。）
    *
    * 为什么换会话而不是压缩：压缩是 DSH 侧行为，摘要按 coding agent 的英文格式生成、且成本高；
    * 记忆卡/收尾记录/轻记忆/未读窗口都在 social-v2.json，换会话不丢长期记忆（见 docs/PITFALLS.md #87）。
@@ -11346,6 +11363,12 @@ async function main() {
     const sessionId = state.sessions[key];
     if (!sessionId) return;
     const closedAt = Number(st?.closure?.at) || 0;
+    // 静置窗口（2026-11-02 修 PITFALLS #90）：收尾后要「5 分钟没有新消息」才换会话。
+    // 原来的实现是等回合结束（5s 轮询）就换，活跃聊天时几分钟换一次，每次新会话都要
+    // 重发很长的 bootstrap（环境说明 + 记忆卡注入），token 成本高、上下文还被切断。
+    // 收到新消息会把 lastIncomingAt 推后，tick 重新计算剩余静置时间，够了才退役。
+    const idleMs = Math.max(0, Number(config.rotateIdleMs) || 0);
+    const firstDelay = Math.max(SESSION_ROTATE_DELAY_MS, idleMs);
     clearSessionRotateTimer(key);
     let attempts = 0;
     const tick = () => {
@@ -11366,11 +11389,24 @@ async function main() {
         sessionRotateTimers.set(key, retry);
         return;
       }
-      log(`[轮换] ${key} 已自然收尾 ${closureCount} 次 ≥ ${config.rotateAfterClosures}，换新会话（记忆卡/收尾记录保留，下一条消息 bootstrap）`);
-      appendActivity(`${key} [轮换] 自然收尾 ${closureCount} 次后换新会话`);
+      // 收尾之后又有新消息（lastIncomingAt 被推后）→ 还没静置够，等剩余时间再判。
+      if (idleMs > 0) {
+        const anchor = Math.max(Number(latestState.lastIncomingAt) || 0, Number(latest.at) || 0);
+        const idleFor = Date.now() - anchor;
+        if (idleFor < idleMs) {
+          const wait = Math.min(Math.max(idleMs - idleFor + 250, SESSION_ROTATE_DELAY_MS), idleMs + SESSION_ROTATE_DELAY_MS);
+          log(`[轮换] ${key} 收尾后还有新消息（已静置 ${Math.round(idleFor / 1000)}s < ${Math.round(idleMs / 1000)}s），${Math.round(wait / 1000)}s 后再判`);
+          const retry = setTimeout(tick, wait);
+          retry.unref?.();
+          sessionRotateTimers.set(key, retry);
+          return;
+        }
+      }
+      log(`[轮换] ${key} 已自然收尾 ${closureCount} 次 ≥ ${config.rotateAfterClosures}，静置 ${Math.round(idleMs / 60000)} 分钟无新消息，换新会话（记忆卡/收尾记录保留，下一条消息 bootstrap）`);
+      appendActivity(`${key} [轮换] 自然收尾 ${closureCount} 次、静置 ${Math.round(idleMs / 60000)} 分钟后换新会话`);
       retireSession(key);
     };
-    const timer = setTimeout(tick, SESSION_ROTATE_DELAY_MS);
+    const timer = setTimeout(tick, firstDelay);
     timer.unref?.();
     sessionRotateTimers.set(key, timer);
   }
@@ -14050,8 +14086,19 @@ async function main() {
       : `【沉睡前强制等待】这是决定**潜水**时的步骤，不是首回复的前置条件，也不是自然收尾（qq_close_conversation）的前置条件。除非对方明确说“不聊了/晚安/下了/拜拜”等结束语，否则每次设置潜水/下一次唤醒前，必须先调用 qq_wait_for_messages(timeoutMs=${preSleepMs}) 完成一次沉睡前观察；回复前 purpose="reply" 的短静默不能代替这次完整观察。若 ${Math.round(preSleepMs / 60000)} 分钟内没人说话，返回 preSleepWaitSatisfied=true，可以设置下一次唤醒并沉睡；若期间有人发新消息，先查看返回的 newMessages——判断不需要你参与就可以直接沉睡，若你选择参与回复，则下次想睡时需要重新等待观察窗口。如果返回里带 preSleepWaitRemainingMs，就按剩余时间继续等待。\n\n`;
     const lastMsg = [...(Array.isArray(st.recentMessages) ? st.recentMessages : [])].reverse().find((m) => m && !m.isSelf);
     const recallHint = lastMsg && RECALL_HINT_RE.test(String(lastMsg.text || lastMsg.plain || ''))
-      ? '【回忆】这句可能在问过去的事；想不起来就用 qq_recall(query=关键词) 查原文库，别硬编。\n\n'
+      ? '【回忆】这句可能在问过去的事；想不起来就用 qq_recall(query=关键词) 查原文库/文档记忆，别硬编。\n\n'
       : '';
+    // 文档记忆（2026-11-02）：语感本 / 两本日记压缩成一小段；文件一改，下轮唤醒就跟上
+    // （readMemoryDocs 按 mtime 缓存，只读不写、不调模型；私密日记只在私聊注入）。
+    const docMemoryText = cfg.socialV2?.docMemory?.enabled === false
+      ? ''
+      : renderDocBlock(readMemoryDocs({ memoryDir: MEMORY_CARD_PATHS.dir }), {
+        platform: isPrivateChat ? 'qq' : 'group',
+        maxChars: isPrivateChat
+          ? (Number(cfg.socialV2?.docMemory?.maxChars?.qq) || 900)
+          : (Number(cfg.socialV2?.docMemory?.maxChars?.group) || 500),
+      });
+    const docMemoryLine = docMemoryText ? `${docMemoryText}\n\n` : '';
     const lastAiMin = st.lastAiReplyAt ? Math.max(0, Math.round((Date.now() - Number(st.lastAiReplyAt)) / 60000)) : null;
     const statusBits = [`未读 ${(st.unread || []).length} 条`];
     if (lastMsg) statusBits.push(`最近一条来自 ${String(lastMsg.sender || '未知')}：${String(lastMsg.text || lastMsg.plain || '').slice(0, 30)}`);
@@ -14119,7 +14166,7 @@ async function main() {
     // 跨会话记忆：私聊和群聊的轻记忆各自一份，这里补上别的会话的，避免「私聊说过的规矩群里不认」。
     const sharedMemoryText = formatSharedMemoryV2(key);
     const sharedMemoryLine = sharedMemoryText ? `${sharedMemoryText}\n\n` : '';
-    const base = roleLine + identityLine + provenanceLine + sceneLine + adminLine + biliLine + memoryCardLine + recallHint + narrativeLine + convGuardLine + styleNotesLine + tokenLine + initialPromptLine + antiAiLine + proactiveLine + closureLine + stickerLine + stickerMatchLine + replyLine + statusLine + wakeLine + memoryLine + sharedMemoryLine + crossSceneLine + participationLine + fishGuardLine + tokenGuardLine + preSleepLine;
+    const base = roleLine + identityLine + provenanceLine + sceneLine + adminLine + biliLine + memoryCardLine + docMemoryLine + recallHint + narrativeLine + convGuardLine + styleNotesLine + tokenLine + initialPromptLine + antiAiLine + proactiveLine + closureLine + stickerLine + stickerMatchLine + replyLine + statusLine + wakeLine + memoryLine + sharedMemoryLine + crossSceneLine + participationLine + fishGuardLine + tokenGuardLine + preSleepLine;
     if (reason === 'bootstrap') {
       return `${base}【引导唤醒】你已接入 QQ 会话 ${key}。\n当前是二代仿真模式：你的文本输出不会自动发送到 QQ，所有发言必须通过工具完成。\n请先调用 qq_get_prompt 查看角色、推荐值、可用工具和状态；有待回应的消息先按首回复节奏处理，最后才用 qq_set_wake_config 设置你希望如何被唤醒。`;
     }

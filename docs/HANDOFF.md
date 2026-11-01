@@ -5,6 +5,53 @@
 
 ---
 
+## 快照（2026-11-02 00:1x，记忆架构第二批：文档记忆互通——语感本/两本日记 ↔ QQ）
+
+### 用户原话
+
+> 「然后做下一批，然后把whale-work的文件试着融入其记忆，或者说作为记忆文件的一部分，如…/bili/语感本.md，
+> 当然可以做适当的压缩之类的处理。但是我希望这两个地方记忆互通，我不是说现在的文档一次性作为死文本，
+> 这里的文档应该会更新，我不确定目前是否这和QQ的记忆连通」
+
+### 现状回答（先查再动）
+
+- **B站 → QQ 原来只有一半**：`src/bili-memory.js` 会读 `whale-diary.md` 解析成 entries 进记忆卡（公开日记）；
+  但 `语感本.md`、私密日记原文、whale-log 完全没进 QQ。
+- **QQ → B站 已通**：B站 唤醒提示注入 `memory-card-prompt-bili.md`（记忆卡 B站 可见部分）+ `qq-for-bili.md`
+  （公开群聊近况，`src/bridge.js` 的 `biliMemory.briefBlock/recallBlock` 另有一份简报+按消息召回）。
+- 缺的是「**活文档**」这一层：有更新不会自动进 QQ，也不是记忆卡的一部分。
+
+### 做到哪（已改代码，**未重启验证**）
+
+| 改动 | 内容 |
+| --- | --- |
+| 新模块 | `src/memory-docs.js`：读三本活文档（`bili/语感本.md` / `whale-diary.md` / `whale-diary-private.md`），SHA-1 指纹 + 压缩摘要（style 留标题/条目/表格；diary 取最近几段首句），按 mtime/大小缓存 |
+| QQ 注入 | 桥接每次唤醒注入【文档记忆】块：私聊 900 字 / 群聊 500 字；**私密日记 scope=qq 只在私聊**；文件一改下轮生效 |
+| 检索 | `qq_recall` / `GET /api/socialV2/recall` 同时检索文档（按 `## 标题` 分块 + bigram），返回「哪本 · 哪一节 · 更新时间」；群聊只看 shared |
+| B站 闭环 | `plugins/surfcore/lib/scheduler.js` 唤醒提示补：语感本路径 + 「有新句式补 1~3 条，别整本重写」+ 「它和两本日记会同步进 QQ 记忆」；原有 QQ 记忆卡/近况注入不变 |
+| 配置/测试/文档 | `socialV2.docMemory {enabled,maxChars.qq|group,docs}`；`scripts/test-memory-docs.mjs` 8 组进 `test:audit`；MEMORY_CARD §5.7 / AGENT-TOOLS / CHANGELOG 同步 |
+
+### 已验证
+
+- `node scripts/test-memory-docs.mjs` **8/8**；`test-memory-recall` **6/6**；`node --check` bridge/scheduler/mcp/memory-docs 通过。
+- `test-scheduler-session`、`test-scheduler-permission` 通过（B站 唤醒提示改动不影响会话调度）。
+- `npm run test:audit`：**86/92**，失败仍是历史 6 红（self-identity / identity-guard / media-search / voice-system /
+  preset-local-tools / version），**无新增红**；新测试 `test-memory-docs` 在套件内通过。
+  （中间一度被并行会话清空 `node_modules` 阻塞，已 `npm install` 恢复后补跑；`src/conversation-closure.js` 仍被并行会话在改，未提交。）
+
+### 没验证 / 下一步
+
+1. **要生效必须重启桥接 + DSH**（桥接注入/接口、插件宿主 scheduler）。重启后验证：
+   ① 私聊唤醒提示出现【文档记忆】且含语感本/日记压缩；② 改一下 `语感本.md`，下一轮唤醒摘要跟着变；
+   ③ 私聊 `qq_recall("买了 不用找了")` 能命中语感本并带「哪一节」；群里问私密日记内容应查不到；
+   ④ B站 下次唤醒提示里能看到语感本路径与「同步进 QQ」说明。
+2. 未做：冻结 bench 基线、selfNote、保护集配额、桥接侧相关记忆小节、闲置边界轮换（见分析报告 §4 P2）。
+3. 回滚：删 `src/memory-docs.js` / `scripts/test-memory-docs.mjs`，还原 `src/bridge.js`、`src/mcp-snowluma-safe.js`、
+   `plugins/surfcore/lib/scheduler.js`、`config.example.json`、`package.json`、`scripts/test-audit.mjs`、文档
+   （备份仍可参照 `state/agents/_backups/memory-arch-20261101-2220/`，scheduler 是本次新改，回滚用 git）。
+
+---
+
 ## 快照（2026-11-01 22:2x，记忆架构第一批：证据链 + 原文库 L0 + qq_recall）
 
 ### 用户原话

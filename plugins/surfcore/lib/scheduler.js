@@ -161,6 +161,26 @@ function memoryCardBlockForBili() {
   return memoryCardPromptBlock('bili')
 }
 
+/**
+ * 文档记忆（2026-11-02）：语感本是 B站 这边「学人说话」的本子，和两本日记一样会同步进
+ * QQ 那边的记忆（QQ 唤醒提示里有压缩版）。这里只提示路径与维护方式，不重复注入全文。
+ */
+function docMemoryLines() {
+  let biliDir = ''
+  try {
+    const memoryDir = activeMemoryPaths().dir
+    biliDir = path.join(path.dirname(memoryDir), 'bili')
+  } catch { return [] }
+  const yugan = path.join(biliDir, '语感本.md')
+  let hasYugan = false
+  try { hasYugan = fs.statSync(yugan).isFile() } catch {}
+  if (!hasYugan) return []
+  return [
+    `2.5) 语感本 \`${yugan}\`：你自己在用的本子（摘句/模式/别学）。学到新的就按原格式补 1~3 条，别重写整本 ✓`,
+    '     这本和两本日记会同步进 QQ 那边的记忆（她每次醒来会看到压缩版）；QQ 近况/记忆卡也在这段提示里 ✓',
+  ]
+}
+
 /** 每次唤醒都放在最前面的合体上下文（顺序：人设 → 自我锚点 → 管理员 → 对齐 → QQ 记忆 → 记忆卡）。 */
 function identityContextLines() {
   return [
@@ -297,6 +317,7 @@ function wakePrompt(st, tools = '') {
     '⭐ **本轮硬规则（2026-10-23 主人定）：至少发一条主动评论（见 4.7）；鱼群泛滥时强制聚拢，不许以“没有可聚拢鱼楼”跳过；额度/冷却满了除外。**',
     '1) `node bili.mjs deps` —— 体检红着就报备我、只做读、别对外发',
     '2) 读两本日记（`~/.dsh/surfcore/bili/whale-diary.md` + `whale-diary-private.md`）',
+    ...docMemoryLines(),
     // 2026-10-20：feed 已默认多源（搜索+热门+排行+关注）+ 去播放量偏向 + 偏好命中权重 ✓
     // 2026-10-23：feed 改成按「口味权重」分名额 + 排除观看历史/最近推过的 + 搜索页轮换。
     '3) `feed` 选题（≤5 条）→ 对这 5 条跑 `debrief --no-frames`',
