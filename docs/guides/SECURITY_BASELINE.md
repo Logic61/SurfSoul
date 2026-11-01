@@ -55,6 +55,7 @@
 | CQ 注入 | `onebotSend()` | 出站文本一律包成 `{type:'text'}` 段并做 `[CQ:` → `[CQ：` 转义，杜绝 CQ 码注入 |
 | @ 限制 | `onebotSend()` | `atUserId` 只接受正整数，禁止 `@all` |
 | 发送限流 | `socialV2.send.*` / `voice.*` / `sticker.collect.*` | 每分钟/每小时硬上限，超限拒绝并退避 |
+| 发送前评审（外部 API 出站） | `/api/socialV2/send-message` / `send-burst` → `src/presend-review.js` | `socialV2.review.enabled=true` 时，真正发送前把「场合/最近对话 + 抽象记忆卡 + style-notes + 待发消息」发给 DeepSeek 文本接口打分（≤~1200 字上下文、~400 输出 token）；低于阈值**不发送**、理由作为工具错误返回给模型改写。出站内容只含聊天上下文与记忆摘要（压缩后的，不含本机路径/令牌；`.credentials` 的 key 只在桥接侧解析）；评审失败/超时/解析失败默认放行以免堵住消息。**退回兜底**：`rejectFallbackMs`（默认 90s）内没有重发成功会自动补发最后一版被退回的稿子——即「评审不过」在当前配置下等于「晚 90 秒发」，不是「永远不发」；兜底发送仍重新过静默/鱼群/token 闸门，`0` 可关闭。只评审不发送的 `POST /api/socialV2/review-preview` 需要控制台令牌，供调参/排障 |
 
 ### 4. 控制台（本机最高权限入口）
 

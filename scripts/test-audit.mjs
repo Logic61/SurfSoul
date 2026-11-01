@@ -79,6 +79,8 @@ const tests = [
   // 场合作用域（2026-10-31 路线 A）：规矩 scope / style-notes 作用域 / 场合档位 /
   // 记忆卡 audience 过滤 / 受控跨场合投递（私聊→白名单群）的纯函数与真实桥接接线。
   'test-scene-scope.mjs', 'test-scene-wiring.mjs',
+  // 发送前评审（2026-11-01）：配置归一 / prompt 预算 / 评分解析 / 节流熔断 / 记忆抽象卡缓存 + reviewer 编排。
+  'test-presend-review.mjs',
   // 备份 / 恢复 / 轮转 / stats 重建（P1-10 / P2-7 / P2-8 / P2-9）。
   'test-memory-card-backup.mjs',
   // 叙事层的可见 / 可操作 / 开关（B4）。

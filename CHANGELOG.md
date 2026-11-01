@@ -4,6 +4,40 @@
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 发布规则见 [docs/guides/VERSIONS.md](docs/guides/VERSIONS.md)。
 
+## [未发布] - 2026-11-01（QQ 发送前评审：评审搬进桥接 + 情景/抽象记忆卡，只给 surfcore 用）
+
+### 变更
+
+- **发送前评审**（`src/presend-review.js` + `src/bridge.js`）：`/api/socialV2/send-message` 与
+  `send-burst` 在 `sendMessagesV2` 之前先让评审模型打分；低于阈值**不发送**，把理由作为工具错误
+  返回给模型改写后再发。修掉「回合结束才评审 → 已发出去的消息只能再补一条更正版」造成的 QQ 连发。
+- **评审上下文**（用户要求「情景 + 高度抽象记忆卡 + token 权衡」）：场合/状态（群/私聊、群名、角色名、
+  时间、近 10 分钟发言量、收尾冷却、最近 4 条对话）+ 记忆卡抽象摘要（≤620 字，压缩结果缓存
+  `state/review-context/memory-abstract.json`，源变或 12h 才重压）+ style-notes（≤140 字）；
+  预算 `sceneMaxChars 420 + memoryMaxChars 620 + styleMaxChars 140 ≈ 1200 字`，全部可配。
+- **安全阀**：评审失败/超时/解析失败默认 `failOpen` 放行；解析失败按 `parseRetries`（默认 1）重试一次；
+  同 key 通过一次后 `skipAfterPassMs`（2 分钟）内后续发送跳过评审；被退回 `maxRejects`（3 次/10 分钟）后放行；
+  <8 字消息不审。
+- **退回兜底（用户拍板 90s）**：`rejectFallbackMs`（默认 90000）：评审退回后 90 秒内没有「重新发送成功」
+  → 自动补发最后一版被退回的稿子（同一会话多次退回只更新稿子、不延长截止；有成功重发/语音/图片时取消；
+  兜底发送重新过静默/鱼群/token 闸门；`0`=关闭）。本机 `threshold` 同时从 80 调到 **75**。
+- **调参/排障**：新增 `POST /api/socialV2/review-preview`（控制台令牌、**只评审不发送**）与
+  `scripts/review-dryrun.mjs`（离线版），可用真实场合/记忆卡/最近对话试评分。
+- **配置**：`config.example.json` / `config.json` 新增 `socialV2.review`（默认 `enabled:false`，模板里关、
+  本机 config 已开 `enabled:true, threshold:75, rejectFallbackMs:90000`）。
+- **MCP 工具**：`qq_send_message` / `qq_send_burst` 描述补充「发送前会过独立评审；被退回按理由改写后再调，
+  不要解释评审」。
+- **DSH 侧全局 reviewer 插件已停用**（`~/.dsh/answer-reviewer.json` 设 `enabled:false`）：现在只有
+  surfcore 的发送前评审在用；插件的 vendor 目录等下次重启 DSH 后再卸载。
+
+### 测试/文档
+
+- 新增 `scripts/test-presend-review.mjs`（18 组：配置归一 / 情景与 prompt 预算 / 评分 JSON 解析 /
+  节流与熔断 / 记忆抽象卡缓存与失败回退 / 解析失败重试 / 退回兜底 / reviewer 编排），已加入 `test:audit`；**18/18 通过**。
+- 新增 `scripts/review-dryrun.mjs`：只拼 prompt / 调评审模型、**不发 QQ**，用于调参与排障。
+- 文档：`DATA-AND-CONFIG.md` §1.11 增 `review`；`SECURITY_BASELINE.md` §3 增出站评审行；
+  PITFALLS **#89**；HANDOFF 同日快照。
+
 ## [未发布] - 2026-10-31（场合作用域路线 A：记忆共同 + 分清场合 + 受控跨场合投递）
 
 ### 变更

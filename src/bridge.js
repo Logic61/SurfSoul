@@ -65,8 +65,12 @@ import {
 } from './token-budget.js';
 import { createBiliMemory } from './bili-memory.js';
 import {
-  appendMemoryInboxEvent, looksNoteworthyMessage, resolveMemoryCardPaths,
+  appendMemoryInboxEvent, looksNoteworthyMessage, readPromptBlock, resolveMemoryCardPaths,
 } from './memory-card.js';
+import { completeText } from './llm-text.js';
+import {
+  createMemoryAbstractProvider, createPresendReviewer, createRejectFallback, normalizePresendReviewConfig,
+} from './presend-review.js';
 import {
   RULE_MAX_COUNT, RULE_MAX_CHARS,
   collectRulesForScene, crossSceneRateBlocked, filterMemoryCardPromptForScene,
@@ -151,6 +155,8 @@ const CHARACTER_ID = ACTIVE_CHARACTER?.id ?? '';
 const CHARACTER_EPOCH = Number(ACTIVE_CHARACTER?.epoch ?? 0);
 const MEMORY_CARD_PATHS = resolveMemoryCardPaths(activeMemoryPaths().dir);
 const PLATFORM_STATE_DIR = activePlatformStateDir(STATE_DIR);
+// 发送前评审：抽象记忆卡压缩结果的落盘缓存（源记忆卡变了或超过 memoryRefreshMs 才重压）。
+const PRESEND_REVIEW_CACHE_FILE = path.join(STATE_DIR, 'review-context', 'memory-abstract.json');
 // 容量告警私聊节流（同一档 10 分钟内最多一条；插件侧还有 12 小时的同档节流）。
 const memoryCardNotifyAt = new Map();
 
@@ -6243,6 +6249,21 @@ async function main() {
           const st = getSocialV2State(key);
           const fishBlock = fishGuardSendBlock(key, st);
           if (fishBlock) { sendJson({ ok: false, error: fishBlock.error }, 403); return; }
+          // 发送前评审（见 presend-review.js）：不过就不发，把理由返回给模型改写后再发。
+          const presendReview = await maybePresendReview({ key, kind, messages, st });
+          if (presendReview) {
+            sendJson({
+              ok: false,
+              error: presendReview.error,
+              review: {
+                score: presendReview.score,
+                threshold: presendReview.threshold,
+                reason: presendReview.reason,
+                attempt: presendReview.attempt,
+              },
+            }, 422);
+            return;
+          }
           const tokenBlock = tokenGuardSendBlock(key, st, messages.length);
           if (tokenBlock) { sendJson({ ok: false, error: tokenBlock.error }, 429); return; }
           const now = Date.now();
@@ -6261,6 +6282,7 @@ async function main() {
             const delays = computeGapsV2(messages, 'auto', undefined, undefined, sendCfg);
             const sentMessages = await sendMessagesV2(key, messages, delays);
             recordSentMessagesV2(key, sentMessages);
+            cancelPresendFallback(key); // 已经重发成功：取消退回兜底
             st.lastAiReplyAt = now;
             st.lastActionAt = now;
             st.wakeConfig.noActionCount = 0;
@@ -6380,6 +6402,21 @@ async function main() {
           const st = getSocialV2State(key);
           const fishBlock = fishGuardSendBlock(key, st);
           if (fishBlock) { sendJson({ ok: false, error: fishBlock.error }, 403); return; }
+          // 发送前评审（见 presend-review.js）：不过就不发，把理由返回给模型改写后再发。
+          const presendReview = await maybePresendReview({ key, kind, messages, st });
+          if (presendReview) {
+            sendJson({
+              ok: false,
+              error: presendReview.error,
+              review: {
+                score: presendReview.score,
+                threshold: presendReview.threshold,
+                reason: presendReview.reason,
+                attempt: presendReview.attempt,
+              },
+            }, 422);
+            return;
+          }
           const tokenBlock = tokenGuardSendBlock(key, st, messages.length);
           if (tokenBlock) { sendJson({ ok: false, error: tokenBlock.error }, 429); return; }
           const now = Date.now();
@@ -6414,6 +6451,7 @@ async function main() {
           try {
             const sentMessages = await sendMessagesV2(key, messages, delays, actualReplyToMessageId, atUserId);
             recordSentMessagesV2(key, sentMessages);
+            cancelPresendFallback(key); // 已经重发成功：取消退回兜底
             st.lastAiReplyAt = now;
             st.lastActionAt = now;
             st.wakeConfig.noActionCount = 0;
@@ -6440,6 +6478,56 @@ async function main() {
             if (st.sendTimes.length > 500) st.sendTimes = st.sendTimes.slice(-500);
             saveSocialV2State();
             sendJson({ ok: false, error: error?.message ?? String(error) }, 500);
+          }
+          return;
+        }
+        // ── 发送前评审预览（运维/调参；**只评审、不发送**）────────────────────
+        // 用真实的场合/抽象记忆卡/最近对话跑一次评审并返回结果，方便在没有 QQ 流量时
+        // 调阈值/换模型/排查「为什么被退回」。用独立 reviewer 实例，不影响线上节流状态。
+        if (req.method === 'POST' && url.pathname === '/api/socialV2/review-preview') {
+          const body = await readBody();
+          const key = String(body.key ?? '').trim();
+          let rawMessages = body.messages ?? body.message;
+          if (typeof rawMessages === 'string') {
+            const trimmed = rawMessages.trim();
+            if (trimmed.startsWith('[') || trimmed.startsWith('"')) {
+              try {
+                const parsed = JSON.parse(trimmed);
+                if (Array.isArray(parsed)) rawMessages = parsed.map(String);
+                else if (typeof parsed === 'string') rawMessages = parsed;
+              } catch {}
+            }
+          }
+          const messages = Array.isArray(rawMessages)
+            ? rawMessages.map((m) => String(m ?? '').trim()).filter(Boolean)
+            : (typeof rawMessages === 'string' ? [rawMessages.trim()].filter(Boolean) : []);
+          if (!key || !messages.length) { sendJson({ ok: false, error: 'key 和 messages 不能为空' }, 400); return; }
+          const previewMatch = /^(group|private):(\d+)$/.exec(key);
+          if (!previewMatch) { sendJson({ ok: false, error: 'key 格式应为 group:群号 或 private:QQ号' }, 400); return; }
+          const startedAt = Date.now();
+          try {
+            const st = getSocialV2State(key);
+            const reviewer = buildPresendReviewer();
+            const result = await reviewer.review({
+              key,
+              kind: previewMatch[1],
+              messages,
+              groupName: groupNameForSceneV2(key),
+              personaName: String(ACTIVE_CHARACTER?.name ?? '').trim() || '她',
+              statusLines: presendReviewStatusLines(key, st),
+              recent: Array.isArray(st.recentMessages) ? st.recentMessages.slice(-8) : [],
+            });
+            sendJson({
+              ok: true,
+              key,
+              enabled: Boolean(presendReviewCfg()),
+              reviewConfig: presendReviewCfg() ?? normalizePresendReviewConfig(cfg.socialV2?.review ?? {}),
+              fallbackPending: presendFallback?.size?.() ?? 0,
+              elapsedMs: Date.now() - startedAt,
+              review: result,
+            }, 200);
+          } catch (error) {
+            sendJson({ ok: false, error: error?.message ?? String(error), elapsedMs: Date.now() - startedAt }, 500);
           }
           return;
         }
@@ -7269,6 +7357,7 @@ async function main() {
                 : null
             });
             voiceLastSentAt.set(String(key), Date.now());
+            cancelPresendFallback(key); // 已经用语音回复了：取消文字兜底
             sendJson({
               ok: true,
               key,
@@ -7436,6 +7525,7 @@ async function main() {
             if (tokenBlock) { sendJson({ ok: false, error: tokenBlock.error }, 429); return; }
             const now = Date.now();
             const sent = await sendImageV2(key, image, { replyToMessageId, atUserId, fromMessageId: fromMessageId || undefined, index: imageIndex });
+            cancelPresendFallback(key); // 已经用图片回复了：取消文字兜底
             st.sendTimes.push(now);
             if (st.sendTimes.length > 500) st.sendTimes = st.sendTimes.slice(-500);
             // 记进二代会话的 recentMessages：让她自己知道“我刚发了一张图”。
@@ -8723,6 +8813,7 @@ async function main() {
             if (st.sendTimes.length > 500) st.sendTimes = st.sendTimes.slice(-500);
             const sentMessages = await sendMessagesV2(key, [message], [], actualReplyToMessageId, atUserId);
             recordSentMessagesV2(key, sentMessages);
+            cancelPresendFallback(key); // 已经重发成功：取消退回兜底
             st.lastAiReplyAt = now;
             st.lastActionAt = now;
             st.wakeConfig.noActionCount = 0;
@@ -16081,9 +16172,173 @@ async function main() {
     }
   }
 
+  // ── 发送前评审（surfcore 自己的 reviewer）────────────────────────────────
+  //
+  // QQ 的回复是回合内用发送工具发出去的；DSH 回合结束时再评审已经晚了
+  // （2026-11-01 实测：低于阈值 steer 后模型又补发更正版，群里出现 1+2 条意思差不多的）。
+  // 这里在 reserved2 的发送闸门里、真正调用 sendMessagesV2 之前先审：
+  //   · 通过 → 正常发送（附评分日志）
+  //   · 不过 → 不发，把理由作为工具错误返回，模型改写后再发（QQ 只看到最终版）
+  //   · 评审失败/超时/解析失败/退回次数超限 → 默认放行（fail-open，宁可漏审不堵消息）
+  // 上下文 = 场合/状态 + 最近对话 + 抽象记忆卡 + 说话习惯，预算见 config.socialV2.review。
+  let presendReviewer = null;
+  function presendReviewCfg() {
+    const raw = cfg.socialV2?.review;
+    if (!raw || typeof raw !== 'object') return null;
+    const normalized = normalizePresendReviewConfig(raw);
+    return normalized.enabled ? normalized : null;
+  }
+  function presendReviewMemorySource() {
+    try {
+      return readPromptBlock(MEMORY_CARD_PATHS, 'qq');
+    } catch {
+      return '';
+    }
+  }
+  function presendReviewStatusLines(key, st) {
+    const lines = [];
+    const now = Date.now();
+    const isGroup = String(key ?? '').startsWith('group:');
+    try {
+      if (isGroup) {
+        const participation = String(formatParticipationV2(st) ?? '').replace(/\s+/gu, ' ').trim();
+        if (participation) lines.push(participation);
+        const closure = closureStatus(st?.closure, now);
+        if (closure?.cooldownActive) lines.push('刚自然收尾过（冷却中），这轮不该主动刷');
+      } else {
+        const closure = closureStatus(st?.closure, now);
+        if (closure?.cooldownActive) lines.push('刚自然收尾过（冷却中）');
+        else if (closure?.summary) lines.push(`上次收尾：${closure.summary}`);
+      }
+    } catch {
+      // 状态拿不到就不带，评审本身不该因为状态构造失败而挂掉
+    }
+    return lines;
+  }
+  function buildPresendReviewer() {
+    const memory = createMemoryAbstractProvider({
+      cachePath: PRESEND_REVIEW_CACHE_FILE,
+      readSource: presendReviewMemorySource,
+      getConfig: () => cfg.socialV2?.review,
+      completeText: (opts) => completeText({ ...opts, root: ROOT }),
+      log,
+    });
+    return createPresendReviewer({
+      getConfig: () => cfg.socialV2?.review,
+      completeText: (opts) => completeText({ ...opts, root: ROOT }),
+      memory,
+      styleFor: (key) => styleNotesBlock(key),
+      log,
+    });
+  }
+  function getPresendReviewer() {
+    if (!presendReviewer) presendReviewer = buildPresendReviewer();
+    return presendReviewer;
+  }
+  /**
+   * 发前评审；返回 null 表示放行，返回对象表示「这次不发」（对象里有 error/score/reason）。
+   */
+  // ── 退回兜底（2026-11-01 用户拍板：退回后 90s 内没重发成功 → 自动补发这一版）──
+  // 为什么需要：评审退回后如果模型直接结束回合（或 DSH 回合被重启/中断），QQ 上就永远没回复。
+  // 兜底 = 宁可晚 90 秒发一版不够好的，也别让对话「哑掉」。兜底是真实发送，闸门全部重过。
+  // 注意：被退回请求里的引用/@ 不会带到兜底（90 秒后引用目标可能失效），只补发纯文本。
+  let presendFallback = null;
+  function getPresendFallback() {
+    if (presendFallback) return presendFallback;
+    presendFallback = createRejectFallback({
+      send: (key, messages) => flushPresendFallback(key, messages),
+      log,
+    });
+    return presendFallback;
+  }
+  function cancelPresendFallback(key) {
+    try { presendFallback?.cancel(key); } catch { /* 兜底是保险丝，取消失败不影响主路径 */ }
+  }
+  /** 兜底补发：真实发送，静默/鱼群/token 闸门重新过一遍，任何一边拒绝就不发（保护优先）。 */
+  async function flushPresendFallback(key, messages) {
+    const reviewCfg = presendReviewCfg();
+    if (!reviewCfg) return; // 评审开关已关：遵守开关，不发兜底
+    const list = (Array.isArray(messages) ? messages : []).map((m) => String(m ?? '').trim()).filter(Boolean);
+    if (!list.length) return;
+    if (shouldBlockSilentReply(key)) { log(`[预发送评审] ${key} 静默中，跳过兜底补发`); return; }
+    const st = getSocialV2State(key);
+    const fishBlock = fishGuardSendBlock(key, st);
+    if (fishBlock) { log(`[预发送评审] ${key} 鱼群保护拦截，跳过兜底补发: ${fishBlock.error}`); return; }
+    const tokenBlock = tokenGuardSendBlock(key, st, list.length);
+    if (tokenBlock) { log(`[预发送评审] ${key} token 闸门拦截，跳过兜底补发: ${tokenBlock.error}`); return; }
+    const now = Date.now();
+    for (let i = 0; i < list.length; i += 1) st.sendTimes.push(now);
+    if (st.sendTimes.length > 500) st.sendTimes = st.sendTimes.slice(-500);
+    try {
+      const sendCfg = cfg.socialV2?.send ?? {};
+      const delays = computeGapsV2(list, 'auto', undefined, undefined, sendCfg);
+      const sent = await sendMessagesV2(key, list, delays);
+      recordSentMessagesV2(key, sent);
+      st.lastAiReplyAt = now;
+      st.lastActionAt = now;
+      st.wakeConfig.noActionCount = 0;
+      saveSocialV2State();
+      log(`[预发送评审] ${key} 退回后 ${Math.round((Number(reviewCfg.rejectFallbackMs) || 0) / 1000)}s 未重发，兜底补发 ${sent.length}/${list.length} 条`);
+      appendActivity(`${key} [预发送评审] 兜底补发：成功 ${sent.length}/${list.length} 条`);
+      if (sent.length > 0) scheduleReplyCheckV2(key);
+    } catch (error) {
+      if (error?.sent?.length) recordSentMessagesV2(key, error.sent);
+      const sentCount = Array.isArray(error?.sent) ? error.sent.length : 0;
+      const failedCount = Math.max(0, list.length - sentCount);
+      for (let i = 0; i < failedCount; i += 1) {
+        const idx = st.sendTimes.indexOf(now);
+        if (idx >= 0) st.sendTimes.splice(idx, 1);
+      }
+      if (st.sendTimes.length > 500) st.sendTimes = st.sendTimes.slice(-500);
+      saveSocialV2State();
+      log('[预发送评审] 兜底补发失败:', error?.message ?? error);
+    }
+  }
+
+  async function maybePresendReview({ key, kind, messages, st }) {
+    if (!presendReviewCfg()) return null;
+    try {
+      const reviewer = getPresendReviewer();
+      const result = await reviewer.review({
+        key,
+        kind,
+        messages,
+        groupName: groupNameForSceneV2(key),
+        personaName: String(ACTIVE_CHARACTER?.name ?? '').trim() || '她',
+        statusLines: presendReviewStatusLines(key, st),
+        recent: Array.isArray(st?.recentMessages) ? st.recentMessages.slice(-8) : [],
+      });
+      if (result && result.allow === false) {
+        // 只给「真的评分不过」挂兜底；failOpen=false 时的服务异常不放兜底（那种情况用户要的是宁可不发）。
+        const cfgReview = normalizePresendReviewConfig(cfg.socialV2?.review ?? {});
+        if (Number(result.score) > 0 && cfgReview.rejectFallbackMs > 0) {
+          const scheduled = getPresendFallback().schedule(key, messages, { delay: cfgReview.rejectFallbackMs });
+          if (scheduled.scheduled) {
+            log(`[预发送评审] ${key} 已挂兜底：${Math.round(cfgReview.rejectFallbackMs / 1000)}s 内未重发则补发这一版${scheduled.updated ? '（更新为最新退回稿）' : ''}`);
+          }
+        }
+        return result;
+      }
+      // 通过（或直接放行）：这条马上会发，取消之前挂着的兜底。
+      cancelPresendFallback(key);
+      return null;
+    } catch (error) {
+      log('[预发送评审] 异常放行:', error?.stack ?? error?.message ?? error);
+      return null;
+    }
+  }
+  /** 启动预热：提前压缩抽象记忆卡（缓存命中时是空操作），别让第一条发送等 20 秒。 */
+  function presendReviewWarmup() {
+    if (!presendReviewCfg()) return;
+    void getPresendReviewer().warmup().catch((error) => {
+      log('[预发送评审] 预热失败:', error?.message ?? error);
+    });
+  }
+
   startDshWatch();
   startSnowlumaWatch();
   startConsoleServer();
+  presendReviewWarmup();
 
   await pumpMux();
 }

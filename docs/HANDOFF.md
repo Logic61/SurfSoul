@@ -5,6 +5,70 @@
 
 ---
 
+## 快照（2026-11-01 20:50–21:4x，QQ 发送前评审：评审搬进桥接，只给 surfcore 用 + 情景/抽象记忆卡）
+
+### 用户原话
+
+> 「试着装上dsh-answer-reviewer给surfcore」
+> 「怎么看一次发了几条意思差不多的，你别通过没通过都往qq发了」
+> 「感觉reviewer由于欠缺上下文、情景等，效果有些差。一方面你改为只有surfcore才使用reviewer，
+> 一方面给reviewer send一下情景、高度抽象的记忆卡，做一个情景认知和token的权衡」
+
+### 背景（先分析再动手）
+
+- 先按用户要求把 `dsh-answer-reviewer` 装进 DSH desktop profile（vendor 了带 session-format-v4 修复的
+  fork 分支，npm 0.7.6 在 0.2.x 上 steer 会触发 `format v4 message requires a producer-owned source kind`
+  打断回合）。装完实测**能挂、能审、能 steer**。
+- 但发现顺序反了：QQ 的回复是回合内用发送工具发出去的，`agent/turn-stopping` 评审在回合结束 ——
+  20:55:37 发原答案 → 20:55:42 审 32 分 steer → 20:56:03 又发更正 2 条。已发出的收不回，
+  所以「评审不过」在 QQ 上的效果就是**补发**。用户明确要求别这样。
+- 用户随后拍板：**A 方案 = 评审搬进 surfcore 发送链路（发送前审），只给 surfcore 用；
+  评审上下文加情景 + 高度抽象记忆卡，token 预算走中档 ~1200 字**。
+
+### 做到哪（已改代码）
+
+| 改动 | 内容 |
+| --- | --- |
+| 新模块 `src/presend-review.js` | 纯函数 + 编排：配置归一、情景块（场合/状态/最近对话）、评审 prompt（预算截断）、评分 JSON 严格解析、退回文案、按 key 节流（短消息/刚通过/评审上限/退回上限）、**抽象记忆卡压缩 + 落盘缓存**（hash/TTL，失败回退旧摘要且 10 分钟不重试）、**退回兜底 `createRejectFallback()`**（到点补发/取消/只更新稿子不延长）、`createPresendReviewer()` |
+| 桥接接线 `src/bridge.js` | `getPresendReviewer()` / `maybePresendReview()` / `presendReviewWarmup()`；在 `/api/socialV2/send-message` 与 `/api/socialV2/send-burst` 的鱼群闸之后、token 闸之前先审：不过 → 422 + 工具错误，**不发送**，同时挂 90s 退回兜底（成功重发/语音/图片回复会取消）；启动预热抽象记忆卡 |
+| MCP 工具 | `qq_send_message` / `qq_send_burst` 描述补一句「发送前会过独立评审；被退回按理由改写后再调，不要解释评审」 |
+| 配置 | `config.json` + `config.example.json` 新增 `socialV2.review`（enabled/threshold/model/token 预算/节流/缓存 TTL/parseRetries/rejectFallbackMs 等）；用户 config = `enabled:true, threshold:75, rejectFallbackMs:90000`，中档预算 |
+| DSH 侧插件 | 全局 reviewer 插件**已停用**（`~/.dsh/answer-reviewer.json` 设 `enabled:false`；vendor 目录还装着，等下次重启 DSH 后可整体卸载）——现在只有 surfcore 的发送前评审在用 |
+| 工具脚本 | `scripts/review-dryrun.mjs`：只拼 prompt / 调评审模型，**不发 QQ**，用于调参与排障 |
+| 测试 | 新 `scripts/test-presend-review.mjs`（18 组）；已挂进 `test:audit` |
+
+### 已验证
+
+- `node --check` 全部改动文件；`test-presend-review.mjs` **18/18** 通过（配置/prompt 预算/解析/节流/缓存/解析重试/退回兜底/reviewer 编排全用 fake，不连真模型）；`test:audit` **83/90**（7 个失败全是历史漂移：self-identity / identity-guard / audit-regressions / media-search / voice-system / preset-local-tools / version，与上一轮 11 个失败是子集）；`test:regressions` **16/16**。
+- dry-run 真机（不发送）：`node scripts/review-dryrun.mjs --key group:1021716885 --text "..." --llm` → 敏感雷区句 22~25/80 退回、理由指向记忆卡里的「政治敏感词一律绕开」；人设口吻短句 80~84 通过；约 1k input token / 1.6~2.8s。
+- **桥接已重启生效**（通过插件 `/dsh-surfcore/api/bridge {action:'restart'}`，最终 PID **24264**；启动日志 `DSH 已就绪（模式: reserved2）`）。`state/review-context/memory-abstract.json` 已缓存（515 字 / 源 5984 字；记忆卡更新后 hash 变化会自动重压）。
+- **live 配置核对**（`review-preview` 现在会回 `reviewConfig`）：`{"threshold":75,"rejectFallbackMs":90000,"parseRetries":1,"enabled":true}`；实测「这图我先偷了，下次用」→ **84/75 通过**（阈值 75 已生效）。
+- **桥接侧 E2E**（新增 `POST /api/socialV2/review-preview`，控制台令牌、只评审不发送）：
+  `{"key":"group:1021716885","messages":[...]}` → 真实场合/记忆卡/对话拼进 prompt（scene 182~202 + memory 515~521 + style 140 ≈ 950~970 字），
+  评分 25/58（点雷区/答非所问）退回、74~84（人设口吻）按阈值判定；上下文与 `/api/recent` 一致，说明接线正确。
+- **真实 QQ 链路已经走过 send 前评审**（重启后的私聊流量，非测试消息）：
+  `21:33:26 [预发送评审] private:3237216875 通过 85/80 → 21:33:32 [reserved2] 工具统一发送 成功 2/2 条`；
+  `21:36:31 通过 85/80（场景225+记忆515+习惯140字）→ 21:36:39 发送 2/2 条`。
+  即：真实发送会先审、审过才发；群聊重启后还没等到真实流量（在鱼群保护/冷却里）。
+
+### 未验证 / 下一步
+
+1. **群聊真实流量还没跑过**（重启后只验证了私聊；群聊在冷却）：用户下次群里被接话时观察
+   `state/bridge.log` 的 `[预发送评审]` 行与 `qq-activity.log` 的发送记录；预期「退回过 → 模型改写后再发」，
+   `state/social-v2.json` 的 sendTimes 只在真正发出时累加。
+2. **退回兜底只做了单元测试**（到点补发/cancel/更新不延长，18/18 里的 `createRejectFallback` 用例），
+   没在真实 QQ 上触发过（需要有消息被退回且模型不重发）。触发时看 `bridge.log` 的
+   `[预发送评审] … 已挂兜底` 与 `… 兜底补发 N/N 条`；兜底会重新过静默/鱼群/token 闸门，被拦则放弃。
+   注意兜底计时器是内存态：**桥接重启会丢**（重启前的退回稿不会在重启后补发），可接受。
+3. 阈值已按用户要求调到 **75**（config.json；config.example.json 默认仍 80）；再嫌严/松就改
+   `socialV2.review.threshold`，改完重启桥接；先用 `review-preview` / `review-dryrun` 试。
+4. DSH 里那套全局 reviewer 插件已 `enabled:false`（不评审、不再花 token），但仍占着 `127.0.0.1:3987`；
+   下次重启 DSH 后可 `pnpm remove dsh-answer-reviewer` 或从 profile 去掉 bundle 彻底卸载（卸载要重启，别热删）。
+5. 回滚：`socialV2.review.enabled=false`（桥接重启）；单独关兜底 `rejectFallbackMs: 0`；代码删除
+   `src/presend-review.js` 与两处调用即可，`test-presend-review` 从 test-audit 去掉。
+
+---
+
 ## 快照（2026-10-31 21:20–22:05，场合作用域路线 A：记忆共同 + 分清场合 + 受控跨场合投递）
 
 ### 用户原话
