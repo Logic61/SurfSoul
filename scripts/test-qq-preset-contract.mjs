@@ -117,7 +117,7 @@ test('autonomy limits and the observation escape hatch stay described', () => {
     // [SILENT] 是桥接的退出标记，误用会静默吞掉回复。
     '不要用 [SILENT]',
     // 记忆面
-    '【记忆卫生】', 'qq_memory_append', 'qq_memory_query', 'qq_memory_remove', 'qq_memory_clear',
+    '【记忆卫生】', 'qq_memory_append', 'qq_memory_query', 'qq_memory_remove', 'qq_memory_clear', 'qq_recall',
     // 黑话面
     'qq_slang_query', 'qq_slang_submit', '不用等它出现多次',
     // 软策略：频率交给模型审时度势；允许纯表情回复、鼓励盗图（2026-10-31 用户要求）

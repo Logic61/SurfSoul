@@ -9,7 +9,8 @@
  * 为什么是「一张卡 + 平台模块」而不是每个平台一个文件：
  *   用户明确要求「不同平台可以区分模块，但共存入一个记忆文档」。所以唯一真相是
  *   `memory-card.json`，渲染出 `memory-card.md`（给人看）和
- *   `memory-card-prompt-qq.md` / `memory-card-prompt-bili.md`（给提示词注入，带字数上限）。
+ *   `memory-card-prompt-qq.md` / `memory-card-prompt-bili.md` / `memory-card-prompt-pet.md`
+ *   （给提示词注入，带字数上限；桌宠那份是 2026-11-01 新增的「桌宠优先」版本）。
  *
  * 人类式记忆规则（可单测，不依赖模型）：
  *   · 永久锚点：第一次和主人说话、明确标记「第一次」的重要事件 → pinned，永远清晰。
@@ -31,7 +32,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 // `?rev=` 和插件 lib 的引用保持同一取值：插件热重载时，只有 specifier 变了才会
 // 重新求值；本模块 import 的叙事层也必须挂同一个 rev，否则「引擎新、叙事旧」。
-import { coveredRecordIds, formatEpisodeLine, formatEpisodeTitleLine, loadNarrative, splitEpisodesForPrompt, resolveNarrativePath, saveNarrative, memoryNarrativeSummary } from './memcard-narrative.js?rev=memfix-f0b02c2270';
+import { coveredRecordIds, formatEpisodeLine, formatEpisodeTitleLine, loadNarrative, splitEpisodesForPrompt, resolveNarrativePath, saveNarrative, memoryNarrativeSummary } from './memcard-narrative.js?rev=memfix-d913f4f63b';
 // 场合作用域的标记字面量只维护一份（src/scene-scope.js）。渲染侧把标记写进行首，
 // 桥接注入时按当前场合整行过滤；这里用常量而不是再抄一遍字符串，避免两边漂移。
 import { AUDIENCE_GROUP_ONLY_TAG, AUDIENCE_PRIVATE_ONLY_TAG } from './scene-scope.js';
@@ -65,8 +66,13 @@ export const DEFAULT_MEMORY_CARD_CONFIG = Object.freeze({
   maxChars: 0,
   /** 不限制时的告警字数；达到 80/90/100% 告警。0 = 不告警。 */
   warnChars: 60000,
-  /** 注入提示词的预算：角色卡之外再加这么多字。 */
-  injectMaxChars: Object.freeze({ qq: 2200, bili: 2000 }),
+  /**
+   * 注入提示词的预算：角色卡之外再加这么多字。
+   * 2026-11-01：新增 `pet`——桌宠不再拿 QQ 注入块的前 2600 字（那个窗口被叙事层占满，
+   * 桌宠小节 / 今天聊过的全在截断外）。现在渲染一份「桌宠优先」的独立注入块，
+   * 预算单独可配；默认 4200 是为了先把「桌宠 / 今天 / 和主人 / 最近」装下，再留叙事尾巴。
+   */
+  injectMaxChars: Object.freeze({ qq: 2200, bili: 2000, pet: 4200 }),
   /** 最近 N 天的事至少保持「清楚」。 */
   recentDays: 7,
   /** 新记忆前 N 天不降档。 */
@@ -166,6 +172,8 @@ export function normalizeMemoryCardConfig(input = {}) {
     injectMaxChars: {
       qq: clampInt(inject.qq, DEFAULT_MEMORY_CARD_CONFIG.injectMaxChars.qq, 400, 8000),
       bili: clampInt(inject.bili, DEFAULT_MEMORY_CARD_CONFIG.injectMaxChars.bili, 400, 8000),
+      // 桌宠专用注入块（2026-11-01）：单独预算，别和 QQ 混。
+      pet: clampInt(inject.pet, DEFAULT_MEMORY_CARD_CONFIG.injectMaxChars.pet, 400, 8000),
     },
     recentDays: clampInt(raw.recentDays, DEFAULT_MEMORY_CARD_CONFIG.recentDays, 1, 60),
     fuzzyAfterDays: clampInt(raw.fuzzyAfterDays, DEFAULT_MEMORY_CARD_CONFIG.fuzzyAfterDays, 0, 60),
@@ -191,6 +199,9 @@ export function resolveMemoryCardPaths(memoryDir) {
     markdown: path.join(dir, 'memory-card.md'),
     promptQq: path.join(dir, 'memory-card-prompt-qq.md'),
     promptBili: path.join(dir, 'memory-card-prompt-bili.md'),
+    // 桌宠专用注入块（2026-11-01）：桌宠只该看到「和它相关 + 最近」的记忆，
+    // 而不是 QQ 注入块的前 N 字（那边前 40% 被叙事层占满，桌宠小节/今天全在截断外）。
+    promptPet: path.join(dir, 'memory-card-prompt-pet.md'),
     // 叙事层：桥接把记录压成「我们一起经历过的」，插件渲染时读它。
     // 单独一个文件（不是塞进 memory-card.json），谁写谁读不打架，丢了重新压就行。
     narrative: resolveNarrativePath(dir),
@@ -405,6 +416,20 @@ function normalizeAudience(value) {
   return value === 'private-only' || value === 'group-only' ? value : 'any';
 }
 
+/**
+ * 证据链（2026-11-01 借鉴 SeekMemory 的 lineage）：记录是从哪条原话/哪个 inbox 事件来的。
+ * 旧记录没有这个字段 = 无证据（渲染/归档都兼容），不回填、不猜。
+ */
+function normalizeEvidence(value) {
+  const raw = asObject(value);
+  const out = {};
+  for (const key of ['messageId', 'messageSeq', 'at', 'conversationKey', 'senderId', 'platform']) {
+    const v = String(raw[key] ?? '').trim();
+    if (v) out[key] = v.slice(0, 80);
+  }
+  return Object.keys(out).length ? out : null;
+}
+
 function normalizeRecord(item) {
   const raw = asObject(item);
   const text = String(raw.text ?? '').trim();
@@ -442,6 +467,7 @@ function normalizeRecord(item) {
     botReply: safeSlice(String(raw.botReply ?? ''), 600),
     isSelf: raw.isSelf === true,
     conversationKey: String(raw.conversationKey ?? ''),
+    evidence: normalizeEvidence(raw.evidence),
     // 场合可见性（2026-10-31 路线 A）：any=私聊/群里都可见（默认，记忆共同）；
     // private-only=只在私聊提示词里出现；group-only=只在群聊提示词里出现。
     // 渲染时写成 [仅私聊可见]/[仅群可见] 标记，桥接按当前场合过滤整行。
@@ -1287,6 +1313,7 @@ function makeRecord(input, config, now) {
     botReply: safeSlice(String(input.botReply ?? ''), 600),
     isSelf: input.isSelf === true,
     conversationKey: String(input.conversationKey ?? ''),
+    evidence: normalizeEvidence(input.evidence),
     audience: normalizeAudience(input.audience),
     initialTier: '',
     initialProbability: 0,
@@ -1411,6 +1438,19 @@ export function ingestInboxLines(card, lines, config = {}, now = Date.now(), opt
     const isPrivate = item.private === true || item.kind === 'private';
     const direct = item.direct === true || item.quoteSelf === true || isOwner;
     const conversationKey = String(item.conversationKey ?? '');
+    // 证据链（2026-11-01）：sourceId 指向 inbox 事件的稳定 id（有 messageId 优先，否则按时间+正文哈希）。
+    const inboxMessageId = String(item.messageId ?? '').trim();
+    const inboxMessageSeq = String(item.messageSeq ?? '').trim();
+    const inboxRef = inboxMessageId || inboxMessageSeq || hash(`${iso(at)}|${text}`, 16);
+    const petSourceId = `pet:${inboxRef}`;
+    const qqSourceId = `qq:${conversationKey}:${inboxRef}`;
+    const inboxEvidence = {
+      conversationKey,
+      messageId: inboxMessageId,
+      at: iso(at),
+      senderId: String(item.senderId ?? ''),
+      platform: String(item.platform ?? 'qq'),
+    };
 
     // ── 桌宠对话（2026-10-25）─────────────────────────────────────────────
     // 和 QQ / B站 共用同一张卡、同一条遗忘曲线；来源/平台/scope 独立：
@@ -1435,7 +1475,8 @@ export function ingestInboxLines(card, lines, config = {}, now = Date.now(), opt
         const speaker = short(item.sender ?? '角色', 24) || '角色';
         const result = addMemoryRecord(card, {
           source: 'pet-self',
-          sourceId: '',
+          sourceId: petSourceId,
+          evidence: inboxEvidence,
           platform: 'pet',
           scope: 'pet',
           text,
@@ -1460,7 +1501,8 @@ export function ingestInboxLines(card, lines, config = {}, now = Date.now(), opt
       }
       const result = addMemoryRecord(card, {
         source: 'pet-owner',
-        sourceId: '',
+        sourceId: petSourceId,
+        evidence: inboxEvidence,
         platform: 'pet',
         scope: 'pet',
         text,
@@ -1505,7 +1547,8 @@ export function ingestInboxLines(card, lines, config = {}, now = Date.now(), opt
       const speaker = short(item.sender ?? '角色', 24) || '角色';
       const result = addMemoryRecord(card, {
         source: 'qq-self',
-        sourceId: '',
+        sourceId: qqSourceId,
+        evidence: inboxEvidence,
         text,
         title: `${speaker}：${short(text, 24)}`,
         isSelf: true,
@@ -1549,7 +1592,8 @@ export function ingestInboxLines(card, lines, config = {}, now = Date.now(), opt
     const speaker = isOwner ? '主人' : short(item.sender ?? item.senderName ?? '群友', 24) || '群友';
     const result = addMemoryRecord(card, {
       source,
-      sourceId: '',
+      sourceId: qqSourceId,
+      evidence: inboxEvidence,
       text,
       title: isFirst ? '最早和主人说话' : (isOwner ? `和主人：${short(text, 24)}` : `${speaker}：${short(text, 24)}`),
       detail: '',
@@ -1958,12 +2002,33 @@ function sectionize(card, { platform = 'all', now = Date.now(), config = {} } = 
 }
 
 /**
+ * 桌宠注入块的小节顺序（2026-11-01）。
+ *
+ * 为什么单独排：QQ 版把「我们一起经历过的」放最前（叙事优先）；桌宠聊的是一问一答，
+ * 最该先看到「它自己这几次」「今天 QQ 发生了什么」。旧实现桌宠读 QQ 块前缀 2600 字，
+ * 叙事层一占满，桌宠小节（偏移 3189）和今天聊过的（3417）就永远进不来。
+ * 桌宠文件里把叙事放到最后当尾巴；预算不够时从最低 priority 开始裁（先裁叙事）。
+ */
+const PET_SECTION_ORDER = ['pet', 'today', 'owner', 'recent', 'anchors', 'episodes', 'earlier'];
+const PET_SECTION_PRIORITY = { pet: 98, today: 96, owner: 60, recent: 55, anchors: 80, episodes: 20, earlier: 18 };
+function reorderSectionsForPet(sections) {
+  const byKey = new Map(sections.map((section) => [section.key, section]));
+  return PET_SECTION_ORDER
+    .map((key) => byKey.get(key))
+    .filter(Boolean)
+    .map((section) => ({ ...section, priority: PET_SECTION_PRIORITY[section.key] ?? section.priority }));
+}
+
+/**
  * 渲染记忆卡。
  *   · full=true → 完整 markdown（容量按这个算）。
- *   · platform='qq'|'bili' + maxChars → 给提示词注入的裁剪版。
+ *   · platform='qq'|'bili'|'pet' + maxChars → 给提示词注入的裁剪版。
  */
 export function renderMemoryCard(card, options = {}) {
-  const platform = options.platform === 'bili' ? 'bili' : (options.platform === 'qq' ? 'qq' : 'all');
+  const platform = options.platform === 'bili' ? 'bili'
+    : options.platform === 'qq' ? 'qq'
+      : options.platform === 'pet' ? 'pet'
+        : 'all';
   const full = options.full === true;
   const now = Number.isFinite(Number(options.now)) ? Number(options.now) : Date.now();
   const cfg = normalizeMemoryCardConfig(options.config ?? {});
@@ -1973,7 +2038,10 @@ export function renderMemoryCard(card, options = {}) {
   const narrative = options.narrative && typeof options.narrative === 'object' ? options.narrative : { episodes: [] };
   // 两档：最近的写全文，更早的只留标题（否则回忆一多，早期的被挤出预算，
   // 它们原来覆盖的记录又会变回逐条聊天记录）。两档都算「被覆盖」。
-  const episodeSplit = platform === 'bili' ? { full: [], compact: [], hidden: 0 } : splitEpisodesForPrompt(narrative);
+  // 桌宠注入块（2026-11-01）：叙事只当尾巴，条数比 QQ 少；预算留给「桌宠/今天/和主人/最近」。
+  const episodeSplit = platform === 'bili'
+    ? { full: [], compact: [], hidden: 0 }
+    : splitEpisodesForPrompt(narrative, platform === 'pet' ? { max: 8, maxTitles: 20 } : undefined);
   // P1-2（2026-10-30 审计）：被回忆覆盖的记录要按**全部**回忆来抑制，包括 hidden 段
   // （第 57 条以后、只渲染标题的那批）。旧实现只取 full+compact → hidden 的 106 条 covers
   // 不抑制，原记录逐条冒回来，「从聊天记录变成经历」1–2 天内就失效。
@@ -1987,7 +2055,11 @@ export function renderMemoryCard(card, options = {}) {
       // 2026-10-29：主人反馈「一天之内说的都会忘记」。QQ 侧把「最近」和「和主人」两栏
       // 放宽（8→14 / 8→10），并加一栏「今天聊过的」——按时间倒序取最近 24 小时里
       // 有信息量的往来，专门保当天的事；字数预算仍由 injectMaxChars.qq 兜住。
-      : { firstMet: 1, anchors: 5, initial: 6, owner: 10, recent: 14, bili: 4, qq: 10, pet: 4, fuzzy: 4, today: 10 });
+      : platform === 'pet'
+        // 桌宠（2026-11-01）：只要「桌宠 / 今天 / 和主人 / 最近 / 永远不忘」；B站 和 QQ 大模块不进来，
+        // 叙事尾巴由 episodeSplit 控制。firstMet/initial 也不进（桌宠聊天不需要「最初的日子」）。
+        ? { firstMet: 0, anchors: 5, initial: 0, owner: 10, recent: 14, bili: 0, qq: 0, pet: 4, fuzzy: 0, today: 10 }
+        : { firstMet: 1, anchors: 5, initial: 6, owner: 10, recent: 14, bili: 4, qq: 10, pet: 4, fuzzy: 4, today: 10 });
   // 2026-10-30（P1-3）：有叙事时不再把原始记录限额砍半。
   // 旧实现「叙事一出现 → today/owner/recent 各砍一半」+ 覆盖抑制 → 当天 138 条记录只剩 5 行，
   // 用户可感知「一天之内说的话她又忘了」。现在叙事自己限 40% 预算，原始事实保留完整名额。
@@ -2053,10 +2125,15 @@ export function renderMemoryCard(card, options = {}) {
     return full ? `${headerFull}\n\n（还没有记忆：B站 冲浪、QQ 聊天和桌宠对话会慢慢写进来。）` : '';
   }
   const active = calls.map((section) => ({ ...section, lines: [...section.lines] }));
+  // 桌宠注入块（2026-11-01）：小节顺序重排 + 重排优先级。
+  // 旧实现让桌宠读 QQ 块前缀 2600 字，叙事层把「桌宠小节 / 今天聊过的」全挤到截断外；
+  // 现在桌宠有独立文件：桌宠/今天在前，和主人/最近跟上，叙事只当尾巴（预算不够先裁它）。
+  const finalSections = platform === 'pet' ? reorderSectionsForPet(active) : active;
   // P1-3（2026-10-30）：叙事最多占注入预算 40%，剩下 60% 留给可核对的原始事实。
   // 旧实现按单一 priority 排序，叙事(96) 天然压倒记录(30–45)，预算一紧先死的是「今天/主人」。
   if (maxChars > 0 && !full && episodeSplit.full.length) {
-    const narrativeCap = Math.floor(maxChars * 0.4);
+    // 叙事占比：QQ 40%；桌宠只留 30% 当尾巴，其余预算给原始事实（2026-11-01）。
+    const narrativeCap = Math.floor(maxChars * (platform === 'pet' ? 0.3 : 0.4));
     const trimLinesToChars = (lines, cap) => {
       const kept = [];
       let used = 0;
@@ -2068,14 +2145,14 @@ export function renderMemoryCard(card, options = {}) {
       }
       return kept;
     };
-    const episodesSection = active.find((section) => section.key === 'episodes');
-    const earlierSection = active.find((section) => section.key === 'earlier');
+    const episodesSection = finalSections.find((section) => section.key === 'episodes');
+    const earlierSection = finalSections.find((section) => section.key === 'earlier');
     if (episodesSection) episodesSection.lines = trimLinesToChars(episodesSection.lines, Math.floor(narrativeCap * 0.75));
     if (earlierSection) earlierSection.lines = trimLinesToChars(earlierSection.lines, Math.floor(narrativeCap * 0.25));
   }
   const assemble = () => {
     const parts = [header];
-    for (const section of active) {
+    for (const section of finalSections) {
       if (!section.lines.length) continue;
       parts.push(`${section.title}\n${section.lines.join('\n')}`);
     }
@@ -2086,7 +2163,7 @@ export function renderMemoryCard(card, options = {}) {
   if (maxChars > 0) {
     let guard = 0;
     while (out.length > maxChars && guard++ < 1000) {
-      const trimmable = active
+      const trimmable = finalSections
         .filter((section) => section.lines.length
           && !PROMPT_PROTECTED_SECTIONS.has(section.key)
           && section.priority < 100)
@@ -2100,9 +2177,9 @@ export function renderMemoryCard(card, options = {}) {
   return out;
 }
 
-/** 给桥接 / B站调度器读的现成注入块。 */
+/** 给桥接 / B站调度器 / 桌宠读的现成注入块。 */
 export function readPromptBlock(paths, platform) {
-  const file = platform === 'bili' ? paths.promptBili : paths.promptQq;
+  const file = platform === 'bili' ? paths.promptBili : platform === 'pet' ? paths.promptPet : paths.promptQq;
   try {
     const text = fs.readFileSync(file, 'utf8').trim();
     return text;
@@ -2192,6 +2269,7 @@ export function memoryCardStatus(card, config = {}, now = Date.now(), options = 
     promptChars: {
       qq: renderMemoryCard(card, { config: cfg, platform: 'qq', maxChars: cfg.injectMaxChars.qq, now, narrative }).length,
       bili: renderMemoryCard(card, { config: cfg, platform: 'bili', maxChars: cfg.injectMaxChars.bili, now, narrative }).length,
+      pet: renderMemoryCard(card, { config: cfg, platform: 'pet', maxChars: cfg.injectMaxChars.pet, now, narrative }).length,
     },
     updatedAt: card.updatedAt,
     lastMaintenanceAt: card.lastMaintenanceAt,
@@ -2214,14 +2292,18 @@ export function saveMemoryCardOutputs(paths, card, config = {}, now = Date.now()
   const full = renderMemoryCard(card, { config: cfg, full: true, now, narrative });
   const promptQq = renderMemoryCard(card, { config: cfg, platform: 'qq', maxChars: cfg.injectMaxChars.qq, now, narrative });
   const promptBili = renderMemoryCard(card, { config: cfg, platform: 'bili', maxChars: cfg.injectMaxChars.bili, now, narrative });
+  // 桌宠专用注入块（2026-11-01）：只给桌宠对话/主动搭话读，QQ 侧不碰。
+  const promptPet = renderMemoryCard(card, { config: cfg, platform: 'pet', maxChars: cfg.injectMaxChars.pet, now, narrative });
   writeTextAtomic(paths.json, `${JSON.stringify(card, null, 2)}\n`);
   writeTextAtomic(paths.markdown, `${full}\n`);
   writeTextAtomic(paths.promptQq, promptQq ? `${promptQq}\n` : '');
   writeTextAtomic(paths.promptBili, promptBili ? `${promptBili}\n` : '');
+  writeTextAtomic(paths.promptPet, promptPet ? `${promptPet}\n` : '');
   return {
     full,
     promptQq,
     promptBili,
+    promptPet,
     // 状态和写盘必须同一口径：status.chars 恰好是刚写下去的 memory-card.md 字符数。
     status: memoryCardStatus(card, cfg, now, { narrative }),
   };
@@ -2265,6 +2347,9 @@ export function maintainMemoryCard({
   const cursorBefore = card.meta?.inboxCursor?.offset ?? null;
   const qq = ingestInboxLines(card, inboxLines, cfg, now, { inboxCursor });
   if (qq.added) changed = true;
+  // L0 原文库：maintain 是唯一读 inbox 的写者，顺带把本批原文落到 events/（只追加、id 幂等）。
+  const events = archiveInboxToEvents(paths, inboxLines, now);
+  if (events.added) changed = true;
   // 水位推进本身要落盘，否则下一轮会重复读同一段（即使这批全是重复、0 条新增）。
   if (inboxCursor && cursorBefore !== (card.meta?.inboxCursor?.offset ?? null)) changed = true;
   // **先归档再衰减**：刚进来的旧记忆/冷门记忆也可能在同一次补跑里被忘掉。
@@ -2310,7 +2395,7 @@ export function maintainMemoryCard({
   // P2-19（2026-10-30）：没有变化时不重写 6 次渲染 + 5 个文件；只在输出缺失时强制写一次。
   const outputsMissing = (() => {
     try {
-      return !fs.existsSync(paths.json) || !fs.existsSync(paths.markdown) || !fs.existsSync(paths.promptQq);
+      return !fs.existsSync(paths.json) || !fs.existsSync(paths.markdown) || !fs.existsSync(paths.promptQq) || !fs.existsSync(paths.promptPet);
     } catch {
       return true;
     }
@@ -2323,6 +2408,7 @@ export function maintainMemoryCard({
       bili: bili.added,
       qq: Math.max(0, (qq.added || 0) - (qq.addedPet || 0)),
       pet: qq.addedPet || 0,
+      events: events.added,
       trimmed,
       status,
       full: fullPaths
@@ -2340,6 +2426,7 @@ export function maintainMemoryCard({
     bili: bili.added,
     qq: Math.max(0, (qq.added || 0) - (qq.addedPet || 0)),
     pet: qq.addedPet || 0,
+    events: events.added,
     trimmed,
     ...saved,
     full: fullSaved ? { added: fullAdded, status: fullSaved.status, markdown: fullSaved.markdown } : null,
@@ -2430,6 +2517,80 @@ export function readInboxSince(paths, cursor = null, { maxLines = 4000 } = {}) {
   };
 }
 
+/**
+ * L0 原文库（2026-11-01 借鉴 qq-dsh-bridge 的 append-only events/）：
+ * 把一批 inbox 行追加到 <memoryDir>/events/<YYYY-MM>.jsonl，id 幂等去重、索引可重建。
+ *
+ * 为什么单独一层：衰减卡只留「结论」，叙事层只留「压缩后的回忆」；想翻原话/给出处时
+ * 需要一层不可变的原文。写入者仍是插件（唯一写卡者），桥接只读——不新增第二个写者。
+ * 隐私：只收 inbox 里已经过「值得记」筛选并脱敏的事件，群聊/私聊一样只存到本角色目录。
+ */
+export function archiveInboxToEvents(paths, lines, now = Date.now()) {
+  const dir = path.join(paths.dir, 'events');
+  const indexDir = path.join(dir, 'index');
+  const idsPath = path.join(indexDir, 'ids.txt');
+  let added = 0;
+  let skipped = 0;
+  try {
+    fs.mkdirSync(indexDir, { recursive: true });
+    const seen = new Set();
+    try {
+      for (const line of fs.readFileSync(idsPath, 'utf8').split('\n')) {
+        const id = line.trim();
+        if (id) seen.add(id);
+      }
+    } catch {}
+    const fresh = [];
+    for (const line of Array.isArray(lines) ? lines : []) {
+      let item;
+      try { item = JSON.parse(String(line ?? '').trim()); } catch { continue; }
+      if (!item || typeof item !== 'object') continue;
+      const text = String(item.text ?? '').trim();
+      if (!text) continue;
+      const at = timeOf(item.at, now);
+      const platform = String(item.platform ?? '').toLowerCase() === 'pet' ? 'pet' : 'qq';
+      const key = platform === 'pet' ? 'pet' : String(item.conversationKey ?? '');
+      const messageId = String(item.messageId ?? '').trim();
+      const messageSeq = String(item.messageSeq ?? '').trim();
+      const id = `${platform}:${key}:${messageId || messageSeq || hash(`${iso(at)}|${text}`, 16)}`;
+      if (seen.has(id)) { skipped += 1; continue; }
+      seen.add(id);
+      fresh.push({
+        id,
+        v: 1,
+        at,
+        platform,
+        key,
+        kind: item.isSelf === true ? 'ai' : 'msg',
+        role: item.isSelf === true ? 'ai' : 'human',
+        sender: String(item.sender ?? ''),
+        senderId: String(item.senderId ?? ''),
+        isOwner: item.isOwner === true,
+        isSelf: item.isSelf === true,
+        messageId,
+        messageSeq,
+        text: text.slice(0, 4000),
+      });
+    }
+    if (!fresh.length) return { added: 0, skipped, dir };
+    const byShard = new Map();
+    for (const rec of fresh) {
+      const d = new Date(rec.at);
+      const shard = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+      if (!byShard.has(shard)) byShard.set(shard, []);
+      byShard.get(shard).push(rec);
+    }
+    for (const [shard, recs] of byShard) {
+      fs.appendFileSync(path.join(dir, `${shard}.jsonl`), `${recs.map((r) => JSON.stringify(r)).join('\n')}\n`, { encoding: 'utf8', mode: 0o600 });
+    }
+    fs.appendFileSync(idsPath, `${fresh.map((r) => r.id).join('\n')}\n`, { encoding: 'utf8', mode: 0o600 });
+    added = fresh.length;
+  } catch {
+    return { added: 0, skipped, dir, error: true };
+  }
+  return { added, skipped, dir };
+}
+
 /** 桥接进程调用：把一条 QQ 事件追加到 inbox（只追加，不做重活）。 */
 export function appendMemoryInboxEvent(paths, event = {}, { maxBytes = 1024 * 1024 } = {}) {
   try {
@@ -2461,6 +2622,8 @@ export function appendMemoryInboxEvent(paths, event = {}, { maxBytes = 1024 * 10
       private: event.private === true || event.kind === 'private',
       direct: event.direct === true,
       quoteSelf: event.quoteSelf === true,
+      messageId: String(event.messageId ?? ''),
+      messageSeq: String(event.messageSeq ?? ''),
       text,
     });
     fs.appendFileSync(paths.inbox, `${line}\n`, { encoding: 'utf8', mode: 0o600 });

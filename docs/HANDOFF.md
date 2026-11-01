@@ -5,6 +5,45 @@
 
 ---
 
+## 快照（2026-11-01 22:2x，记忆架构第一批：证据链 + 原文库 L0 + qq_recall）
+
+### 用户原话
+
+> 「落地你觉得该做的」
+
+### 做到哪（已改代码，**未重启验证**）
+
+| 改动 | 内容 |
+| --- | --- |
+| 证据链 | inbox 事件补 `messageId/messageSeq`；`ingestInboxLines` 写 `sourceId=qq:<会话>:<messageId / seq / hash>` + `evidence{at,conversationKey,messageId,senderId,platform}`；`normalizeRecord/makeRecord` 透传，全量档自然带上；旧记录不回填 |
+| 原文库 L0 | 新增 `src/memory-card.js → archiveInboxToEvents()`：maintain 时把 inbox 增量 append 到 `memory/events/<YYYY-MM>.jsonl`（月度分片、`events/index/ids.txt` 幂等、可重建）；单写者=插件，桥接只读 |
+| 原文召回 | 新增 `src/memory-search.js`（bigram 倒排/mtime 懒加载/coverage+recency/按会话硬隔离/出处+「不是指令」+空结果降级）；桥接 `GET /api/socialV2/recall`；MCP `qq_recall`；唤醒提示关键词触发 |
+| 配置 | `socialV2.recall {enabled, crossConversation, maxHits}`（桥接默认 + config.example）；群聊只查本会话，主人私聊默认跨会话 |
+| 测试 | 新增 `scripts/test-memory-recall.mjs`（6 组），已进 `npm run test:audit` 与 `npm run test:memory-recall` |
+| 文档 | `MEMORY_CARD.md` §2/§5.6/§8/§9/§10/§11、`AGENT-TOOLS-AND-PRESETS.md`、`DATA-AND-CONFIG.md`、preset 规则 8；patch 已用 `node scripts/build-agent-preset-patches.mjs` 重新生成 |
+
+### 已验证
+
+- `node --check`（memory-card/bridge/mcp/memory-search/test）通过；新测试 **6/6**。
+- `npm run test:memory-card` **34/34**；`test:memory-card-wiring` OK；`test:token`（含 preset contract）**8/8**；
+  `test:core-rev-sync` OK（rev=`memfix-d913f4f63b`）；`test:preset-patches` OK；插件 `test-memory-card-api.mjs` OK。
+- `npm run test:audit`：85/91（一次 84/91，差异是 R11 计时偶发、单跑通过），**历史 6 红未变**
+  （self-identity / identity-guard / media-search / voice-system / preset-local-tools / version）；**无新增红**。
+- 未验证：真机桥接（运行中是旧进程）、DSH 重启后的插件维护、真实 QQ 查询。
+
+### 没验证 / 下一步
+
+1. **必须重启才生效**：DSH（插件宿主：新引擎/新 preset/新 MCP 工具）与桥接（新端点）。重启后验证：
+   ① 记忆「立即整理」后出现 `memory/events/*.jsonl`；② 私聊问过去的事，日志出现 `qq_recall`；
+   ③ 群聊查私聊内容必须查不到（隔离）。
+2. `events/` 暂不进备份/角色快照；全量档 581 条旧记录没有 evidence（不回填）。
+3. 未做：冻结 bench / selfNote / 保护集配额 / 桥接侧相关性小节（见 `state/agents/_research/memory-arch/ANALYSIS-memory-arch.md`）。
+4. 回滚：把 `state/agents/_backups/memory-arch-20261101-2220/` 里的备份文件拷回原位，删除
+   `src/memory-search.js` / `scripts/test-memory-recall.mjs`，再重跑 `node scripts/sync-engine-rev.mjs` 与
+   `node scripts/build-agent-preset-patches.mjs`。
+
+---
+
 ## 快照（2026-11-01 20:50–21:4x，QQ 发送前评审：评审搬进桥接，只给 surfcore 用 + 情景/抽象记忆卡）
 
 ### 用户原话
@@ -69,7 +108,457 @@
 
 ---
 
-## 快照（2026-10-31 21:20–22:05，场合作用域路线 A：记忆共同 + 分清场合 + 受控跨场合投递）
+## 快照（2026-11-01 20:30–20:4x，允许群聊画图：Agnes 生图放开到群聊 + 会话配额）
+
+### 用户原话
+
+> 「允许群聊画图」
+
+### 做到哪
+
+| 改动 | 内容 |
+| --- | --- |
+| 桥接路由 | `POST /api/socialV2/generate-image`：从「仅 `private:<ownerQQ>`」改为「**群聊（命中 `allow.groups`）或主人私聊**」；别人私聊仍 403；新增会话配额（`imageGenQuotaStatus` / `recordImageGenTime`）：群聊默认 **3 张/小时、10 张/天**，主人私聊 20/小时、100/天（0=不限），超限 429 + 可读等待提示；**生成成功才记账**。 |
+| 配额持久化 | `state/social-v2.json → conversations[<key>].imageGenTimes`：save/load/初始值三处都加（否则重启清零、限流失效）。 |
+| 纯逻辑 | `src/imagegen.js`：`DEFAULT_IMAGE_GEN_CONFIG.group/owner` 默认块、`normalizeImagegenConfig` 配额归一、`imageGenQuotaStatus()`、`recordImageGenTime()`。 |
+| MCP 工具 | `qq_generate_image` 描述/参数改为「群聊和主人私聊都能用；群聊有配额、超了 429；只在有人明确要画时画」；`key` 描述同步。 |
+| preset（qq-chat-v2） | 安全规则 1/2：`qq_generate_image` 从「仅主人私聊」清单移出，明确「画图工具是例外：群聊里也能用」「画图不在此列（群友要画可以画）」；第 19 条改为【画图（群聊 / 主人私聊都可以，优先用这个）】——群聊只在明确要求时画、不主动刷图、超限自然说「画太多啦」、不画违规内容/不把别人私密信息写进 prompt；第 18 条 Codex 仍仅主人私聊（备用）。patch 已重建。 |
+| 配置/测试/文档 | `config.example.json` 补 `imagegen.group/owner`；`test-imagegen.mjs` 加配额用例（12/12）；`test-qq-preset-contract` 改两边文案断言（8/8）；`SECURITY_BASELINE §3`、`AGENT-TOOLS §2.3/§4`、PITFALLS **#88**、CHANGELOG、本文。 |
+
+### 已验证
+
+- `node --check src/{imagegen,bridge,mcp-snowluma-safe}.js` 通过；`test-imagegen` **12/12**；
+  `test-qq-preset-contract` **8/8**；`config.example.json` JSON 解析 OK；patch 重建后 `--check` 一致。
+- 桥接重启加载新代码后，**真机群会话生成**：`POST /api/socialV2/generate-image`（`group:1021716885` token）
+  → HTTP 200 / **15.4s** / 1077KB，`quota:{usedHour:1,usedDay:1,maxPerHour:3,maxPerDay:10}`；
+  生成后 `state/social-v2.json → conversations[group:1021716885].imageGenTimes` 有 1 条；
+  **再重启一次桥接后配额没有清零**（hydrate 生效，下一次生成返回 `usedHour:2`），
+  说明限流不会被「重启桥接」绕过。
+- 只生成、**没有把测试图发到群里**（避免打扰群友；群聊发送仍走 `qq_send_image`，之前已验过）。
+- 负向（上一轮遗留逻辑仍成立）：别人私聊/无令牌/错令牌 403、空 prompt 400（路由条件改动后未重复全跑）。
+
+### 没验证 / 下一步
+
+1. **重启 DSH**：`qq_generate_image` 的工具描述 + preset 第 19 条/安全规则文案要重启后才被模型看到
+   （桥接已重启，不用再动）。重启后在群里 @她「画一张…」应 ~10~25 秒出图并自动发出；连画第 4 张
+   （同一小时）应拿到 429「画太多啦」。
+2. 若嫌群聊额度太紧/太松：`config.json` 的 `socialV2.imagegen.group.maxPerHour|maxPerDay`（0=不限）
+   改完重启桥接；`group.enabled=false` 可一键关掉群聊画图。
+3. 回滚：`git checkout -- src/bridge.js src/mcp-snowluma-safe.js config.example.json` + 还原
+   `src/imagegen.js`（删 group/owner 默认与配额函数）+ preset/patch/文档，重启桥接与 DSH。
+
+---
+
+## 快照（2026-11-01 14:37–21:0x，QQ 会话轮换：自然收尾 **5 次**后换 DSH session）
+
+### 用户原话
+
+> 14:37：「直接判断对话轮数吧，大于等于5之后，再自然收尾就换session」
+> 20:52 更正：「改为自然收尾5次后换session，感觉你没理解对」
+
+**口径**：数的是**自然收尾次数**（每次 `qq_close_conversation` 成功算 1 次，一段完整对话结束），
+不是「一次对话里的来回轮数/对方发言条数」。同一会话内累计到第 5 次自然收尾 → 换新 DSH session。
+
+### 背景（先分析再动手）
+
+- 现状：一个 QQ 会话 = 一个长期 DSH session（`state/sessions.json`），历史只增不减；此前靠人工在 DSH 界面
+  跑 `/compact`（实测 10-30 两次、11-01 14:07 一次）。
+- 调研（详见 `_research/context-handling-report.md`）：DSH 0.2.1-rc.5 自动压缩阈值 = 727,040 tokens，
+  实测 180 个 session 自动成功 0 次；手动 `/compact` 摘要是英文 coding 八段式，对人格记忆不友好；
+  冷启动新 session ≈37–38k tokens，比压缩后常态还低；长期记忆都在记忆卡/收尾/轻记忆（social-v2.json），
+  换 session 不丢。
+
+### 做到哪（已改代码）
+
+| 改动 | 内容 |
+| --- | --- |
+| 规则 | `socialV2.closure.rotateAfterClosures`（默认 5，0=关闭）：本会话内自然收尾累计 ≥ 5 次 → 换会话 |
+| 纯逻辑 | `src/conversation-closure.js`：`DEFAULT_CLOSURE_CONFIG.rotateAfterClosures`、归一化、`shouldRotateSessionAfterClosure(closureCount)` |
+| 桥接 | `src/bridge.js`：每次自然收尾 `st.sessionClosures` +1（持久化 social-v2.json）；`scheduleSessionRotationAfterCloseV2()`（5s 定时、`isConversationBusyV2` 判忙、最多 6 次重试、重开/映射变化/新收尾都放弃）；`retireSession` 清零计数；`forgetConversationCaches` 统一清定时器 |
+| 测试 | `scripts/test-conversation-closure.mjs` + `scripts/test-closure-wiring.mjs` 新增阈值/挂起/取消/计数归零用例；另 `state/agents/_research/verify-rotation.mjs` 实测第 5 次收尾后 5s archive 旧会话、计数归零、收尾记录保留 |
+
+### 已验证
+
+- `node scripts/test-conversation-closure.mjs` → **OK（13 组）**
+- `node scripts/test-closure-wiring.mjs` → **OK（11 组，含 4 个轮换用例）**
+- `node _research/verify-rotation.mjs` → `closures 1-4: ok, no rotation` / `5th closure: scheduled, count = 5` / `rotated: ok (archived=[...], counter reset, closure kept)` / `new session 1st closure: ok, no rotation`
+- `node _research/verify-rotation-persist.mjs` → 从 `social-v2.json` 读到 `sessionClosures=4`，再收尾一次 → 5 并触发轮换（验证持久化字段加载正确）
+- `npm run test:audit`：**83/89** 通过；6 个失败均为本轮改动之外的历史漂移（版本号 0.6.20 vs 0.6.22、
+  self-identity/identity-guard 期望值漂移、模型名漂移、独立语音工具路径、preset-local-tools），
+  closure 相关两个脚本全绿（详见 `state/agents/_research/test-audit-run3.log`）。
+
+### 未验证 / 下一步
+
+- **未在真实 QQ 链路上跑过**：这是桥接进程内的逻辑，**必须重启桥接**（`restart.bat` 或 supervisor）才生效；
+  生效后可在 `bridge.log` 里看 `[轮换] … 已自然收尾 5 次 ≥ 5，换新会话` 一行，并在 `state/sessions.json`
+  看到 key 被删、下一条消息重建新 sessionId。
+- 计数是「本会话内」的：换会话/任何退役路径（切模式、切角色、DSH 会话丢失重建）都会清零重新数。
+- 顺带发现：`docs/guides/DATA-AND-CONFIG.md` 里 `sessions.json` 的旧描述已过时（只有 sessions+sessionPolicies，
+  agentToken 在 social-v2.json），本次未改历史描述。
+
+---
+
+## 快照（2026-11-01 14:14–14:3x，主动搭话停摆：`env.busy` 传错成自己的 `running`）
+
+### 用户原话
+
+> 「这么久没触发过主动搭话，你看看log怎么回事」
+
+### 排查结论（先分析再动手）
+
+- `~/.dsh/surfcore/plugin.log`：12:35 起每 5 分钟一条 `[pet-purpose] 暂不出发：busy`，没有任何
+  `桌宠主动搭话`；看屏幕本身是好的（`[pet-screen] 自动看一眼…` 一直在跑）。
+- 状态文件 `characters/char-gantang/purpose-outreach.json`：`lastSentAt` = **10-31 18:04**，
+  `lastSkip.reason=busy`。也就是说 10-31 切到「桌宠载体」之后，主动搭话一次都没成功过。
+- 根因：`pet-purpose.js` 的 `runOnce()` 先 `running = true`（单飞锁），再把 `running` 当
+  `env.busy` 传给 `evaluatePurposeTick()` → 每个到点的轮次都判 `busy`，还把 `nextFireAt` 推后 5 分钟。
+  和桥接侧对比：QQ 载体传的是 `isConversationBusyV2()`（她是否正在生成回复），语义不同。
+  v0.6.22（10-28）就有，但之前载体是 QQ，所以今天才暴露。详见 PITFALLS **#86**。
+
+### 做到哪
+
+| 改动 | 内容 |
+| --- | --- |
+| 修复 | `plugins/surfcore/lib/pet-purpose.js`：新增 `chatBusy()` = `chat.status().chat.busy === true`（对话回合在生成），`env.busy` 改用它；单飞保护仍由入口 `if (running)` 负责。 |
+| 测试 | `plugins/surfcore/scripts/test-pet-chat.mjs` 新增 **F3**：① 到点+对话空闲时 `run({force:false})` 必须真的发出去、日志不得有「暂不出发：busy」；② 她正在回话时自动轮次仍让路（`busy`）。 |
+| 文档 | PITFALLS **#86**、CHANGELOG、本文；`docs/guides/SUBSYSTEM-PET.md` §6.3 补 `env.busy` 语义说明。 |
+
+### 已验证
+
+- `node --check pet-purpose.js` / `test-pet-chat.mjs` 通过；`node plugins/surfcore/scripts/test-pet-chat.mjs` → **OK**。
+- **反向验证**：临时把 `busy: chatBusy()` 改回 `busy: running`，F3 立刻失败
+  （`{"ok":false,"reason":"busy","nextFireAt":…}`）；恢复后通过 —— 用例确实抓得住这个 bug。
+
+### 未验证 / 下一步
+
+- **未生效**：插件宿主模块不热重载（PITFALLS #80），本轮改动要**重启 DSH 桌面应用**才生效。
+  重启后看 `plugin.log`：应出现新的目的轮次日志（`看屏幕后暂不出发：screen-*` 或 `桌宠主动搭话（text）`），
+  且 `purpose-outreach.json` 的 `lastSentAt` 往前。
+- 看屏幕当前 `purpose.screen.intervalMin=1`（每分钟截图/约 1~2 分钟一次视觉调用，单次约 1000 tokens）；
+  若只是想让「每隔多久主动搭话」生效，建议在「设置 → 桌宠 → 看屏幕」里调回 5~10 分钟。
+- `autoStartBridge` 仍报「启动后 12 秒仍未监听控制台端口」（QQ 桥接没起来）；桌宠载体下不影响主动搭话，
+  但 `petFallbackToQQ` 回落会失败——要用 QQ 侧能力时再单独排查。
+
+
+
+### 用户原话
+
+> 「有没有可能调用gpt-chat生图」→ 排查后我答「gpt-chat 那条不行，但 agnes 可以，快 20 倍」→「那就用agnes」
+
+### 排查结论（先分析再动手）
+
+- DSH 里配的 freegpt（035719.xyz 的 **CLI Proxy API** 面板）`/v1/models` 确实列了 5 个 `gpt-image-*`，
+  但 `POST /v1/images/generations` 全部 **503 `auth_not_found: no auth available (providers=codex, …)`**
+  ——面板把生图路由到它自己的 codex 上游，这个 friend key 没有该通道；chat 路由也拒绝
+  （`model gpt-image-2.5 is only supported on /v1/images/generations`）。纯文本 chat 模型只能吐 **SVG**。
+  OpenRouter 的 GPT/Google 图像模型从本机 IP 调 **403 not available in your region**。
+- 可用通道：本机 `AGNES_API_KEY`（原「看屏幕」视觉）的 `agnes-image-2.5-flash`，实测 **10~15 秒**出
+  1024×1024 PNG。选它做「快速画图」，Codex 子智能体保留给照片级/复杂图（4~5 分钟）。
+
+### 做到哪
+
+| 改动 | 内容 |
+| --- | --- |
+| 纯逻辑模块 | 新增 `src/imagegen.js`：配置归一 / 请求构造 / b64·url 响应解析 / 文件头·大小校验 / 落盘命名（`img-YYYYMMDD-HHmmss-<hex>.<ext>`）+ 过期清理 / 从 DSH 凭据 YAML 文本递归找键。**注入式 fetch**，可离线测。 |
+| 桥接 | `src/bridge.js`：导入模块；`cfg.socialV2.imagegen` 默认块（baseUrl/agnes-image-2.5-flash/size/timeout/maxPromptChars/keepDays）；工具开关 `imageGen: true`；密钥解析 `resolveImageGenKey()`（`apiKey` → 环境变量 → `~/.dsh/.credentials.yaml`）；**新路由 `POST /api/socialV2/generate-image`**：reserved2 + agent token + 工具开关 + **仅 `private:<ownerQQ>`**，prompt ≤2000 字，成功返回 `{path,bytes,model,size,ms}`（落 `state/generated-images/`）。 |
+| MCP 工具 | `src/mcp-snowluma-safe.js`：新工具 `qq_generate_image`（`TOOL_CONFIG_FLAGS.imageGen`，默认注册），描述里写清「只在主人私聊」「返回 path 后必须 qq_send_image」「照片级改用 subagent_codex」。 |
+| preset | `qq-chat-v2`：安全规则 1/2 把画图工具一起纳入「仅主人私聊/群聊拒绝」；新增**第 19 条【快速画图（优先用这个）】**（10~25 秒、prompt 写法、拿 path → qq_send_image、失败降级 Codex）。patch 已重建。 |
+| 控制台/配置 | `plugins/surfcore/lib/client.js` 工具标签表补 `sendImage` / `imageGen`；`config.example.json` 补 `socialV2.tools.imageGen` + `socialV2.imagegen` 块。 |
+| 测试/文档 | 新增 `scripts/test-imagegen.mjs`（11 项：配置/密钥优先级/请求体/b64·url/文件头/超限/错误文本/落盘清理/凭据 YAML），已登记进 `test-audit.mjs`；`test-qq-preset-contract` 补新安全规则与画图能力断言；AGENT-TOOLS-AND-PRESETS（45 工具、§2.3 行、§4「快速生图」）、PITFALLS **#85**、CHANGELOG、本文。 |
+
+### 已验证
+
+- `node scripts/test-imagegen.mjs` → **11/11**；`node --check src/{imagegen,bridge,mcp-snowluma-safe}.js` 通过；
+  `test-qq-preset-contract` → **8/8**；`build-agent-preset-patches` 重建后 `--check` 一致。
+- **真机桥接路由已验**：重启桥接（POST /api/restart → 插件自动拉起）后，
+  `POST /api/socialV2/generate-image`（owner 私聊 token）→ `{ok:true, model:"agnes-image-2.5-flash",
+  size:"1024x1024", ms:10238, path:"state/generated-images/img-20261101-140557-15b638.png", bytes:1052741}`；
+  随即 `POST /api/socialV2/send-image` 把这张图发到 `private:<ownerQQ>`（`{ok:true, messageId:1657025779}`）。
+  密钥解析走的是 DSH 凭据文件（config.json 没写 key，证明 fallback 有效）。
+- 群聊/别人私聊会被路由 403（代码分支 + preset 文案；未用真群验证）。
+
+### 没验证 / 下一步
+
+1. **`qq_generate_image` 是 MCP 工具，要重启 DSH 才进工具面**（桥接已重启，无需再动）。
+   重启后 QQ 私聊说「画一张…」应 ~10~25 秒出图并自动发出（优先走 Agnes；照片级才走 Codex）。
+2. 重启后可顺手验证：控制台「二代仿真 → 工具开关」出现「快速画图（Agnes）」开关；
+   `qq_get_prompt` 能看到新工具；群里让她画应被拒绝（路由 403）。
+3. 成本/隐私：prompt 会发给第三方 Agnes；生成图默认保留 7 天（`socialV2.imagegen.keepDays`）。
+   嫌模型/尺寸不合适可改 `socialV2.imagegen.model|size`（agnes 还有 image-2.1/2.0-flash）。
+4. 回滚：`git checkout -- src/bridge.js src/mcp-snowluma-safe.js plugins/surfcore/lib/client.js config.example.json`
+   + 删除 `src/imagegen.js`、`scripts/test-imagegen.mjs` + revert preset/patch/doc 改动，重启桥接与 DSH。
+
+---
+
+## 快照（2026-11-01 13:1x–13:5x，桌宠记忆 P0/P1/P2：专用注入块 + 叙事上限 300）
+
+### 用户原话
+
+> 「P012都修了吧」
+
+（上一轮结论：桌宠→QQ 记忆完整连通；QQ→桌宠只拿到 QQ 注入块前 2600 字 = 44%，「桌宠（私下相处）」偏移 3189、
+「今天聊过的」3417 全在截断外；且叙事层 120 条上限已满，自 10-31 11:14 冻结。）
+
+### 做到哪
+
+| 改动 | 内容 |
+| --- | --- |
+| P0 专用注入块 | `src/memory-card.js`：`renderMemoryCard(platform:'pet')` + `reorderSectionsForPet()`（顺序：桌宠→今天→和主人→最近→永远不会忘的→叙事尾巴；叙事只占 30% 预算）；新增 `promptPet` 路径，维护器写 `memory-card-prompt-pet.md`；`memoryCardStatus.promptChars.pet` 同口径 |
+| P1 去掉硬截断 | `lib/pet-chat.js` `memoryBlock()` 优先读 `prompt-pet`（缺文件回退 QQ 前缀 2600）；`buildChatSystemPrompt` / `lib/pet-purpose.js` 不再 `slice(0,2600/2400)`；预算 = `memoryCard.injectMaxChars.pet`（默认 4200，可配 400–8000） |
+| 设置页 | `lib/client.js`：记忆页新增「桌宠 注入上限」+「桌宠 注入预览」+ 路径/预算文案 |
+| P2 叙事上限 | `src/memcard-narrative.js` 默认 `maxEpisodes: 120 → 300`；本机 `~/.dsh/surfcore/config.json` 写 `memoryNarrative:{enabled:true,maxEpisodes:300}`（备份 `config.json.bak-20261101-petmem`） |
+| 测试 | `test-memory-card`（+2 用例）、`test-memory-card-api`、`test-pet-chat` 均更新；`npm run sync:engine-rev` → `memfix-0a7467c3dc` |
+
+### 已验证 / 没验证
+
+- 真实卡只读渲染：桌宠块 **4198 字 ≤ 4200**，顺序 桌宠(190)/今天(418)/和主人(1180)/最近(1448)/永远不忘(2635)/叙事尾巴(3165, 1033 字)；`status.promptChars.pet=4198`。
+- `test-memory-card` 34/34、`test-memory-card-wiring` OK、`test-memory-card-api` OK、`test-pet-chat` OK、`test-core-rev-sync` OK、插件 `npm test` 全绿。
+- `npm run test:audit`：**80/88**，8 个红是**本轮之前就存在的环境/门禁问题**（`test-self-identity` / `test-identity-guard` / `test-closure-wiring` / `test-media-search` / `test-voice-system` / `test-preset-local-tools` / `test-agent-preset-patches` / `test-version`；`state/agents/base-test-*.err` 里有 10-31 的同样失败记录），记忆卡相关脚本全绿（`test-memory-card` 在 audit 里也通过）。
+- **没验证真机**：DSH 没重启 → 运行中的插件还是旧代码，`memory-card-prompt-pet.md` 还没生成；桌宠下一次对话在 DSH 重启 + 一次维护后才用新块。桥接没重启，但叙事配置每 tick 重读，下一轮 tick 会按 300 压缩（日志应出现「叙事压缩：新增 …」）。
+- **未做**：P3（桌宠小节进 QQ 群的隐私边界）不在本轮范围，仍是产品决策。
+
+### 下一步 / 回滚
+
+1. 重启 DSH（插件代码生效）；等桥接下一轮（叙事压缩）。验证：`memory/` 出现 `memory-card-prompt-pet.md`；桌宠里问「昨天/刚才在 QQ 聊了什么」能接上；日志不再有「已达回忆上限（120 条）」。
+2. 回滚：`git checkout -- src/memory-card.js src/character-persona.js src/memcard-narrative.js plugins/surfcore/lib/{memory-card,pet-chat,pet-purpose,client}.js`（测试文件同法）；恢复 `~/.dsh/surfcore/config.json.bak-20261101-petmem`；重启 DSH。
+
+## 快照（2026-11-01 12:56–13:0x，看屏幕设置移到「桌宠」页 + 真机回归确认）
+
+### 用户原话
+
+> 「没什么问题，然后把每隔多少时间主动看屏幕加到dsh插件surfcore的设置-桌宠里边」
+
+### 真机确认（上一轮之后用户已完整重启 DSH）
+
+- `DSH 启动 → 自动打开桌宠` 生效：`plugin.log` 有 `[pet] DSH 启动：按设置自动打开桌宠…` / `自动打开成功 pid=45492`；
+- 看屏幕走 DeepSeek 生效：`[pet-screen] 视觉调用 834~1072ms，918+42~44 tokens`，判定正常；
+- 对话里按需看屏幕生效：`[pet-chat] 对话里看了一眼屏幕：正在用ChatGPT学习KMP算法…`；
+- 用户反馈「没什么问题」。
+
+### 做到哪
+
+| 改动 | 内容 |
+| --- | --- |
+| 设置页位置 | `lib/client.js`：`ScreenWatchCard` 从 `PurposeTab` 移到 `PetTab`（设置 → 桌宠，位于「启动」卡片之后、「安装设置」之前）；`PetTab` 新增 `cfg`/`set`（qq 配置 + setQqPath）参数 |
+| 目的页 | 只保留「看屏幕」指路卡片：显示开关状态和当前间隔（`purpose.screen.intervalMin`），按钮「去『桌宠』页设置看屏幕」 |
+| 配置位置 | 不变：仍写根 `config.json` 的 `purpose.screen`（和目的页共用一份）；改完点页面底部「保存」 |
+| 文案 | 卡片里明确写「开关 / 间隔改完点页面底部『保存』生效」；README/PET/PURPOSE_OUTREACH 同步入口位置 |
+
+### 已验证
+
+- `node --check client.js` 通过；`test-client-contract` / `test-ui-contrast` 全绿。
+- 未做浏览器截图验证（无法读本机 GUI）；设置页刷新后应能看到新卡片位置。
+
+### 没验证 / 下一步
+
+1. 设置页是客户端模块：**先在 DSH 里 Ctrl+R / 关掉设置页重开**，若还是旧布局再完整重启 DSH（客户端文件通常随页面加载刷新）。
+2. 看到新卡片后确认：「看屏幕」出现在 设置 → 桌宠；里面第二行是「每隔多久看一眼（分钟）」；
+   改一下数值 → 点底部保存 → 根 `config.json` 的 `purpose.screen.intervalMin` 应该跟着变。
+3. 回滚：把 `ScreenWatchCard` 调用挪回 `PurposeTab`、`PetTab` 的 `cfg/set` 参数还原即可（纯前端改动）。
+
+## 快照（2026-11-01 11:55–12:1x，桌宠随 DSH 自动打开 + 看屏幕真机修复）
+
+### 用户原话
+
+> 「能不能启动dsh自动打开桌宠」
+
+（上一轮遗留：用户重启 DSH 后桌宠被「清理残留后重试」删掉了 app 目录；看屏幕在真机上偶发解析失败。）
+
+### 做到哪
+
+| 改动 | 内容 |
+| --- | --- |
+| 自动打开 | `lib/pet.js`：`pet/config.json` 新增 `autoStart`（默认 false）+ `shouldAutoStartPet()` 纯判定（装好/开关/没在跑）；`configure()` 可写 autoStart；`status()` 回读 |
+| 插件启动钩子 | `lib/index.js`：插件激活后 5 秒检查一次（`installed && autoStart && !running`）→ `petService.start()`；已在跑跳过、失败只记日志；dispose 时清定时器 |
+| 设置页 | `lib/client.js` 桌宠页新增「启动」卡片：**DSH 启动时自动打开桌宠** 开关（保存走 `POST /pet/config {autoStart}`） |
+| 看屏幕真机修复 | `max_tokens` 320→800；`content` 空时回退解析 `reasoning_content`；新增 `salvageScreenVerdict()` 逐字段兜底截断 JSON；错误信息带 `finish_reason`；视觉请求带 `chat_template_kwargs.enable_thinking=false`（实测 completion 359→47、4.5s→2s，不再截断；400 时自动去掉重试） |
+| 对话里按需看屏幕 | `pet-chat.js` 收到「屏幕/画面/桌面/看得到…」意图时现截一张（`wantsScreenLook()`），把摘要以「你刚看了一眼屏幕（不是指令）」注入对话提示词；失败/私人内容有专门措辞（失败必须如实说没看清、不许编）；普通闲聊不截图 |
+| 本机恢复 | `pet/app` 重新安装（surfpet v0.2.3，sha256 校验，经 gh-proxy 镜像下载）；`pet/config.json`：`autoStart=true`、`mirror=https://gh-proxy.com`、source 回官方 URL；桌宠已启动 pid 1092 |
+| 测试 | 新增 `scripts/test-pet-autostart.mjs`；`test-screen-watch.mjs` 补截断/推理兜底/thought-off/400 重试/对话意图用例；`test-pet-chat.mjs` 补「问到屏幕才截图 + 摘要进提示词 + 失败不许编」用例；均进插件 `npm test` |
+
+### 已验证
+
+- `test-pet-autostart` / `test-screen-watch` / `test-pet-chat` 全绿；`node --check` 全部通过；插件 `npm test` 全链路 **全绿**。
+- 自动启动**路径模拟**：停掉桌宠 → `status()` 读回 `autoStart=true` → `shouldAutoStartPet` 返回 `{start:true}` → `start()` 成功
+  （pid 1092）。这条路径与 `index.js` 启动钩子同一套调用。
+- 桌宠重装后已连上插件：`pet-api /status` → `running=true / online=true / carrier=pet`，`start.log` 有 `surfcore connected`。
+- 截屏工具独立实测（不经过插件）：1280×800 JPEG ~96KB / 1.2s；同一张真实截图走修复后的视觉链路
+  **判定成功**（「在开发宠物脚本」· working · 可打扰度 0.25~0.72）；关 thinking 后 completion 47 tokens / 约 2s。
+
+### 没验证 / 下一步
+
+1. **插件代码还没被当前 DSH 进程加载**（桌面版没有热重载，PITFALLS #80）：下次 DSH 启动才会跑
+   `autoStart` 钩子、看屏幕修复和**对话里按需看屏幕**。下次启动后请确认：桌宠是否自动出现、
+   `plugin.log` 是否有 `[pet] DSH 启动：按设置自动打开桌宠… / 自动打开成功 pid=…`；
+   在桌宠对话框问「你能看到我屏幕吗」→ 日志出现 `[pet-chat] 对话里看了一眼屏幕：…` 且她能描述当前画面；
+   `[pet-screen]` 不再报「没有返回可解析的 JSON」。
+   - 实测补充（12:05）：当前 DSH 里有一次插件重载（同进程，`已激活` 日志出现），但 `plugin.log` **没有** `[pet]` 行，
+     说明桌面版的「插件重载」没有拿到新模块（ESM 缓存）——**必须完整重启 DSH 进程**才生效，别只做插件开关。
+2. 如果下次启动桌宠没自动出现：查 `pet/config.json` 的 `autoStart`、`electronPath` 是否存在、`plugin.log` 的 `[pet]` 行。
+3. 回滚：关掉设置页开关（或 `pet/config.json` 里 `autoStart:false`）；代码回滚 `lib/pet.js` / `lib/index.js` / `lib/client.js`
+   的对应 hunk + 删 `scripts/test-pet-autostart.mjs`。
+4. 对话看屏幕的代价：每次问屏幕多一次视觉调用（约 1.5k prompt + 50 completion tokens），只在意图命中时发生；
+   不想让她看就把「目的 → 看屏幕」总开关关掉（对话也会跟着停）。
+
+## 快照（2026-11-01 12:2x，看屏幕视觉端点全换 DeepSeek）
+
+### 用户原话
+
+> 「agnes是在哪配置的，都换成deepseek吧」
+
+### 排查结论
+
+- agnes 出现在 4 类地方：
+  ① **SurfCore 看屏幕**：`config.json` 的 `purpose.screen`（本机已写死 agnes 端点和 `AGNES_API_KEY`）、
+    插件默认值 `DEFAULT_SCREEN_CONFIG`、设置页卡片默认值；
+  ② **DSH web profile**：`~/.dsh/profiles/web/cordis.patch.yml` 的 vision-router `httpProviders`（注意：当前运行的是 **desktop** profile，
+    并没有挂 vision-router，所以这条只影响以后用 web profile 的场景）；
+  ③ **DSH 凭据**：`~/.dsh/.credentials.yaml` 的 `AGNES_API_KEY`（另外还有 DEEPSEEK_API_KEY 可直接用）；
+  ④ **历史记录**：`~/.dsh/surfcore/token-usage-state.json` 的旧用量、plugin.log 旧日志、undo-snapshots——只是历史，不作配置。
+- DeepSeek 能不能看图：`GET https://api.deepseek.com/models` 显示 `deepseek-flash`（DeepSeek-V4.1-Flash）
+  `input_modalities: ["text","image"]`，`deepseek-v4-pro` 只有 text；用真实截图实测**可以看图**。
+- 参数实测（同一张截图）：
+  - 默认会推理：reasoning 吃掉 499~800 tokens，甚至 `max_tokens=800` 打满、`content` 为空；
+  - `thinking: { type: 'disabled' }` → reasoning 0、completion **38**、耗时 **0.8s**、`content` 直接是 JSON（最优）；
+  - `reasoning_effort: 'low'` 和顶层 `enable_thinking:false` **均无效**；
+  - Qwen 系兼容端点用 `chat_template_kwargs.enable_thinking=false`（旧 agnes 上实测有效）。
+
+### 做到哪
+
+| 改动 | 内容 |
+| --- | --- |
+| 默认值 | `screen-watch-core.js` 的 `DEFAULT_SCREEN_CONFIG`：`baseUrl=https://api.deepseek.com`、`model=deepseek-flash`、`apiKeyRef=DEEPSEEK_API_KEY`；`config.example.json`、设置页默认值同步 |
+| 本机配置 | `config.json` 的 `purpose.screen` 同样切到 DeepSeek（enabled 仍 true、intervalMin=10） |
+| 请求参数 | `screen-watch-service.js` 同时发 `thinking:{type:'disabled'}` + `chat_template_kwargs.enable_thinking=false`；400/422 时去掉两者重试 |
+| DSH web profile | `~/.dsh/profiles/web/cordis.patch.yml` 的 vision-router：`agnes/agnes-2.5-flash` → `deepseek/deepseek-flash` + `https://api.deepseek.com` + `DEEPSEEK_API_KEY`（备份 `cordis.patch.yml.bak-20261101T1225`） |
+| 测试 | `test-screen-watch.mjs` 更新默认值断言、`thinking` 请求体断言、400/422 重试用例 |
+
+### 已验证
+
+- 端到端（不经过插件）：真实截图 1.15s + DeepSeek 视觉 1.34s → 918+41 tokens → 判定正确
+  （「在编辑数据结构 PPT」· working · busy · 可打扰度 0.2 → gate 拦下）。
+- `test-screen-watch` / `test-pet-chat` / `test-client-contract` 全绿；`node --check` 全部通过。
+
+### 没验证 / 下一步
+
+1. **仍需完整重启 DSH**（同前：桌面版插件重载拿不到新模块，PITFALLS #80）：重启后看
+   `plugin.log` 的 `[pet-screen]`（模型应为 deepseek-flash、用量约 918+41）、对话问屏幕的 `[pet-chat]` 行。
+2. `AGNES_API_KEY` 仍留在 DSH 凭据里（当前已无消费者）；要删可以到设置 → 模型/凭据里删，或留着备用。
+3. 想换回别的视觉端点：只改 `purpose.screen.baseUrl/model/apiKeyRef` 三个值，代码不用动。
+
+## 快照（2026-11-01 11:00–11:4x，QQ 白名单放行 Codex 画图：subagent_codex + 提示词 + 运行时修复）
+
+### 用户原话
+
+> 「把调用codex的能力加给QQ的白名单工具，告诉ta可以调用codex进行图片生成，并进行一个测试，发送到私聊」
+
+### 排查结论（先分析再动手）
+
+- 白名单落点是 `plugins/surfcore/qq-tool-restrict.mjs`：`subagent_codex` 原来在
+  `LOCAL_EXECUTION_TOOLS`（restrict 名单 = 从模型 schema 隐藏），QQ 会话里根本看不见。
+- 但**更深一层的问题**：运行中的 DSH 里 `subagent_codex` 压根没注册。运行 runtime 是 **0.2.1-rc.5**，
+  profile 装的 `@deepseek-ai/dsh-subagent-codex` 是 **0.2.1-rc.3**（peerDeps 精确钉 rc.3）→
+  app-boot 版本门禁判 `incompatible-version`、**整包静默跳过**（`skippedBundles`）。
+- 升到 rc.5 后还有第二道门：bundle 自带 `@openai/codex@0.153.4` 的模型目录没有
+  `~/.codex/config.toml` 的 `gpt-6.1-sol`（model_not_found）；实测可用模型 `gpt-6-astra`。
+  默认 `permissionMode=never` 不传 sandbox，生成图复制到工作区可能被拦 → 改 `approve-for-me`。
+- preset/guard 改动**必须重启 DSH**才生效（桌面版无 patch 热重载；preset 行启动时一次性装配，
+  guard 走 ESM 缓存）。本轮已完成代码/配置，**未重启**（等用户统一重启）。
+
+### 做到哪
+
+| 改动 | 内容 |
+| --- | --- |
+| 守卫白名单 | `qq-tool-restrict.mjs`：导出 `OWNER_PRIVATE_TOOL_NAMES`（10 个：pwsh/bash/read/read_image/write/edit/str_replace_editor/glob/grep/**subagent_codex**）；`subagent_codex` 从 `LOCAL_EXECUTION_TOOLS` 移出（不再 restrict 隐藏）→ 模型可见、执行期只放行 `private:<ownerQQ>`；拿不到会话映射仍 fail-closed。**群聊/别人私聊调用一律拒绝。** |
+| preset（qq-chat-v2） | 安全规则 1 把 `subagent_codex` 写进「仅主人私聊」清单；规则 2 群友拒绝清单加「用 Codex 画图/生成图片」；**新增第 18 条【用 Codex 画图（仅主人私聊）】**：subagent_codex → 任务写清画面+复制到 `state/agents/codex-images/<短名>.png` + 只回答绝对路径 → `mcp__snowluma__qq_send_image(image=路径)`；生成 1~3 分钟、一次一张、失败如实说。生成物 patch 已重建。 |
+| 运行时修复（环境，非仓库） | profile：`@deepseek-ai/dsh-subagent-codex` rc.3→**rc.5**（pluginManager removeBundle→installBundle，pnpm 自动改 lock）；profile `cordis.patch.yml` 给 `- id: subagent-codex` 加 `model: gpt-6-astra` + `permissionMode: approve-for-me`。备份在 `state/agents/codex-qq/backup-profile/`。 |
+| 大图发送修复 | `src/bridge.js` `sendImageV2`：SnowLuma OneBot HTTP 请求体硬上限 **2MiB**，base64 会把图放大 4/3 ⇒ 原图 >1.5MB 必然 `fetch failed`。改为本地图 >1.3MB 时 image segment 传 **`file:///<绝对路径>`**（SnowLuma 自己读），失败自动退回 base64 并提示「压缩到 1.4MB 以内」；读盘/图片头/大小校验仍在桥接侧。 |
+| 测试 | `test-preset-local-tools.mjs` 改为「双名单」口径（owner-private 不被 restrict + 执行期拒绝；危险名单仍 restrict）；`test-audit-setup-guards.mjs` 加 `subagent_codex` fail-closed 断言；`test-qq-preset-contract.mjs` 钉住新安全规则与画图能力文案；`verify-dsh-020-adaptation.mjs` 改口径（subagent_codex 在 owner 名单、不在 restrict）。 |
+| 文档 | `AGENT-TOOLS-AND-PRESETS.md` §2.3（qq_send_image）+ §4（双名单规模 + 「Codex 画图的运行时前提」）；`SECURITY_BASELINE.md` 威胁模型行；PITFALLS **#81/#82**；CHANGELOG。 |
+
+### 已验证
+
+- `node scripts/test-qq-preset-contract.mjs` → **8/8 绿**；`node scripts/test-audit-setup-guards.mjs` → 绿；
+  `node --check plugins/surfcore/qq-tool-restrict.mjs`、`node --check src/bridge.js` 通过；
+  `build-agent-preset-patches` 重建后 `--check` 一致。
+- `node scripts/test-preset-local-tools.mjs` → **6/7**：唯一红是既有基线（repo 内 `node_modules/@deepseek-ai`
+  是旧版包，扫不到 0.2.x/浏览器工具名 → 假名对账误报），与本次改动无关（改前 4/7，owner-only 那部分本轮修绿）。
+- `verify-dsh-020-adaptation.mjs`（带 `DSH_BASE_URL=http://127.0.0.1:63390`）→ 61 通过/14 失败，
+  **两条新断言均 ✅**（`subagent_codex` 在 owner 名单、不在 restrict），14 项失败是既有基线
+  （persona 旧字段/版本漂移/profile patch 断言等，与本次无关）。
+- `pluginManager`：removeBundle rc.3 成功、installBundle **0.2.1-rc.5** 成功（`application: restart-required`）；
+  profile patch 已写入。安装后运行中的 DSH **真的把 `subagent_codex` 注册进了当前会话**
+  （工具清单热更新），说明 Host 行热挂载可行；但 QQ preset 的 guard 仍是旧代码，需重启才放行。
+- 已用 DSH 自带 codex 0.153.4 + `gpt-6-astra` 跑通「出图」（`state/agents/codex-qq/imgtest/out.png`，
+  1254×1254、1.875MB，戴红围巾的鲸鱼坐电饭锅上）；`~/.codex/thread_history_1.sqlite` 的 imageGeneration
+  item 含 `savedPath` 字段。
+- **真机 QQ 私聊发送（本轮已做）**：桥接重启加载新代码后，用会话 token 走
+  `POST /api/socialV2/send-image`（与 `qq_send_image` 同一条桥接路径）
+  ① 160KB 缩略图 `{ok:true, messageId:1030232102}`；
+  ② 1.875MB 原图 `{ok:true, messageId:-1686756870, bytes:1920363, via:"path"}`；
+  ③ 另发了一条说明文字「这张是我用 Codex 画的…」。三条都应出现在主人 QQ 私聊里。
+- 桥接已重启回「插件监管」状态（PID 42568，reserved2、SnowLuma connected、单实例）。
+- **线上 `subagent_codex` 端到端已实测通过**（队友 codex-probe）：rc.5 + profile 里的
+  `model: gpt-6-astra` + `permissionMode: approve-for-me` 在**运行中的 DSH** 里直接可用——
+  `subagent_codex` 真出图 → 复制到工作区 → 最终回答只回一行绝对路径（`imgtest/subagent-out.png`，
+  1,760,744B、1254×1254，耗时 4.5~5 分钟）。完整证据/命令/失败特征见
+  `state/agents/codex-qq/CODEX_IMAGE_PROBE.md`。
+- `npm run test:audit` → **80/88**（与 2026-10-31 基线 80/88 相同；失败集合仍是既有 8 条基线红，
+  无新增）。定向测试全绿（见上）。
+
+### 没验证 / 下一步
+
+1. **重启 DSH**（一次即可同时应用：本轮的 guard/preset/profile 配置 + 另一会话的桌宠看屏幕代码）。
+2. 重启后真机自测：QQ 私聊对 ta 说「用 codex 画一张…发我」→ 应看到 `subagent_codex` 调用（1~3 分钟）→
+   `qq_send_image` 把图发到私聊（大图现在走 file://，已不在 2MiB 限制内）。群里让她画应被拒绝/被守卫拦。
+3. 若重启后工具还没出现：先查 `pluginManager/listBundles` 里 subagent-codex 的 `rows` 与 `problem`、
+   再确认 profile patch 的 `- id: subagent-codex` 生效（`pluginInventory` 应有 `tool-subagent-codex` 行）。
+4. 回滚：`git revert` 本轮提交 + 恢复 `state/agents/codex-qq/backup-profile/` 三件套（package.json /
+   pnpm-lock / cordis.patch.yml）后重启；guard 白名单回滚只需把 `subagent_codex` 移回 restrict 名单；
+   bridge 大图修复回滚 = `git checkout src/bridge.js`（旧行为：>1.5MB 图发不出去）。
+
+---
+
+## 快照（2026-11-01 10:08–11:3x，桌宠「看屏幕」+ 主动搭话载体切桌宠）
+
+### 用户原话
+
+> 「试着给其加上截图屏幕的能力，然后把主动搭话改为桌宠帮我改一下，然后每隔一段时间截图屏幕，根据截图判断是否搭话」
+
+### 做到哪
+
+| 改动 | 内容 |
+| --- | --- |
+| 新增截图 | `plugins/surfcore/lib/screen-capture.js`：PowerShell 5.1 + System.Drawing，DPI 感知、多显示器虚拟桌面、下采样 JPEG；失败返回结构化错误 |
+| 纯逻辑 | `plugins/surfcore/lib/screen-watch-core.js`：配置归一 / 视觉提示词 / JSON 解析 / 门控（私人内容·游戏·视频·会议·可打扰度）/ 提示词小节 / 状态摘要 |
+| 视觉服务 | `plugins/surfcore/lib/screen-watch-service.js`：节流（`intervalMin`）+ 同画面哈希缓存（2×间隔）+ `ctx.credentials.resolve(apiKeyRef)` 取密钥 + OpenAI 兼容 HTTP + token 额度「其他」记账 + 失败 fail-open |
+| 接线 | `pet-purpose.js`：tick 定时看屏幕；出发前用门控拦；通过时摘要进提示词；模型只回 `SILENT` 记为「她选择没说」；`status()/preview()` 带 screen；`index.js` 创建服务 + `GET /purpose/screen`、`POST /purpose/screen/look` |
+| 设置页 | `client.js` 目的页新增「看屏幕再决定要不要搭话」卡片（开关 / 间隔 / 重试 / 模型 / 阈值 / 失败放行 / 保留截图 / 现在看一眼 + 最近一次结果） |
+| 配置 | 本机 `config.json`：`purpose.carrier=pet`、`petModality=text`、`purpose.screen.enabled=true`（默认 10 分钟）；`config.example.json` 补默认块 |
+| 测试 | `scripts/test-screen-watch.mjs`（纯逻辑 47 项 + 注入式服务测试 13 项，不联网）接进插件 `npm test` |
+| 文档 | `PET.md`（看屏幕一节）、`PURPOSE_OUTREACH.md`（配置表 + 看屏幕一节）、`CHANGELOG.md`、`PITFALLS.md` #79/#80、本文 |
+
+### 已验证
+
+- `node plugins/surfcore/scripts/test-screen-watch.mjs` 全绿；`test-pet-chat` / `test-client-contract` /
+  `test-store` / `test-http-guard` / `test-pet-api` / `test-pet-dir-guard` / `test-host-smoke` 全绿。
+- 真机单独验证（不经过插件）：截图 1707×1067 → 1280×800 JPEG（~147KB / 1.1s）；
+  同一张截图走 agnes 视觉接口返回正确 JSON（`activity=working`、`interruptible=0.2`）+ usage 记账（1.4~3.2s）。
+- 插件 `npm test` 见本次收尾日志（背景任务）。
+
+### 没验证 / 下一步
+
+1. **必须重启 DeepSeek Harness 桌面应用**才生效：桌面版没有 patch 热重载（PITFALLS #80）；
+   我在探测热重载时用 plugin-manager 网关 disable 过 surfcore，**当前插件处于未装载状态**，
+   重启后会按 `package.json` 的 bundles 重新装载（`cordis.patch.yml` 已恢复、无 disabled 行）。
+2. 重启后请复看：设置 → 目的 → 「看屏幕」卡片能打开；点「现在看一眼」拿到摘要；
+   `plugin.log` 出现 `[pet-screen] …`；桌宠气泡在合适的时机主动搭话（不是每次截图都说话）。
+3. 关掉/回滚：目的页把「启用看屏幕」关掉 → 立即回到纯排程；载体切回 QQ 即恢复旧链路；
+   代码回滚 `git checkout -- plugins/surfcore/lib/{screen-capture,screen-watch-core,screen-watch-service}.js ...`
+   （新文件）并还原 `pet-purpose.js` / `index.js` / `client.js`。
+4. 成本：每张截图约 1~1.5k prompt tokens，默认 10 分钟一次（安静时段不截）；嫌贵把 `screen.intervalMin` 调到 30。
+
+
 
 ### 用户原话
 

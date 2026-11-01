@@ -5,7 +5,7 @@
  *   · QQ 桥接（独立进程）只做两件事：把「主人消息 / 直接对她说的话 / 有情绪的公开发言」
  *     追加到 `memory-inbox.jsonl`；把 `memory-card-prompt-qq.md` 注入 QQ 提示词。
  *   · 本插件（DSH 宿主进程）定时摄取 inbox + `state/bili-memory.json`，跑每日遗忘整理、
- *     容量压缩，写 memory-card.json / .md / 两份 prompt 文件，并在 80/90/100% 时告警。
+ *     容量压缩，写 memory-card.json / .md / 三份 prompt 文件（QQ / B站 / 桌宠），并在 80/90/100% 时告警。
  *   · B站调度器每次醒来读 `memory-card-prompt-bili.md`。
  *
  * 只有本模块写记忆卡（单进程内用 promise 链串行化）；桥接只 append 不写卡，避免并发覆盖。
@@ -23,7 +23,7 @@ import {
   maintainMemoryCard, markOwnerNotified, memoryCardStatus, memoryNarrativeSummary, mergeMemories, normalizeMemoryCardConfig,
   readAllFullRecords, readInboxSince, readMemoryNarrative, recallFullMemory, renderFullMemoryCard, renderMemoryCard,
   saveFullMemoryCard, saveMemoryCardOutputs, saveMemoryNarrative, shouldNotifyOwner,
-} from '../../../src/memory-card.js?rev=memfix-f0b02c2270';
+} from '../../../src/memory-card.js?rev=memfix-d913f4f63b';
 
 const EMPTY_CONFIG = normalizeMemoryCardConfig({});
 const TICK_MS = 10 * 60 * 1000;
@@ -151,6 +151,7 @@ export function memoryCardStatusNow(config = memoryCardConfig()) {
       markdown: maskPath(pathsNow().markdown),
       promptQq: maskPath(pathsNow().promptQq),
       promptBili: maskPath(pathsNow().promptBili),
+      promptPet: maskPath(pathsNow().promptPet),
       inbox: maskPath(pathsNow().inbox),
       ...fullPathsSummary(),
     },
@@ -217,6 +218,7 @@ export function memoryCardSnapshot(config = memoryCardConfig()) {
         markdown: maskPath(pathsNow().markdown),
         promptQq: maskPath(pathsNow().promptQq),
         promptBili: maskPath(pathsNow().promptBili),
+        promptPet: maskPath(pathsNow().promptPet),
         inbox: maskPath(pathsNow().inbox),
         ...fullPathsSummary(),
       },
@@ -224,6 +226,7 @@ export function memoryCardSnapshot(config = memoryCardConfig()) {
     markdown: renderMemoryCard(card, { config, full: true, now, narrative }),
     promptQq: renderMemoryCard(card, { config, platform: 'qq', maxChars: config.injectMaxChars.qq, now, narrative }),
     promptBili: renderMemoryCard(card, { config, platform: 'bili', maxChars: config.injectMaxChars.bili, now, narrative }),
+    promptPet: renderMemoryCard(card, { config, platform: 'pet', maxChars: config.injectMaxChars.pet, now, narrative }),
     firstMet: (() => {
       const record = card.records.find((item) => item.id === String(card.meta.firstMetEventId ?? ''))
         ?? card.records.find((item) => item.firstMet)
@@ -334,6 +337,7 @@ export function runMemoryCardMaintenance({ forceDecay = false, config = memoryCa
       // 关掉记忆卡时要清空注入块：桥接只认文件，留着旧文件等于「设置关了但提示词还在」。
       try { writeTextAtomic(pathsNow().promptQq, ''); } catch {}
       try { writeTextAtomic(pathsNow().promptBili, ''); } catch {}
+      try { writeTextAtomic(pathsNow().promptPet, ''); } catch {}
       promptCache = new Map();
       return { ok: true, disabled: true, status: memoryCardStatusNow(config) };
     }
@@ -588,10 +592,10 @@ export function accountMemoryNarrativeUsage({ recordUsage } = {}) {
   });
 }
 
-/** B站调度器 / 调试用：读现成的 B站 注入块（mtime 缓存，避免每次重复读盘）。 */
+/** B站调度器 / 桌宠 / 调试用：读现成的注入块（mtime 缓存，避免每次重复读盘）。 */
 export function memoryCardPromptBlock(platform = 'bili') {
   const paths = pathsNow();
-  const file = platform === 'bili' ? paths.promptBili : paths.promptQq;
+  const file = platform === 'pet' ? paths.promptPet : platform === 'bili' ? paths.promptBili : paths.promptQq;
   const cacheKey = `${platform}:${paths.dir}`;
   try {
     const stat = fs.statSync(file);

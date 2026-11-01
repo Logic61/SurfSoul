@@ -178,7 +178,7 @@
       "minRecords": 6,
       "batchRecords": 24,
       "maxBatchesPerTick": 6,
-      "maxEpisodes": 120,
+      "maxEpisodes": 300,
       "maxEpisodesInPrompt": 16,
       "maxEpisodeTitles": 40,
       "episodeMaxChars": 220,
@@ -293,7 +293,8 @@
       "requireNoOpenQuestion": true,
       "promptInWake": true,
       "maxSummaryChars": 160,
-      "maxNextOpeningChars": 120
+      "maxNextOpeningChars": 120,
+      "rotateAfterClosures": 5
     },
     "send": {
       "burstEnabled": true,
@@ -443,6 +444,11 @@
       },
       "overrides": {}
     },
+    "recall": {
+      "enabled": true,
+      "crossConversation": true,
+      "maxHits": 5
+    },
     "memoryScene": {
       "groupExcludePrivate": false,
       "honorAudience": true
@@ -482,7 +488,25 @@
     "retryMs": 900000,
     "maxAttempts": 3,
     "maxCandidates": 6,
-    "promptMaxChars": 16000
+    "promptMaxChars": 16000,
+    "carrier": "qq",
+    "petModality": "text",
+    "petFallbackToQQ": true,
+    "screen": {
+      "enabled": false,
+      "intervalMin": 10,
+      "retryMin": 10,
+      "maxWidth": 1280,
+      "quality": 70,
+      "baseUrl": "https://api.deepseek.com",
+      "model": "deepseek-flash",
+      "apiKeyRef": "DEEPSEEK_API_KEY",
+      "timeoutMs": 60000,
+      "minInterruptible": 0.55,
+      "blockActivities": ["gaming", "video", "meeting"],
+      "failOpen": true,
+      "keepScreenshots": false
+    }
   },
   "greetings": {
     "enabled": false,

@@ -57,7 +57,7 @@ import {
 import {
   assessConversationClosure, classifyMessage, closeGate, closurePromptBlock, closureStatus,
   closureSuppressesWake, makeClosureRecord, normalizeClosureConfig,
-  normalizeClosureRecord, reopenClosure,
+  normalizeClosureRecord, reopenClosure, shouldRotateSessionAfterClosure,
 } from './conversation-closure.js';
 import {
   adminFromQqConfig, adminMarker, adminPromptBlock,
@@ -71,6 +71,7 @@ import { createBiliMemory } from './bili-memory.js';
 import {
   appendMemoryInboxEvent, looksNoteworthyMessage, readPromptBlock, resolveMemoryCardPaths,
 } from './memory-card.js';
+import { createEventRecall, formatRecallHits } from './memory-search.js';
 import { completeText } from './llm-text.js';
 import {
   createMemoryAbstractProvider, createPresendReviewer, createRejectFallback, normalizePresendReviewConfig,
@@ -158,6 +159,20 @@ const ACTIVE_CHARACTER = readCurrentCharacter();
 const CHARACTER_ID = ACTIVE_CHARACTER?.id ?? '';
 const CHARACTER_EPOCH = Number(ACTIVE_CHARACTER?.epoch ?? 0);
 const MEMORY_CARD_PATHS = resolveMemoryCardPaths(activeMemoryPaths().dir);
+
+// 原文召回（qq_recall，2026-11-01）：events/ 由插件维护器写，桥接只读；按目录懒加载索引（mtime 变了自动重建）。
+// 关键词触发（不是每轮都塞）：最后一句像在问过去的事时，才提醒她先查原文库。
+const RECALL_HINT_RE = /记得|上次|之前|以前|那个|说过|忘|聊过|还记/;
+let eventRecall = null;
+let eventRecallDir = '';
+function eventRecallForMemoryDir() {
+  const dir = path.join(MEMORY_CARD_PATHS.dir, 'events');
+  if (!eventRecall || eventRecallDir !== dir) {
+    eventRecall = createEventRecall({ dir });
+    eventRecallDir = dir;
+  }
+  return eventRecall;
+}
 const PLATFORM_STATE_DIR = activePlatformStateDir(STATE_DIR);
 // 发送前评审：抽象记忆卡压缩结果的落盘缓存（源记忆卡变了或超过 memoryRefreshMs 才重压）。
 const PRESEND_REVIEW_CACHE_FILE = path.join(STATE_DIR, 'review-context', 'memory-abstract.json');
@@ -1013,6 +1028,12 @@ function loadConfig() {
         maxMs: 600000,
         defaultQuietMs: 8000,
         minQuietAfterNewMs: 10000   // 收到新消息后至少再等这么久（默认 10 秒），防止抢话
+      },
+      // 原文召回（qq_recall，2026-11-01）：查 events/ 原话；群聊只查本会话，主人私聊可跨会话。
+      recall: {
+        enabled: true,
+        crossConversation: true,
+        maxHits: 5
       },
       sticker: {
         enabled: true,             // 表情包体系总开关
@@ -3256,6 +3277,12 @@ async function main() {
   const wakeConfigUpdatedKeys = new Set();
   const markReadCalledKeys = new Set();
   const wakeConfigMissCount = new Map();
+  // 自然收尾后的会话轮换（2026-11-01）：收尾是在回合内调用的，不能当场退役（会打断这个回合），
+  // 所以只记一个定时器：等回合结束、确认没有新消息/排队工作后，再 retireSession。
+  // 新消息重开/收尾记录变化/超时都放弃本次轮换（下一段对话照常在当前会话里跑）。
+  const sessionRotateTimers = new Map(); // key -> timeout
+  const SESSION_ROTATE_DELAY_MS = 5000;
+  const SESSION_ROTATE_MAX_ATTEMPTS = 6;
   const reverse = new Map(); // sessionId -> conv key
   for (const [key, sessionId] of Object.entries(state.sessions)) reverse.set(sessionId, key);
   // 新版 DSH 事件流需要显式 follow；启动时为已持久化的 QQ 会话补上。
@@ -3593,6 +3620,8 @@ async function main() {
     wakeConfigMissCount.delete(key);
     wakeConfigUpdatedKeys.delete(key);
     markReadCalledKeys.delete(key);
+    // 撤销会话映射/重置路径（retireSession、/reset、控制台 reset）都要取消挂起的轮换定时器。
+    clearSessionRotateTimer(key);
   }
 
   function retireSession(key) {
@@ -3630,6 +3659,8 @@ async function main() {
       st.agentToken = crypto.randomBytes(24).toString('hex');
       rememberAgentToken(key, st.agentToken);
       st.bootstrapSent = false;
+      // 换了新会话 → 自然收尾计数归零（下一段对话重新数 5 次）。
+      st.sessionClosures = 0;
       st.modelSeenSeqs = new Set();
     }
     saveState();
@@ -5785,7 +5816,7 @@ async function main() {
             setWakeConfig: 'qq_set_wake_config',
             markRead: 'qq_mark_read',
             closeConversation: 'qq_close_conversation',
-            memory: 'qq_memory_append / qq_memory_query / qq_memory_remove / qq_memory_clear',
+            memory: 'qq_memory_append / qq_memory_query / qq_memory_remove / qq_memory_clear / qq_recall',
             slangQuery: 'qq_slang_query',
             slangSubmit: 'qq_slang_submit',
             getImages: 'qq_get_message_images',
@@ -8702,6 +8733,25 @@ async function main() {
           sendJson({ ok: true, key, category, formatted: formatMemoryV2({ ...st, ...raw, rules: mergedRules }, key), raw });
           return;
         }
+        // ── 原文召回（qq_recall，2026-11-01）：只读查 events/ 原文库 ──────────────────
+        // 隐私：群聊只查本会话；只有主人私聊允许跨会话（可配置关）。返回带时间+说话人的出处。
+        if (req.method === 'GET' && url.pathname === '/api/socialV2/recall') {
+          const key = String(url.searchParams.get('key') ?? '').trim();
+          const query = String(url.searchParams.get('q') ?? url.searchParams.get('query') ?? '').trim();
+          const limitRaw = Number(url.searchParams.get('limit'));
+          if (!key) { sendJson({ ok: false, error: 'key 不能为空' }, 400); return; }
+          if (!query) { sendJson({ ok: false, error: 'q 不能为空' }, 400); return; }
+          if (req.headers['x-agent-token'] && !agentTokenOk(key, req.headers['x-agent-token'])) { sendJson({ ok: false, error: 'agent token 无效' }, 403); return; }
+          if (req.headers['x-agent-token'] && !v2SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
+          if (req.headers['x-agent-token'] && !v2ToolEnabled('memory')) { sendJson({ ok: false, error: '工具未启用：qq_recall' }, 403); return; }
+          const recallCfg = cfg.socialV2?.recall ?? {};
+          if (recallCfg.enabled === false) { sendJson({ ok: false, error: '原文召回未启用' }, 403); return; }
+          const limit = Math.min(10, Math.max(1, Number.isFinite(limitRaw) ? Math.trunc(limitRaw) : 3));
+          const crossConversation = String(key).startsWith('private:') && recallCfg.crossConversation !== false;
+          const hits = eventRecallForMemoryDir().search(query, { conversationKey: key, limit, crossConversation });
+          sendJson({ ok: true, key, query, hits, block: formatRecallHits(hits, { query }) });
+          return;
+        }
         if (req.method === 'POST' && url.pathname === '/api/socialV2/memory-remove') {
           const body = await readBody();
           const key = String(body.key ?? '').trim();
@@ -10418,6 +10468,9 @@ async function main() {
         lastActionAt: 0,
         agentToken: crypto.randomBytes(16).toString('hex'),
         bootstrapSent: false,
+        // 本次 DSH 会话内累计自然收尾次数（主人规则：收尾 5 次后换 session）；
+        // 换会话/退役时清零。跨重启保留，写在 social-v2.json。
+        sessionClosures: 0,
         wakeTimes: [],
         sendTimes: [],
         stickerCollectTimes: [],
@@ -10494,6 +10547,8 @@ async function main() {
             lastActionAt: Number(val.lastActionAt) || 0,
             agentToken,
             bootstrapSent: !!val.bootstrapSent,
+            // 本次会话内的自然收尾次数：旧状态文件没有该字段 → 0（从下一次收尾开始数）。
+            sessionClosures: Number(val.sessionClosures) || 0,
             wakeTimes: Array.isArray(val.wakeTimes) ? val.wakeTimes : [],
             sendTimes: Array.isArray(val.sendTimes) ? val.sendTimes : [],
             stickerCollectTimes: Array.isArray(val.stickerCollectTimes) ? val.stickerCollectTimes : [],
@@ -10620,6 +10675,7 @@ async function main() {
           lastActionAt: st.lastActionAt,
           agentToken: st.agentToken,
           bootstrapSent: st.bootstrapSent,
+          sessionClosures: st.sessionClosures || 0,
           wakeTimes: st.wakeTimes.slice(-200),
           sendTimes: st.sendTimes.slice(-500),
           stickerCollectTimes: Array.isArray(st.stickerCollectTimes) ? st.stickerCollectTimes.slice(-500) : [],
@@ -11256,6 +11312,69 @@ async function main() {
     return closurePromptBlock(assessment, { record: st?.closure ?? null, now: Date.now(), config, platform });
   }
 
+  /** 取消挂起的「收尾后轮换会话」（新消息重开 / 手动重置 / 下一次收尾都会取消）。 */
+  function clearSessionRotateTimer(key) {
+    const timer = sessionRotateTimers.get(key);
+    if (!timer) return;
+    clearTimeout(timer);
+    sessionRotateTimers.delete(key);
+  }
+
+  /**
+   * 自然收尾累计到设定次数后换 DSH 会话（2026-11-01 主人定的规则）。
+   *
+   * 规则：「自然收尾 5 次后换 session」——本次 DSH 会话内每成功收尾一次 `st.sessionClosures` +1，
+   * 累计 ≥ `socialV2.closure.rotateAfterClosures`（默认 5）时，在这一次收尾的回合结束后退役重建。
+   * 数的不是「对话轮数/对方发言条数」，而是**收尾次数**（一次收尾 = 一段完整对话的结束）。
+   *
+   * 为什么不在 closeConversationV2 里直接退役：收尾工具是在回合内调用的，当场 retire 会
+   * 停掉/归档正在跑的这个回合；这里等 5s，回合正常结束后再确认「没有新消息、没有排队工作」
+   * 才退役。会话退到下一段对话时由 ensureSession 懒创建，并走 bootstrap 冷启动。
+   *
+   * 为什么换会话而不是压缩：压缩是 DSH 侧行为，摘要按 coding agent 的英文格式生成、且成本高；
+   * 记忆卡/收尾记录/轻记忆/未读窗口都在 social-v2.json，换会话不丢长期记忆（见 docs/PITFALLS.md #87）。
+   *
+   * 放弃条件（都不算错，只是这次不换）：
+   *   - 收尾记录已被新的一次收尾覆盖，或对方又开口（reopenedAt 更新）；
+   *   - 会话已经被别的路径退役/重建（sessionId 变了）；
+   *   - 回合还没结束、或有排队中的 prompt/唤醒（最多重试 SESSION_ROTATE_MAX_ATTEMPTS 次）。
+   * 计数不清零：这次放弃后，下一次自然收尾会重新触发（次数已经 ≥ 阈值）。
+   */
+  function scheduleSessionRotationAfterCloseV2(key, st, config) {
+    const closureCount = Number(st?.sessionClosures) || 0;
+    if (!shouldRotateSessionAfterClosure(closureCount, config)) return;
+    const sessionId = state.sessions[key];
+    if (!sessionId) return;
+    const closedAt = Number(st?.closure?.at) || 0;
+    clearSessionRotateTimer(key);
+    let attempts = 0;
+    const tick = () => {
+      sessionRotateTimers.delete(key);
+      if (state.sessions[key] !== sessionId) return;
+      const latestState = getSocialV2State(key);
+      const latest = latestState.closure;
+      if (!latest || Number(latest.at) !== closedAt) return;
+      if (Number(latest.reopenedAt) > Number(latest.at)) return;
+      if (isConversationBusyV2(key, latestState)) {
+        attempts += 1;
+        if (attempts >= SESSION_ROTATE_MAX_ATTEMPTS) {
+          log(`[轮换] ${key} 收尾后等待 ${attempts} 次仍在忙，放弃本次换会话（下次自然收尾再试）`);
+          return;
+        }
+        const retry = setTimeout(tick, SESSION_ROTATE_DELAY_MS);
+        retry.unref?.();
+        sessionRotateTimers.set(key, retry);
+        return;
+      }
+      log(`[轮换] ${key} 已自然收尾 ${closureCount} 次 ≥ ${config.rotateAfterClosures}，换新会话（记忆卡/收尾记录保留，下一条消息 bootstrap）`);
+      appendActivity(`${key} [轮换] 自然收尾 ${closureCount} 次后换新会话`);
+      retireSession(key);
+    };
+    const timer = setTimeout(tick, SESSION_ROTATE_DELAY_MS);
+    timer.unref?.();
+    sessionRotateTimers.set(key, timer);
+  }
+
   /**
    * 自然收尾：不发消息，记下「收在哪 / 下次怎么接」，保持唤醒配置。
    * 与 qq_mark_read 的区别：mark_read 只是划走消息；close 留下结束点，
@@ -11310,6 +11429,9 @@ async function main() {
       config,
     });
     st.closure = record;
+    // 本次 DSH 会话内的自然收尾计数（主人规则：收尾 5 次后换 session）。
+    // 跨重启保留（saveSocialV2State 落盘）；换会话/退役时清零。
+    st.sessionClosures = (Number(st.sessionClosures) || 0) + 1;
     st.lastActionAt = Date.now();
     st.wakeConfig.noActionCount = 0;
     ensureWakeableV2(st, { key });
@@ -11319,8 +11441,10 @@ async function main() {
     cancelReplyCheckV2(key);
     saveSocialV2State();
     const summaryText = record.summary ? `：${record.summary}` : '';
-    log(`[收尾] ${key} 自然结束（${record.reason}）${summaryText}；冷却至 ${new Date(record.cooldownUntil).toLocaleString()}`);
-    appendActivity(`${key} [收尾] ${record.summary ? record.summary.slice(0, 60) : '对话自然结束'}`);
+    log(`[收尾] ${key} 自然结束（${record.reason}，本会话第 ${st.sessionClosures} 次）${summaryText}；冷却至 ${new Date(record.cooldownUntil).toLocaleString()}`);
+    appendActivity(`${key} [收尾] ${record.summary ? record.summary.slice(0, 60) : '对话自然结束'}（第 ${st.sessionClosures} 次）`);
+    // 自然收尾次数累计到阈值 → 回合结束后换新 DSH 会话（见函数注释）。
+    scheduleSessionRotationAfterCloseV2(key, st, config);
     return {
       ok: true,
       key,
@@ -11351,6 +11475,8 @@ async function main() {
     const isPrivate = String(key ?? '').startsWith('private:');
     const reopen = isPrivate || directAddress || quoteSelf || ['question', 'request', 'ending'].includes(cls.kind);
     if (!reopen) return false;
+    // 对方又开口了：取消挂起的「收尾后换会话」，否则会把进行中的新对话拆走。
+    clearSessionRotateTimer(key);
     st.closure = reopenClosure(st.closure, { reason: cls.kind, now: Date.now() });
     return true;
   }
@@ -13923,6 +14049,9 @@ async function main() {
       ? `【要收工前】决定不接、要设下一次唤醒之前，先调用 qq_wait_for_messages(timeoutMs=${preSleepMs}) 走过观察窗口，桥接才允许设置（防止一觉不醒）。等待期间他要是又说话了，先看再决定。\n\n`
       : `【沉睡前强制等待】这是决定**潜水**时的步骤，不是首回复的前置条件，也不是自然收尾（qq_close_conversation）的前置条件。除非对方明确说“不聊了/晚安/下了/拜拜”等结束语，否则每次设置潜水/下一次唤醒前，必须先调用 qq_wait_for_messages(timeoutMs=${preSleepMs}) 完成一次沉睡前观察；回复前 purpose="reply" 的短静默不能代替这次完整观察。若 ${Math.round(preSleepMs / 60000)} 分钟内没人说话，返回 preSleepWaitSatisfied=true，可以设置下一次唤醒并沉睡；若期间有人发新消息，先查看返回的 newMessages——判断不需要你参与就可以直接沉睡，若你选择参与回复，则下次想睡时需要重新等待观察窗口。如果返回里带 preSleepWaitRemainingMs，就按剩余时间继续等待。\n\n`;
     const lastMsg = [...(Array.isArray(st.recentMessages) ? st.recentMessages : [])].reverse().find((m) => m && !m.isSelf);
+    const recallHint = lastMsg && RECALL_HINT_RE.test(String(lastMsg.text || lastMsg.plain || ''))
+      ? '【回忆】这句可能在问过去的事；想不起来就用 qq_recall(query=关键词) 查原文库，别硬编。\n\n'
+      : '';
     const lastAiMin = st.lastAiReplyAt ? Math.max(0, Math.round((Date.now() - Number(st.lastAiReplyAt)) / 60000)) : null;
     const statusBits = [`未读 ${(st.unread || []).length} 条`];
     if (lastMsg) statusBits.push(`最近一条来自 ${String(lastMsg.sender || '未知')}：${String(lastMsg.text || lastMsg.plain || '').slice(0, 30)}`);
@@ -13990,7 +14119,7 @@ async function main() {
     // 跨会话记忆：私聊和群聊的轻记忆各自一份，这里补上别的会话的，避免「私聊说过的规矩群里不认」。
     const sharedMemoryText = formatSharedMemoryV2(key);
     const sharedMemoryLine = sharedMemoryText ? `${sharedMemoryText}\n\n` : '';
-    const base = roleLine + identityLine + provenanceLine + sceneLine + adminLine + biliLine + memoryCardLine + narrativeLine + convGuardLine + styleNotesLine + tokenLine + initialPromptLine + antiAiLine + proactiveLine + closureLine + stickerLine + stickerMatchLine + replyLine + statusLine + wakeLine + memoryLine + sharedMemoryLine + crossSceneLine + participationLine + fishGuardLine + tokenGuardLine + preSleepLine;
+    const base = roleLine + identityLine + provenanceLine + sceneLine + adminLine + biliLine + memoryCardLine + recallHint + narrativeLine + convGuardLine + styleNotesLine + tokenLine + initialPromptLine + antiAiLine + proactiveLine + closureLine + stickerLine + stickerMatchLine + replyLine + statusLine + wakeLine + memoryLine + sharedMemoryLine + crossSceneLine + participationLine + fishGuardLine + tokenGuardLine + preSleepLine;
     if (reason === 'bootstrap') {
       return `${base}【引导唤醒】你已接入 QQ 会话 ${key}。\n当前是二代仿真模式：你的文本输出不会自动发送到 QQ，所有发言必须通过工具完成。\n请先调用 qq_get_prompt 查看角色、推荐值、可用工具和状态；有待回应的消息先按首回复节奏处理，最后才用 qq_set_wake_config 设置你希望如何被唤醒。`;
     }
@@ -14814,6 +14943,8 @@ async function main() {
         private: kind === 'private',
         direct: direct || isOwner,
         quoteSelf: quoteTargetIsSelf,
+        messageId: String(event.message_id ?? event.msg_id ?? ''),
+        messageSeq: String(event.message_seq ?? ''),
         conversationKey,
         text,
       });

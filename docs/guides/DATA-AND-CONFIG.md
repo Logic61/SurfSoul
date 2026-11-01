@@ -133,7 +133,7 @@
 | 总开关 | `enabled`、`autoReplyCheckMs`、`agentPreset`（`qq-chat-v2`）、`provideRecommendations` | 二代是"一切皆工具"，文本不自动发送 |
 | `tools` | 32 个布尔开关 | **逐个工具的开关**：发消息/引用/分条/等待/表情/语音/记忆/黑话/收尾/跨场合投递…默认全开，`setStickerRemark` 与 `sendVoice` 默认**关** |
 | `wake` | `defaultMode`（diving）、`preSleepWaitEnabled`、`preSleepWaitMs`（300000）、`batchWindowMs`、`maxWakePerMinute/Hour`、`noActionLimit`、`recommended*` | 唤醒调度与"沉睡前观察"的强制窗口 |
-| `closure` | `enabled`、`cooldownMs`（20 分钟）、`requireNoOpenQuestion`、`promptInWake`、`maxSummaryChars`、`maxNextOpeningChars` | 对话收尾：冷却只压普通概率唤醒，@/提问/私聊不压 |
+| `closure` | `enabled`、`cooldownMs`（20 分钟）、`requireNoOpenQuestion`、`promptInWake`、`maxSummaryChars`、`maxNextOpeningChars`、`rotateAfterClosures`（5） | 对话收尾：冷却只压普通概率唤醒，@/提问/私聊不压；**自然收尾累计 5 次 → 换新 DSH 会话**（记忆卡/收尾记录保留，计数换会话后归零，0=关闭轮换） |
 | `send` | `burstMaxMessages`（8）、`maxSendPerMinute/Hour`、`maxMessageChars`（500）、`gap*` | 发送节流与硬上限（超长 400、超条数 429） |
 | `tokenGuard` | `maxWakesPerDay`（群 20 / 私聊 10）、`minWakeGapMs`（2 分钟）、`directBypassGap`、`maxOutboundPerTurn`、`maxDailyCostCNY` | 防爆破：@/引用/拍一拍可越过 2 分钟间隔，但每日次数仍生效 |
 | `review` | `enabled`（默认 `false`）、`threshold`（默认 80；本机 75）、`model`、`maxTokens`、`timeoutMs`、`sceneMaxChars`（420）、`memoryMaxChars`（620）、`styleMaxChars`（140）、`minChars`（8）、`skipAfterPassMs`（120000）、`maxReviews`/`maxRejects`、`failOpen`、`parseRetries`（1）、`rejectFallbackMs`（90000）、`memoryRefreshMs`（12h） | **发送前评审**（2026-11-01）：`/api/socialV2/send-message` / `send-burst` 真正发送前先让评审模型打分；低于阈值**不发**，把理由当工具错误返回给模型改写后再发（QQ 只出现最终版）。上下文=场合/状态+最近对话+**抽象记忆卡**（压缩结果缓存到 `state/review-context/memory-abstract.json`，源变了或超过 `memoryRefreshMs` 才重压）+ 说话习惯，预算合计约 1200 字。评审失败/超时/解析失败默认 `failOpen` 放行（解析失败按 `parseRetries` 重试）；`skipAfterPassMs` 内同会话后续发送跳过评审（省 token），`maxRejects` 次退回后放行（防死循环）。**退回兜底**：`rejectFallbackMs` 内没有重发成功就自动补发最后一版退回稿（默认 90s，0=关；兜底重过静默/鱼群/token 闸门）。调参/排障：`POST /api/socialV2/review-preview`（控制台令牌、只评审不发送）或 `node scripts/review-dryrun.mjs`。注意 prompt 会走 DeepSeek 文本接口（`webSearch` 的 key），context 不含容器路径等本机信息 |
@@ -209,7 +209,7 @@
 | `updates` | `enabled`、`checkOnStart`、`startDelayMs`（20s）、`intervalMs`（6h）、`components[]`、`pet.versionUrl`、`voice.localVersionUrl`、`voice.cloudVersionUrl` | **组件更新**（2026-10-26）：一个面板同时查 SurfCore 本体 / 两个语音包 / 桌宠 / 自定义组件。两条通道：**git**（`fetch` 只读 + `merge --ff-only`，本地有改动或未推送提交被拒）与 **release**（比 `version.json` 里的版本号，下 zip → sha256 校验 → 交给组件自己的安装器；桌宠走这条，更新时保留 `data/`，见 PITFALLS #77）。`components[]` 每项 `{id,name,dir,kind,branch,versionUrl}` 可把别的仓库纳入检查。状态落 `updates.json`（`dismissed[id]=remote commit 或版本号`，"不再提示本次"只对这一版生效） |
 
 记忆卡子键（`memoryCard.*`，完整语义见 [MEMORY_CARD.md](MEMORY_CARD.md)）：
-`enabled`、`maxChars`、`warnChars`（60000）、`injectMaxChars.qq/bili`（2200/2000）、`recentDays`（7）、
+`enabled`、`maxChars`、`warnChars`（60000）、`injectMaxChars.qq/bili/pet`（2200/2000/4200）、`recentDays`（7）、
 `fuzzyAfterDays`（7）、`forgetAfterDays`（60）、`dailyHour`（4）、`minOwnerImportance`（65）、
 `compactTo`、`maxRecords`（600）、`fullMaxBytes`、`fullMaxRecords` 等。
 
@@ -275,8 +275,9 @@
 | `bili.config.json` 🔒 | 插件/工具 | 插件/工具 | B站 配置 |
 | `memory/memory-card.json` 🔒 | **插件（唯一写者）** | 插件 | 衰减卡真相（记录、清晰度、重要度、scope） |
 | `memory/memory-card.md` | 插件 | 人 | 给人看的人话版 |
-| `memory/memory-card-prompt-{qq,bili}.md` | 插件 | 桥接 / 调度器 | **两份场景化注入块**（读取方不解析 JSON） |
+| `memory/memory-card-prompt-{qq,bili,pet}.md` | 插件 | 桥接 / 调度器 / 桌宠 | **三份场景化注入块**（读取方不解析 JSON；桌宠那份 2026-11-01 新增，顺序与预算另配） |
 | `memory/memory-inbox.jsonl` | 桥接/桌宠（只 append） | 插件 | 待摄取事件（`platform=qq/bili/pet`） |
+| `memory/events/<YYYY-MM>.jsonl` + `events/index/ids.txt` | 插件（只 append） | 桥接 `qq_recall`（只读） | 原文库 L0：inbox 增量落盘；id 幂等、索引可重建；不进提示词 |
 | `memory/memory-card-full.jsonl` + `-stats.json` + `.md` | 插件 | 人 | 全量卡：append-only 存档，**永不进提示词** |
 | `memory/qq-for-bili.md` / `bili-for-qq.md` | 插件 | 桥接/调度器 | 双向记忆的成品文本 |
 | `characters/<id>/` 🔒 | 插件 | 插件/桥接 | 角色包（见 §4.3） |

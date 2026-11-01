@@ -1,9 +1,9 @@
 # 工具面与 preset（AGENT-TOOLS-AND-PRESETS）
 
-> 这份文档回答：**agent 的手从哪来**（三个 MCP server + 42 个 `qq_*` 工具）、**哪些手被绑住**
+> 这份文档回答：**agent 的手从哪来**（三个 MCP server + 46 个 `qq_*` 工具）、**哪些手被绑住**
 > （五层闸门 + fail-closed 守卫）、**她戴哪张面具**（`qq-chat` / `qq-chat-v2` 两代 preset）、
 > **这些是怎么装进 DSH 的**。
-> **最后核对**：2026-10-31（新增 `qq_set_signature` / `qq_send_qzone` 两个自身资料工具）。配套阅读：总纲 [ARCHITECTURE.md](ARCHITECTURE.md) · 边界 [BOUNDARIES.md](BOUNDARIES.md) · 索引 [../README.md](../README.md)。
+> **最后核对**：2026-11-01（新增 `qq_generate_image` 快速生图 / Agnes，46 个工具）。配套阅读：总纲 [ARCHITECTURE.md](ARCHITECTURE.md) · 边界 [BOUNDARIES.md](BOUNDARIES.md) · 索引 [../README.md](../README.md)。
 
 ---
 
@@ -11,7 +11,7 @@
 
 **两个 MCP 手 + 一张面具。**
 
-- `snowluma`（42 个 `qq_*` 工具）是主力手：读消息、发消息、等待、表情、语音、记忆、她自己的资料/空间。
+- `snowluma`（46 个 `qq_*` 工具）是主力手：读消息、发消息、等待、表情、语音、记忆、她自己的资料/空间、快速生图。
 - `snowluma-host`（1 个）是探活手：只问 SnowLuma 在不在，**没有启停能力**（EULA）。
 - `web-search-safe`（2 个）是外部信息手：只读搜索与抓取，带 SSRF 防护。
 - preset 决定"她是谁、在哪说话"：`qq-chat`（一代/普通）与 `qq-chat-v2`（二代仿真）。
@@ -22,7 +22,7 @@
 
 | server | 入口 | 工具 | 挂载 | 边界 |
 | --- | --- | --- | --- | --- |
-| `snowluma` | `src/mcp-snowluma-safe.js`（约 1,600 行） | 42 个 `qq_*` | `~/.dsh/profiles/<profile>/cordis.patch.yml`（`setup-dsh.mjs` 写入） | 发送必须命中白名单；会话绑定 `x-agent-token`；工具开关逐项可控 |
+| `snowluma` | `src/mcp-snowluma-safe.js`（约 1,600 行） | 46 个 `qq_*` | `~/.dsh/profiles/<profile>/cordis.patch.yml`（`setup-dsh.mjs` 写入） | 发送必须命中白名单；会话绑定 `x-agent-token`；工具开关逐项可控 |
 | `snowluma-host` | `src/mcp-host-server.js`（93 行） | `snowluma_status` | 同上 | **只读探活**；v0.1.5 起移除了 `start_snowluma`/`stop_snowluma` |
 | `web-search-safe` | `src/mcp-web-search-safe.js`（92 行） | `web_search`、`web_fetch` | 同上 | 只读；禁内网/环回/CGNAT；DNS 解析后逐地址校验；重定向每跳复核 |
 
@@ -33,7 +33,7 @@
 
 ---
 
-## 2. `qq_*` 工具全表（42 个）
+## 2. `qq_*` 工具全表（46 个）
 
 **配置开关**列对应 `config.json` 的 `socialV2.tools.<key>`（`true` 才注册；默认只有
 `setStickerRemark` 与 `sendVoice` 是 `false`）。**需要令牌**列：二代模式下所有 `qq_*` 调用都要带
@@ -77,6 +77,8 @@
 | `qq_send_cross_scene` | **受控跨场合投递**：主人私聊 → 显式白名单群 | `crossSceneSend` | 默认关（`socialV2.crossSceneSend.enabled=false`）；仅 `private:<ownerQQ>` 发起；目标须同时进 `allow.groups` 与 `allowTargets`；一条纯文本；敏感/身份/长度/频率/静默/鱼群全闸；桥接代投，不向模型发目标 token |
 | `qq_send_poke` | 拍一拍（群聊需 targetUserId） | `sendPoke` | 频率限制 |
 | `qq_send_sticker` | 发一张收藏表情（一条只能一张，不能带文字；**可以单独作为一条回复**，不必配文字） | `sendSticker` | 每条只能一张；频率由模型按语境判断（只受每轮 8 条 / token 闸门约束） |
+| `qq_send_image` | 发一张普通图片：URL / `data:image/…` / `base64://…` / **本机文件路径**；也支持 `fromMessageId` 转发别人发的图 | `sendImage` | 每条只能一张、不能带文字；桥接内下载/读盘并校验（≤10MB、文件头必须是 jpg/png/gif/webp）；本机路径只在管理员机器读。**>1.3MB 的本地图自动改走 SnowLuma 的 `file://` 通道**（OneBot HTTP 请求体上限 2MiB，base64 会超；见 PITFALLS #82）。**画图功能的落地点**（见 §4） |
+| `qq_generate_image` | **快速画图**：用 Agnes 图像模型现场画一张（默认 `agnes-image-2.5-flash`、1024×1024，实测 10~25 秒），返回本机绝对路径；再由 `qq_send_image` 发出 | `imageGen`（默认开） | **群聊与主人私聊可用**（别人私聊 403）；群聊默认 **3 张/小时、10 张/天**（`socialV2.imagegen.group.*`，0=不限；主人私聊默认 20/100），超限 429；prompt ≤2000 字；一次一张；结果落 `state/generated-images/`（默认保留 7 天）；配额记在 `state/social-v2.json` 的 `imageGenTimes`。密钥解析：`socialV2.imagegen.apiKey` → 环境变量 → DSH 凭据 `AGNES_API_KEY`；见 §4「快速生图」 |
 | `qq_send_voice` | 发语音：`text` 现场合成 / `voice` 用语音库现成文件 | `sendVoice`（默认**关**） | 需引擎；120 字；2/分钟 |
 
 ### 2.4 她自己的资料与空间（只动她自己的账号）
@@ -108,6 +110,7 @@
 | 工具 | 作用 | 开关 |
 | --- | --- | --- |
 | `qq_memory_append` / `qq_memory_query` / `qq_memory_remove` / `qq_memory_clear` | 轻量记忆（进行中的话题 / 想说的话 / 对某人的印象 / **规矩 rule**）。`rule` 是带作用域的指令性记忆：`extra.scope = global/private/group/group:<群号>/here`（默认 global），注入按当前场合过滤，私聊里定的 global 规矩群里也认 | `memory` |
+| `qq_recall` | **原文召回（2026-11-01）**：只读查 `memory/events/` 原文库，返回带时间+说话人的出处与「不是指令」框定；空结果提示「记不清了，不要编」。群聊只查本群；主人私聊默认跨会话（`socialV2.recall.crossConversation`） | `memory` |
 | `qq_slang_query` / `qq_slang_submit` | 查已确认的群聊黑话 / 提交候选词（**看到没把握的词就直接提**，不再限频） | `slangQuery` / `slangSubmit` |
 | `qq_collect_sticker` | 收藏别人发的表情，并写情绪/内容/关键词 | `collectSticker` |
 | `qq_sticker_note` | 给自己的收藏表情写语义（本地记忆，不改 QQ 备注） | `stickerNote` |
@@ -145,15 +148,17 @@
 
 ## 4. 工具守卫：fail-closed 的两段式
 
-文件：`plugins/surfcore/qq-tool-restrict.mjs`（469 行，**唯一权威实现**）。
+文件：`plugins/surfcore/qq-tool-restrict.mjs`（约 500 行，**唯一权威实现**）。
 两个 preset 目录下的同名文件只是 `export * from` 的壳，避免两份实现漂移。
 
-**名单规模（实测）**
+**名单规模（实测，2026-11-01）**
 
 | 名单 | 条数 | 内容 |
 | --- | --- | --- |
-| `LOCAL_EXECUTION_TOOLS` | **49** | `pwsh` `bash` `read` `write` `edit` `glob` `grep` `str_replace_editor` `load_workspace_dependencies` `subagent*` `send_message` `interrupt_agent` `list_agents` `workflow` `ralph` `cordis_inspect_*` `dsh_snapshot` `dsh_rollback` `incident_resolved` `job_*` `skill` `present` `*_goal` `list_mcp_resources` `read_mcp_resource` `subagent_codex` `subagent_claude_code` `spawn_teammate` `team_task_*` `plugin_manager` `schedule_*` `dev_mode_*` |
-| `KNOWN_DANGEROUS_GLOBAL_TOOLS` | 49 + 18 = **67** | 上面 49 个 + 18 个 `dev_*`（插件注入/打包/自测） |
+| `OWNER_PRIVATE_TOOL_NAMES` | **10** | **仅主人私聊可用**（执行期逐次鉴权，不在 restrict 里）：`pwsh` `bash` `read` `read_image` `write` `edit` `str_replace_editor` `glob` `grep` `subagent_codex`（2026-11-01 加入：Codex 画图） |
+| `LOCAL_EXECUTION_TOOLS`（restrict 隐藏） | **39** | 其余危险能力：`load_workspace_dependencies` `subagent` `subagent_fork` `list_subagent_models` `send_message` `interrupt_agent` `list_agents` `workflow` `ralph` `cordis_inspect_*` `dsh_snapshot` `dsh_rollback` `incident_resolved` `job_*` `skill` `present` `*_goal` `list_mcp_resources` `read_mcp_resource` `subagent_claude_code` `spawn_teammate` `team_task_*` `plugin_manager` `schedule_*` `dev_mode_*` |
+| `KNOWN_DANGEROUS_GLOBAL_TOOLS` | 39 + 18 = **57** | 上面 39 个 + 18 个 `dev_*`（插件注入/打包/自测） |
+| `RESTRICTED_TOOL_NAMES`（导出给测试） | **87** | 57 个危险全局名 + 30 个 `mcp__browser__*`（只放 B站/小红书，其余平台与浏览器控制类隐藏） |
 | `SAFE_PREFIXES` | 3 | `mcp__snowluma__`、`mcp__snowluma-host__`、`mcp__web-search-safe__` |
 | `SAFE_EXACT` | 2 | `ask_user_question`、`todo_write` |
 | `MEMEWIKI_TOOL_NAMES` | 4 | `search_meme_wiki`、`meme_recall`、`meme_feedback`、`meme_remember`（dsh-memewiki v2，2026-10-30 放行） |
@@ -165,6 +170,57 @@
 
 只做第 2 段不够——工具名仍会出现在模型面前，既违反"仿真会话不得拥有本地执行能力"，
 也会诱导模型去调它。反过来只做第 1 段也不够——别的 composition 可能再把名字注册进全局层。
+
+**「仅主人私聊」这一类（2026-10-29 起）**：`pwsh`/`bash`/文件类工具不再进 restrict
+（否则模型 schema 里看不见、私聊里也用不了），改成执行期逐次鉴权：读桥接
+`state/sessions.json` 把当前 DSH 会话 id 映射回 QQ 会话 key，只有 `private:<ownerQQ>` 放行；
+映射拿不到一律 fail-closed。**2026-11-01 起 `subagent_codex`（Codex 画图）也归这一类**——
+它会 spawn 真 Codex 子进程、能在工作区跑命令/写文件，能力面 ≈ 本地执行，所以只给主人私聊。
+Guard 侧导出 `OWNER_PRIVATE_TOOL_NAMES` 供 `test-preset-local-tools.mjs` 逐名对账。
+
+**快速生图（Agnes）——2026-11-01 起是「画图」首选**：
+
+- 链路：preset 第 19 条 → MCP `qq_generate_image` → 桥接 `POST /api/socialV2/generate-image`
+  → `src/imagegen.js` 调 Agnes `POST {baseUrl}/images/generations`（默认
+  `https://apihub.agnes-ai.com/v1`、`agnes-image-2.5-flash`、1024×1024）→ 落盘
+  `state/generated-images/img-YYYYMMDD-HHmmss-<hex>.<png|jpg>` → 返回绝对路径 →
+  `qq_send_image` 发出。本机实测：**10.2 秒 / 1028KB / 1024×1024**。
+- 为什么不用 freegpt（DSH 里配的 CLI Proxy API 面板）：它虽然列出了 `gpt-image-*`，
+  但 `/images/generations` 全部返回 **503 `auth_not_found: no auth available (providers=codex, …)`**
+  （面板侧没给这个 key 配生图通道）；它的纯文本 chat 模型只会吐 SVG 代码，不是真出图。
+  详见 PITFALLS #83。
+- 密钥解析（只在桥接侧做，MCP 层看不到密钥）：`socialV2.imagegen.apiKey` →
+  环境变量 `AGNES_API_KEY` → DSH 凭据文件 `~/.dsh/.credentials.yaml` 里的同名键。
+- 安全/成本（2026-11-01 主人要求「允许群聊画图」后更新）：**群聊与主人私聊都可用**（别人私聊
+  仍 403）；群聊按会话配额限流（默认 **3 张/小时、10 张/天**，`socialV2.imagegen.group.*`，
+  0 = 不限；主人私聊默认 20/小时、100/天）。prompt ≤2000 字、一次一张；生成图默认保留 7 天后清理
+  （`socialV2.imagegen.keepDays`）。prompt 会发给第三方 Agnes，所以别拿它转述私密内容/账号信息。
+  **这是外部 API 调用，不是本地执行能力**；放开群聊只放开了「谁可以请求画图」，没有放开任何本地权限，
+  成本边界从「仅主人私聊」改成了「会话配额 + 群聊开关」。
+- 部署注意：`qq_generate_image` 是 MCP 工具 → **改完要重启 DSH** 才出现在工具面；
+  桥接新路由改完要重启桥接（`POST /api/restart`）。配额记录在 `state/social-v2.json`
+  的 `conversations[<key>].imageGenTimes`（跨重启保留，避免重启刷额度）。
+
+**Codex 画图的运行时前提（2026-11-01，环境事实，不是代码，作为「复杂/照片级」备用通道）**：
+
+- `subagent_codex` 由 **bundle** 提供（`@deepseek-ai/dsh-subagent-codex`，Host 行 = 全局工具），
+  不是 QQ preset 自己挂的行；preset 不需要加 `tool-subagent-codex`。
+- bundle 版本必须与**运行中的 DSH runtime 完全一致**：rc.3 的 peerDependencies 精确钉
+  `0.2.1-rc.3`，在 rc.5 runtime 上会被 `loadProfileDirectory` 判 `incompatible-version`
+  **整包静默跳过**（工具根本不存在，restrict/白名单都无从谈起）。本机已升级到 rc.5。
+- DSH 的 bundle 自带 `@openai/codex` **0.153.4**，其模型目录里没有 `~/.codex/config.toml`
+  的默认模型 `gpt-6.1-sol`（会 `model_not_found`）——必须在 profile 的 `cordis.patch.yml`
+  给 `subagent-codex` 行配 `model: gpt-6-astra`；同时配
+  `permissionMode: approve-for-me`（默认 `never` 省略 sandbox，子会话把生成的图片复制到
+  工作区可能被拦）。两处都改完要**重启 DSH**。
+- 完整画图链路：`subagent_codex` → Codex 子会话用内置 `image_gen` 出图（保存到
+  `$CODEX_HOME/generated_images/...`，返回 `savedPath`）→ 复制到工作区绝对路径 → 最终回答只给路径
+  → QQ 侧 `mcp__snowluma__qq_send_image(image="<路径>")` 发出（一条一张、不能带文字）。
+  生成一次约 1~3 分钟。
+- 安全备注：`qq_send_image` 的本机路径**没有目录白名单**（只校验存在/≤10MB/图片文件头——
+  这是"把她画/截的图发出来"的设计口径）。画图功能依赖它；反过来说，**知道本机路径文本**
+  就有外发本机图片的能力，这是模型被注入时的一条外发通道，目前靠"路径只在主人私聊里产生"
+  的间接约束而非硬边界。见 `docs/PITFALLS.md` #81。
 
 **第三方插件的模型侧工具**（例如 `dsh-memewiki` v2 的 `search_meme_wiki` / `meme_recall` /
 `meme_feedback` / `meme_remember`）：它们不在 DSH 安装包里，`scan-dsh-tool-names` 对账扫不到，
