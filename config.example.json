@@ -524,6 +524,7 @@
       "apiKeyRef": "DEEPSEEK_API_KEY",
       "timeoutMs": 60000,
       "minInterruptible": 0.55,
+      "ignoreBusy": false,
       "blockActivities": [
         "gaming",
         "video",

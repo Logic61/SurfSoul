@@ -46,6 +46,10 @@ export const DEFAULT_SCREEN_CONFIG = {
   timeoutMs: 60_000,
   // 模型给的 interruptible 低于这个值就不打扰。
   minInterruptible: 0.55,
+  // 「忙」这个判定实测误伤最狠：本机 45 次拦截里 43 次是 busy（视觉模型把学习/写代码也判成
+  // busy，而它给出的可打扰度其实还有 0.35）。打开后 busy 只当参考 —— 仍受 blockActivities /
+  // minInterruptible / privacy 三道闸约束。默认关，保持旧行为（单测按旧行为写）。
+  ignoreBusy: false,
   // 这些活动一律不打扰（学习/工作时仍可据 interruptible 判断）。
   blockActivities: ['gaming', 'video', 'meeting'],
   // 视觉失败时是否放行（默认放行 = 退回到原来的纯排程行为）。
@@ -89,6 +93,7 @@ export function normalizeScreenConfig(input = {}) {
     apiKeyRef: cleanString(src.apiKeyRef || DEFAULT_SCREEN_CONFIG.apiKeyRef, 80),
     timeoutMs: clampInt(src.timeoutMs, DEFAULT_SCREEN_CONFIG.timeoutMs, 10_000, 180_000),
     minInterruptible: clamp01(src.minInterruptible, DEFAULT_SCREEN_CONFIG.minInterruptible),
+    ignoreBusy: src.ignoreBusy === true,
     blockActivities: activities && activities.length
       ? activities
       : [...DEFAULT_SCREEN_CONFIG.blockActivities],
@@ -265,7 +270,7 @@ export function evaluateScreenGate(verdict, config = DEFAULT_SCREEN_CONFIG) {
     return { allow: false, reason: 'screen-unavailable', degraded: true };
   }
   if (verdict.privacy === 'sensitive') return { allow: false, reason: 'screen-private', degraded: false };
-  if (verdict.busy === true) return { allow: false, reason: 'screen-busy', degraded: false };
+  if (verdict.busy === true && cfg.ignoreBusy !== true) return { allow: false, reason: 'screen-busy', degraded: false };
   if (cfg.blockActivities.includes(verdict.activity)) return { allow: false, reason: `screen-${verdict.activity}`, degraded: false };
   if (verdict.interruptible < cfg.minInterruptible) return { allow: false, reason: 'screen-low', degraded: false };
   return { allow: true, reason: 'screen-ok', degraded: false };

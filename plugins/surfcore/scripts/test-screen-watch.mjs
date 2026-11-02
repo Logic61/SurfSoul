@@ -51,6 +51,9 @@ console.log('## 1. 配置归一（坏值回落默认，不抛）');
   ok(weird.minInterruptible <= 1, 'minInterruptible 被 clamp');
   ok(weird.blockActivities.length === 1 && weird.blockActivities[0] === 'gaming', '非法活动名被丢掉');
   ok(weird.model === DEFAULT_SCREEN_CONFIG.model, '空模型回落默认');
+  ok(def.ignoreBusy === false, '默认不忽略 busy（保持旧行为）');
+  ok(normalizeScreenConfig({ ignoreBusy: true }).ignoreBusy === true, 'ignoreBusy 可显式打开');
+  ok(normalizeScreenConfig({ ignoreBusy: 'yes' }).ignoreBusy === false, '非 true 的 ignoreBusy 视为关');
 }
 
 console.log('## 2. 视觉提示词只要求 JSON、不许复述隐私');
@@ -142,6 +145,13 @@ console.log('## 4. 门控（决定搭不搭话）');
   ok(evaluateScreenGate(v({ interruptible: 0.2 }), on).allow === false, '可打扰度低 → 不搭话');
   ok(evaluateScreenGate(v({ interruptible: 0.8 }), on).allow === true, '工作但可打扰度高 → 允许');
   ok(evaluateScreenGate(v({ activity: 'idle', busy: false, interruptible: 0.9 }), on).allow === true, '空闲 → 允许');
+
+  // ignoreBusy：busy 降级为参考，但 privacy / blockActivities / minInterruptible 三道闸仍生效。
+  const relaxed = normalizeScreenConfig({ enabled: true, ignoreBusy: true, minInterruptible: 0.3 });
+  ok(evaluateScreenGate(v({ busy: true, interruptible: 0.35 }), relaxed).allow === true, 'ignoreBusy 打开后 busy 不再硬拦（仍看阈值）');
+  ok(evaluateScreenGate(v({ busy: true, interruptible: 0.2 }), relaxed).allow === false, 'ignoreBusy 打开后低可打扰度仍然拦');
+  ok(evaluateScreenGate(v({ busy: true, activity: 'gaming', interruptible: 0.1 }), relaxed).allow === false, 'ignoreBusy 不影响 blockActivities');
+  ok(evaluateScreenGate(v({ busy: true, privacy: 'sensitive' }), relaxed).allow === false, 'ignoreBusy 不影响隐私闸');
 
   const unavailable = evaluateScreenGate({ ok: false, degraded: true, error: 'x' }, on);
   ok(unavailable.allow === true && unavailable.reason === 'screen-unavailable' && unavailable.degraded, '视觉失败默认 fail-open 放行');

@@ -3418,3 +3418,21 @@ return list[0] ?? pool[0];
   （DSH 启动时拉起 stdio MCP server 并缓存工具清单）。DSH 重启后插件会按当前端口自动重启桥接，不用再手动重启。
 - **回滚**：`socialV2.tools.setGroupBan=false`（立即不可用）；或桥接代码回退 + DSH 重启；数据侧只多了
   `ownerAt`/`adminActionTimes` 两个字段，旧代码会忽略。
+
+## #95（2026-11-02）看屏幕「一直不搭话」不是阈值太高：43/45 次拦截是 busy 硬闸；顺带 300+ 次/天截图只服务 ≤4 次决策
+
+- **现象**：主人打开「看屏幕再决定要不要搭话」，但两天里她一次次不开口；直觉是 `minInterruptible=0.55` 太高。
+- **根因（先数日志再改）**：`~/.dsh/surfcore/plugin.log` 里「看屏幕后暂不出发」45 条 —— `screen-busy` **43**、
+  `screen-video` 1、`screen-low` 1。`evaluateScreenGate()` 的判定顺序是 privacy → **busy（硬闸）** →
+  blockActivities → `interruptible < minInterruptible`；视觉模型把「学习/写代码」也判成 `busy:true`
+  （同一份 verdict 里 interruptible 还有 0.35），所以**只降阈值几乎不生效**。
+- **修法**：`screen-watch-core.js` 新增 `purpose.screen.ignoreBusy`（默认 false 保持旧行为）：为 true 时 busy 只当参考，
+  仍受 privacy / blockActivities / minInterruptible 三道闸约束。本机配置：`ignoreBusy:true`、
+  `minInterruptible:0.55→0.3`、`blockActivities` 去掉 `video`。设置页加「忽略『忙』判定」开关。
+- **⚠️ 生效条件**：这是插件**代码**改动，要重启 DSH 才进入运行中的插件进程（改配置不需要，但旧代码不认识 ignoreBusy）。
+- **顺带发现的浪费（未改，路线 A0）**：tick 每 60s 调一次 `screen.look()`，实测 ~312 次/天、单次 918 token（¥0.0017），
+  而 `look()` 的消费者只有 3 个：tick（只为把「2 分钟前的旧判定」保鲜）、真正要出发前的门控（≤4 次/天）、
+  聊天里问到屏幕。把 `purpose.screen.intervalMin` 从 1 调到 10，账单立刻 ¥0.54→≈¥0.15/天，门控不受影响（它会现截一张）。
+- **验证**：`node plugins/surfcore/scripts/test-screen-watch.mjs`；重启后对比
+  `[pet-purpose] 看屏幕后暂不出发` 条数与 `[pet-screen] 自动看一眼` 的可打扰度分布。
+- **回滚**：config 三项改回 + 代码三处回退 + 重启 DSH。

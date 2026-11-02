@@ -5,6 +5,45 @@
 
 ---
 
+## 快照（2026-11-02 21:0x，看屏幕「一直不搭话」：busy 硬闸 + 降阈值）
+
+### 用户原话
+
+> 「我本来那个screen就是想让她看见我在干什么，不过似乎阈值太高一直不搭话……没有你就帮我把阈值调低一些好了」
+
+### 先看日志再改（结论和直觉不一样）
+
+- `~/.dsh/surfcore/plugin.log` 里「看屏幕后暂不出发」共 **45 条**：`screen-busy` **43**、`screen-video` 1、`screen-low` 1。
+- 门控顺序是 privacy → **busy（硬闸）** → blockActivities → interruptible<minInterruptible；
+  视觉模型把「学习/写代码」也判成 `busy:true`（同一份 verdict 里 interruptible 还有 0.35），
+  所以**光调 `minInterruptible` 几乎不生效**。
+
+### 做了（代码 + 配置 + 测试 + 文档）
+
+- `plugins/surfcore/lib/screen-watch-core.js`：新增 `ignoreBusy`（默认 false，保持旧行为；true 时 busy 降级为参考，
+  仍受 privacy / blockActivities / minInterruptible 三道闸约束），`DEFAULT_SCREEN_CONFIG` / `normalizeScreenConfig` /
+  `evaluateScreenGate` 三处。
+- `config.json`（本机运行配置）：`ignoreBusy: true`、`minInterruptible: 0.55 → 0.3`、`blockActivities` 去掉 `video`
+  （看 B 站时允许她开口；`gaming`/`meeting` 仍拦）。
+- `config.example.json` 补 `ignoreBusy: false`；设置页「看屏幕」卡片加「忽略『忙』判定」开关。
+- `scripts/test-screen-watch.mjs` 补 7 条断言（默认关 / 显式开 / 非 true 视为关 / 放行 busy / 阈值仍拦 / 活动仍拦 / 隐私仍拦）。
+- ⚠️ **代码改动要重启 DSH 才生效**（插件在启动时装载；改配置本身不需要，但旧代码不认识 ignoreBusy）。
+
+### 验证
+
+- `node plugins/surfcore/scripts/test-screen-watch.mjs`（见本次执行结果）。
+- 重启 DSH 后：看 `[pet-purpose] 看屏幕后暂不出发` 是否明显减少、`[pet-screen] 自动看一眼` 的可打扰度分布是否
+  从 0.25~0.35 的一律被 busy 拦掉变成正常放行。
+
+### 未做 / 下一步（等用户确认）
+
+- tick 看屏幕仍每 ~2 分钟一次（实测 ~312 次/天、¥0.54/天）：`purpose.screen.intervalMin 1→10` 可降到 ≈¥0.15/天
+  （门控自己会现截一张，不影响判断）；详见 `state/agents/_research/see-now/00-evaluation.md`。
+- 若还觉得开口太少：`purpose.dailyMax` 4→6/8，或换「活跃」预设（gap 60–120 分钟、dailyMax 6）。
+- 回滚：`config.json` 把 `ignoreBusy:false`、`minInterruptible:0.55`、`blockActivities` 加回 `video`；代码回退三处 + 重启 DSH。
+
+---
+
 ## 快照（2026-11-02 19:4x，群管理动作：管理员群内禁言/解禁 + 群名片授权窗口）
 
 ### 用户原话
