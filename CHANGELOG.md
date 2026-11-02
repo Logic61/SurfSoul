@@ -4,6 +4,44 @@
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 发布规则见 [docs/guides/VERSIONS.md](docs/guides/VERSIONS.md)。
 
+## [未发布] - 2026-11-02（群管理动作：管理员群内禁言/解禁 + 群名片授权窗口）
+
+### 变更
+
+- **新增 `qq_set_group_ban`（禁言/解禁群成员）**：用户原话「允许 surfcore 的 qqbot 在群聊中接受管理员除了
+  访问电脑之外的所有工具，包括但不限于禁言群成员」。真实生效的群管理动作（不是玩笑）：`durationSeconds` 秒，
+  **0 = 解除禁言**，最长 30 天；目标必须是本群成员，不能是她自己 / 管理员本人 / 群主 / 其他群管理员。
+- **群内授权窗口（硬闸，不是提示词）**：只认管理员（ownerQQ）本人——不是「QQ 群管理员/群主」，群友/群主/
+  其他管理员都不算授权。桥接记录管理员**最近一次在群里说话**（`state/social-v2.json` 会话状态 `ownerAt`），
+  只有 `socialV2.adminActions.windowMs`（默认 **10 分钟**）内才允许执行群管理动作；过期失效，要求管理员再次开口。
+  每会话每小时 ≤ `maxPerHour`（默认 20）。为什么用时间窗：工具调用发生在 AI 回合里，无法可靠归因到某条消息；
+  时间窗只认真实 sender QQ，群友伪造不了（挡 prompt injection 的核心路径）。
+- **`qq_set_group_card` 的「改别人」分支同步放宽**：管理员私聊直接放行（旧行为），管理员在群里开口后的同一
+  授权窗口内也放行；群友要求仍然 403。
+- **可用性配套：群成员名单（只读）**：新增 `GET /api/socialV2/group-members`（带会话令牌；群聊限本群、
+  主人私聊可查白名单群；返回 QQ 号/昵称/群名片/**role**），`qq_get_group_members` 支持 `key`/`token` 走这条
+  v2 通道。原因：旧只读工具在 reserved2 不可用，管理员只喊昵称（如「禁言黄翊航」）时 AI 必须能按昵称/群名片
+  解析真实 QQ 号并避开群主/管理员，否则会点错人。
+- **工具面 / 配置**：`socialV2.tools.setGroupBan`（默认开）、`socialV2.adminActions.{windowMs,maxPerHour}`；
+  `config.json` / `config.example.json` 同步；桥接控制台「工具开关」新增 `qq_set_group_ban`；DSH 设置页
+  工具标签补 `setGroupCard` / `setGroupBan`。
+- **提示词**：`qq-chat-v2` 安全规则第 4 条（管理员群内可指挥群管理动作、判断标准只看【管理员】标记）+ 工具协议
+  第 20 条（禁言/解禁用法与边界）；唤醒提示在窗口有效时注入一小段【管理员在群里】（过期不注入，省 token）。
+  安全不变量「本地工具只在主人私聊」「群友没有管理权限」原样保留。
+- **电脑/本机工具不在此列**：pwsh/文件读写/浏览器控制/截屏/Codex 仍只在主人私聊可用（本次未改动）。
+
+### 测试/文档
+
+- 新增 `scripts/test-group-admin-tools.mjs`（**15/15**，真实 `src/bridge.js` + 夹具网关，不连真 QQ）：禁言
+  happy path 的 OneBot 参数、解禁、无/过期授权 403、私聊通道 403、目标校验（非成员/自己/管理员/群主/其他管理员）、
+  时长边界、工具开关、每小时上限、群名片群内放行与私聊回归、唤醒提示注入时机、群成员名单（含 role/越界拒绝）、
+  静态接线（MCP/端点/控制台/示例配置/预设）。已进 `npm run test:audit`。
+- 文档：`RULES.md`（权限分层 / 硬边界第 13 条 / 管理员操作手册途径 C）、`AGENT-TOOLS-AND-PRESETS.md`（47 个工具 +
+  §2.4.1 群管理动作）、`SECURITY_BASELINE.md`（授权窗口条目）、`DATA-AND-CONFIG.md`（`adminActions` / `setGroupBan`）、
+  PITFALLS **#94**、HANDOFF 同日快照。
+- ⚠️ **生效需要重启**：桥接代码重启桥接即生效；新 MCP 工具要**重启 DSH** 才会进入 QQ 会话工具面
+  （DSH 启动时拉起 stdio MCP server 并缓存清单）。DSH 重启后插件会按当前端口自动重启桥接。
+
 ## [未发布] - 2026-11-02（QQ 唤醒提示瘦身 + 不回复也要静置 5 分钟）
 
 ### 变更

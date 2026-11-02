@@ -2109,7 +2109,8 @@ button:active:not(:disabled) {
         <label class="v2-tool-item"><input type="checkbox" data-v2-tool="sendBurst"> <span><b>qq_send_burst</b><span class="meta">按数组分多条发送，桥接自动加真人化间隔</span></span></label>
         <label class="v2-tool-item"><input type="checkbox" data-v2-tool="sendMessage"> <span><b>qq_send_message</b><span class="meta">统一发送：一条/多条/引用/自定义或按字数计算间隔</span></span></label>
         <label class="v2-tool-item"><input type="checkbox" data-v2-tool="sendPoke"> <span><b>qq_send_poke</b><span class="meta">发送 QQ 拍一拍（群聊传 targetUserId，私聊可省）</span></span></label>
-        <label class="v2-tool-item"><input type="checkbox" data-v2-tool="setGroupCard"> <span><b>qq_set_group_card</b><span class="meta">改群名片（默认改自己；改别人需主人在私聊里要求）</span></span></label>
+        <label class="v2-tool-item"><input type="checkbox" data-v2-tool="setGroupCard"> <span><b>qq_set_group_card</b><span class="meta">改群名片（默认改自己；改别人需管理员本人要求，群里有授权窗口）</span></span></label>
+        <label class="v2-tool-item"><input type="checkbox" data-v2-tool="setGroupBan"> <span><b>qq_set_group_ban</b><span class="meta">群管理：禁言/解禁成员（仅管理员本人在群里明确要求后短时有效；0 秒=解禁）</span></span></label>
         <label class="v2-tool-item"><input type="checkbox" data-v2-tool="setSignature"> <span><b>qq_set_signature</b><span class="meta">改她自己的 QQ 个性签名（空=清除）</span></span></label>
         <label class="v2-tool-item"><input type="checkbox" data-v2-tool="sendQzone"> <span><b>qq_send_qzone</b><span class="meta">发 QQ 空间说说（她自己的动态，默认好友可见）</span></span></label>
         <label class="v2-tool-item"><input type="checkbox" data-v2-tool="waitMessages"> <span><b>qq_wait_for_messages</b><span class="meta">短暂等待新消息，有新消息立即返回或超时返回</span></span></label>

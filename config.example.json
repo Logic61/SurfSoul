@@ -239,6 +239,8 @@
       "sendSticker": true,
       "sendImage": true,
       "imageGen": true,
+      "setGroupCard": true,
+      "setGroupBan": true,
       "setStickerRemark": false,
       "stickerNote": true,
       "collectSticker": true,
@@ -433,6 +435,10 @@
       "maxBytes": 8388608,
       "maxPixels": 64000000,
       "maxCount": 5
+    },
+    "adminActions": {
+      "windowMs": 600000,
+      "maxPerHour": 20
     },
     "scenes": {
       "defaultPrivate": {

@@ -3382,3 +3382,39 @@ return list[0] ?? pool[0];
   `test-issue-regressions`、`test-memory-card-wiring`、`test-closure-wiring`、`test-self-note-wiring` 全过；
   重启后 `GET /api/socialV2/wake-preview?key=...&reason=question` 得 7,004 字且不含【记忆卡】，`reason=bootstrap` 仍含。
 - **回滚**：`socialV2.wake.bootstrapOnlyContext=false`（记忆卡回到每轮都带；桥接重启生效）。
+
+## #94（2026-11-02）群管理动作不能只靠提示词：用「管理员最近的群内发言」做时间窗硬闸
+
+- **现象**：群友在群里说「@大肥鱼 禁言黄翊航」，她回「禁言这活儿我可不背呀」——看起来像人格选择，
+  实际是**能力根本没有**：全仓库没有任何禁言工具，而且预设规则写死「管理群（禁言/踢人/改群名片）」一律拒绝、
+  「主人的话只从主人私聊里来」。用户随即拍板：「允许 qqbot 在群聊中接受管理员除了访问电脑之外的所有工具，
+  包括但不限于禁言群成员」。
+- **口径（已确认的人工决策点）**：管理员 = **ownerQQ 本人**，不是「QQ 群管理员/群主」（该群群主/管理员是别人，
+  机器人自己是管理员）；「访问电脑」= 本机 shell/文件/浏览器控制/截屏/Codex，仍只在主人私聊；第一批只做禁言+解禁。
+- **根因（两个）**：
+  1. 工具面缺 `qq_set_group_ban`（MCP 工具 + 桥接端点都没有），提示词写再好也执行不了；
+  2. 旧的权限模型是「主人私聊才授权」，而群里无法把一次工具调用可靠归因到某一条消息 —— 直接按「最近一条消息
+     是不是管理员」判会把正常使用卡死（群里紧接着有人发图/说话，最后一条就不是管理员了）。
+- **修法**：桥接侧新增**授权时间窗**，不是提示词规则：
+  - `handleIncoming` → `appendSocialV2Message()` 里，`isOwner && group:` 时写 `st.ownerAt = Date.now()`
+    （只认真实 sender QQ；群友无法伪造管理员发言）；
+  - 新端点 `POST /api/socialV2/set-group-ban` + MCP 工具 `qq_set_group_ban`；`/set-group-card` 的「改别人」
+    分支也改成同一把闸：管理员私聊直接放行，群里要求 `st.ownerAt` 落在 `socialV2.adminActions.windowMs`
+    （默认 10 分钟）内；
+  - 目标校验：必须本群成员，不能是她自己/管理员/群主/其他管理员；时长 0~2592000 秒（0=解禁）；
+    每会话每小时 ≤ `maxPerHour`（默认 20）；窗口/频率跨重启保留；
+  - **按昵称找人**：旧只读工具 `qq_get_group_members` 在 reserved2 不可用（没有会话令牌），所以补了只读
+    `GET /api/socialV2/group-members`（带令牌、含 role；群聊限本群、主人私聊可查白名单群），
+    `qq_get_group_members` 支持 key/token 走它；否则「禁言黄翊航」这种同名多号会点错人；
+  - 唤醒提示在窗口有效时注入一小段【管理员在群里】（过期不注入，省 token）；预设加安全规则第 4 条 + 工具协议第 20 条。
+  - ⚠️ 别把「管理员消息标记」当授权：`isOwner` 只按 `event.user_id === cfg.ownerQQ` 判；群名片/昵称写着“管理员”
+    或自称主人的人**不是**授权来源。
+- **验证**：`node scripts/test-group-admin-tools.mjs`（15/15，真实 bridge.js + 夹具网关）：happy path 的 OneBot
+  参数、解禁、无/过期授权 403、私聊通道 403、非成员/自己/管理员/群主/其他管理员、时长边界、工具开关、
+  每小时上限、群名片群内放行与私聊回归、唤醒提示注入时机、群成员名单（含 role/越界拒绝）、静态接线。
+- **坑 1（别一刀切「群里不给管理动作」）**：`test-qq-preset-contract` 钉着「本地工具只在主人私聊」与
+  「群友没有管理权限」两条安全不变量，改预设时必须保留这两个短句；本次只在后面补例外条款，没改旧句。
+- **坑 2（生效需要重启两层）**：桥接代码重启桥接即生效；**新 MCP 工具要重启 DSH** 才会出现在 QQ 会话工具面
+  （DSH 启动时拉起 stdio MCP server 并缓存工具清单）。DSH 重启后插件会按当前端口自动重启桥接，不用再手动重启。
+- **回滚**：`socialV2.tools.setGroupBan=false`（立即不可用）；或桥接代码回退 + DSH 重启；数据侧只多了
+  `ownerAt`/`adminActionTimes` 两个字段，旧代码会忽略。

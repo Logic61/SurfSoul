@@ -654,7 +654,7 @@ await pumpMux();      // DSH 事件流主循环（永不返回）
 | GET | `/api/socialV2/tool-log` | — `A!`（GET 也是） | 工具调用日志 | `src/bridge.js:7359` |
 | GET | `/api/socialV2/feedback` | — `A!` | 反馈列表 | `src/bridge.js:7372` |
 
-`/api/socialV2/prompt` 的 `toolMap`（31 项 flag→工具名）决定了模型看到哪些工具（`src/bridge.js:5459-5497`），`sticker` 全局开关会连带隐藏 6 个表情工具（`src/bridge.js:5493-5496`）。
+`/api/socialV2/prompt` 的 `toolMap`（34 项 flag→工具名；2026-11-02 补 `setGroupCard` / `setGroupBan`）决定了模型看到哪些工具（`src/bridge.js` 同段），`sticker` 全局开关会连带隐藏 6 个表情工具。
 
 ### 6.11 二代写接口（`A`）
 
@@ -669,6 +669,8 @@ await pumpMux();      // DSH 事件流主循环（永不返回）
 | POST | `/api/socialV2/send-burst` | `sendBurst` | **发 QQ**（多段） | `src/bridge.js:5923-6048` |
 | POST | `/api/socialV2/send-message` | `sendMessage` | **发 QQ**（单/多段，可引用/@） | `src/bridge.js:6050-6202` |
 | POST | `/api/socialV2/send-cross` | `crossSceneSend` | **受控跨场合投递**（主人私聊 → 显式白名单群；默认关；桥接代投，不向模型发目标 token） | `src/bridge.js` 同段（2026-10-31 路线 A） |
+| POST | `/api/socialV2/set-group-ban` | `setGroupBan` | **群管理：禁言/解禁**（仅 `group:` 会话；只认 ownerQQ 本人且要求他最近在群里说过话 —— `socialV2.adminActions.windowMs`；目标必须是本群成员、不能是她自己/管理员/群主/其他管理员；`durationSeconds=0` 解禁，最长 30 天；每小时上限 `maxPerHour`） | `src/bridge.js` 同段（2026-11-02 群管理动作） |
+| GET | `/api/socialV2/group-members` | —（只读，带会话令牌） | **群成员名单（reserved2）**：群成员 QQ 号/昵称/群名片/role；群聊只能查本群、主人私聊可查白名单群；给「禁言/改名片」按昵称解析 QQ 号用 | `src/bridge.js` 同段（2026-11-02 群管理动作） |
 | GET/POST | `/api/socialV2/style-notes` | —（控制台/管理端） | 说话习惯：POST 可选 `scope`（global/private/group/group:<id>）；GET `?key=` 返回按场合过滤后的注入块 | `src/bridge.js` 同段（2026-10-31 路线 A） |
 | POST | `/api/socialV2/send-poke` | `sendPoke` | **发 QQ**（拍一拍） | `src/bridge.js:6203-6310` |
 | POST | `/api/socialV2/send-voice` | `sendVoice` | **发 QQ**（语音） | `src/bridge.js:6654-6752` |

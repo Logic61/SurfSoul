@@ -5,6 +5,71 @@
 
 ---
 
+## 快照（2026-11-02 19:4x，群管理动作：管理员群内禁言/解禁 + 群名片授权窗口）
+
+### 用户原话
+
+> 「允许surfcore的qqbot在群聊中接受管理员除了访问电脑之外的所有工具，包括但不限于禁言群成员」
+
+### 先查再动：为什么她拒了「禁言」
+
+- 18:50 群里「黄翊航严父」（= ownerQQ 3237216875）@ 她「禁言黄翊航」，她回「禁言这活儿我可不背呀」。
+- 只读排查：**全仓库没有任何禁言工具**；预设规则第 2 条写死管理群动作（禁言/踢人/改群名片）一律拒绝、
+  「主人的话只从主人私聊里来」。同时用 OneBot `get_group_member_list` 确认 **甘棠自己在群里是管理员**
+  （role=admin），所以能力上做得到——缺的是工具 + 授权口径。
+- 按 ROADMAP §4「群管理动作 / 安全边界的放宽」属**人工决策点**，先问用户确认口径，不「先做了再说」。
+
+### 确认的口径（用户三问三答）
+
+1. 管理员 = **只认 ownerQQ 本人**（不是群主 / QQ 群管理员）；
+2. 除「访问电脑」外全部开放：本机 shell/文件/浏览器控制/截屏/Codex 仍只在主人私聊；
+3. 第一批只做**禁言 + 解禁**（踢人 / 全员禁言暂不做）。
+
+### 做到哪（代码 + 测试已落地，运行态待重启）
+
+| 项 | 内容 |
+| --- | --- |
+| 授权窗口 | `appendSocialV2Message()` 记 `st.ownerAt`（仅 isOwner + group 会话）；`groupAdminAuthority()` 读 `socialV2.adminActions.windowMs`（默认 10 分钟）+ `maxPerHour`（20）；`ownerAt`/`adminActionTimes` 进 get/load/save |
+| 新端点 | `POST /api/socialV2/set-group-ban`：仅 reserved2 + 会话 token + 工具开关 + 未暂停；仅 group 会话；白名单群；目标校验（本群成员 / 非自己 / 非管理员 / 非群主 / 非其他管理员）；时长 0~2592000 秒；OneBot `set_group_ban`；成功后计入每小时上限 |
+| 群名片 | `set-group-card` 改别人：主人私聊放行 **或** 群内授权窗口；成功后计入每小时上限 |
+| MCP | `qq_set_group_ban` + `TOOL_CONFIG_FLAGS.setGroupBan`；`qq_set_group_card` 描述同步更新 |
+| 成员名单 | 新增只读 `GET /api/socialV2/group-members`（带会话令牌；群聊限本群、主人私聊可查白名单群；返回 QQ 号/昵称/群名片/**role**）+ `qq_get_group_members` 支持 `key`/`token`（旧只读通道在 reserved2 仍不可用）。管理员按昵称点名时靠它解析真实 QQ 号、避开群主/管理员 |
+| 提示词 | 预设安全规则第 4 条 + 工具协议第 20 条；唤醒提示【管理员在群里】（仅窗口内）；`RULES.md` 硬边界第 13 条 |
+| 配置 | `socialV2.tools.setGroupBan=true`、`socialV2.adminActions.{windowMs:600000,maxPerHour:20}`（bridge defaults + config.json + config.example.json） |
+| 控制台 | 桥接控制台工具开关 `data-v2-tool="setGroupBan"`；DSH 设置页 TOOL_LABELS 补 `setGroupCard`/`setGroupBan` |
+| 测试 | 新增 `scripts/test-group-admin-tools.mjs`（**15/15**，真实 bridge.js + 夹具网关），已进 `test:audit` |
+
+### 验证
+
+- `node scripts/test-group-admin-tools.mjs` 15/15：禁言/解禁 happy path 的 OneBot 参数、无/过期授权 403、
+  私聊通道 403、目标校验、时长边界、工具开关、每小时上限、群名片群内放行与私聊回归、唤醒提示注入时机、
+  群成员名单（含 role / 越界拒绝）、静态接线（MCP/端点/控制台/示例配置/预设规则/安全不变量）。
+- `node scripts/test-mcp-servers-stdio.mjs`：snowluma **47 tools**（含 `qq_set_group_ban`）。
+- `node scripts/test-audit-regressions.mjs`：全部通过（16/16）。
+- `npm run test:audit`：**88/95**（新增本测试后共 95 个脚本）。失败集合 = 历史漂移 6 个
+  （`self-identity` / `identity-guard` / `media-search` / `voice-system` / `preset-local-tools` / `version`）
+  + 1 个**计时 flake**（`test-audit-regressions` R11「畸形 Markdown 不得卡住事件循环」实际 671ms，
+  单独跑通过；审计里并发跑时 CPU 抖动）。**无一处与本次改动相关**。
+- 另有相关回归全过：`test-admin-prompt-wiring`、`test-scene-wiring`、`test-memory-docs`、
+  `test-issue-regressions`、`test-closure-wiring`、`test-self-note-wiring`、`test-console-static`、
+  `plugins/surfcore/scripts/test-client-contract.mjs`。
+
+### 未验证 / 下一步（必须重启才生效）
+
+1. **重启 DSH**（桌面端）让新 MCP 工具进入 QQ 会话工具面；桥接会被插件自愈轮询自动重启：
+   `platforms.start.qq=true` 时，插件每次启动/每 2 分钟检查 `bridgeStaleReason()`——DSH 桌面端换端口后
+   桥接还连着旧端口 ⇒ 自动 `restartBridge()`（`plugins/surfcore/lib/index.js` 的 `maybeAutoStartBridge`）。
+   只重启桥接（不动 DSH）→ 桥接侧端点/授权窗口生效，但模型看不到 `qq_set_group_ban`（工具清单是 DSH 启动时缓存的）。
+   ⚠️ **已有 QQ 会话的 system prompt 是建会话时定格的**（旧预设仍写「管理群动作一律拒绝」）：重启 DSH 后
+   用主人号在群里/私聊各发一次 `/reset`（桥接硬执行，会重建会话），新预设与工具面一起生效；
+   不发也行，但旧会话里可能仍按旧规则拒绝，直到自然轮换（收尾 5 次 + 静置）。
+2. 真机验证：管理员在群里随便说一句（续窗口）→ 说「禁言 <某人> 10 分钟」→ 看 QQ 是否真的禁言、
+   `state/qq-activity.log` 是否出现「工具群管理：禁言 600 秒」、`state/social-v2.json` 的
+   `ownerAt` / `adminActionTimes` 是否更新；再让群友/群主说同样的话 → 应被拒（403）。
+3. 回滚：`socialV2.tools.setGroupBan=false`（立即不可用）；代码回退 + DSH 重启；新增状态字段旧代码会忽略。
+
+---
+
 ## 快照（2026-11-02 17:3x，唤醒提示瘦身 + 不回复也要静置 5 分钟）
 
 ### 用户原话

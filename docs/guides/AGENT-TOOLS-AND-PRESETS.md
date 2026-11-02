@@ -1,9 +1,9 @@
 # 工具面与 preset（AGENT-TOOLS-AND-PRESETS）
 
-> 这份文档回答：**agent 的手从哪来**（三个 MCP server + 46 个 `qq_*` 工具）、**哪些手被绑住**
+> 这份文档回答：**agent 的手从哪来**（三个 MCP server + 47 个 `qq_*` 工具）、**哪些手被绑住**
 > （五层闸门 + fail-closed 守卫）、**她戴哪张面具**（`qq-chat` / `qq-chat-v2` 两代 preset）、
 > **这些是怎么装进 DSH 的**。
-> **最后核对**：2026-11-01（新增 `qq_generate_image` 快速生图 / Agnes，46 个工具）。配套阅读：总纲 [ARCHITECTURE.md](ARCHITECTURE.md) · 边界 [BOUNDARIES.md](BOUNDARIES.md) · 索引 [../README.md](../README.md)。
+> **最后核对**：2026-11-02（新增 `qq_set_group_ban` 群管理动作 / 管理员群内授权窗口，47 个工具）。配套阅读：总纲 [ARCHITECTURE.md](ARCHITECTURE.md) · 边界 [BOUNDARIES.md](BOUNDARIES.md) · 索引 [../README.md](../README.md)。
 
 ---
 
@@ -11,7 +11,7 @@
 
 **两个 MCP 手 + 一张面具。**
 
-- `snowluma`（46 个 `qq_*` 工具）是主力手：读消息、发消息、等待、表情、语音、记忆、她自己的资料/空间、快速生图。
+- `snowluma`（47 个 `qq_*` 工具）是主力手：读消息、发消息、等待、表情、语音、记忆、她自己的资料/空间、快速生图、群管理动作。
 - `snowluma-host`（1 个）是探活手：只问 SnowLuma 在不在，**没有启停能力**（EULA）。
 - `web-search-safe`（2 个）是外部信息手：只读搜索与抓取，带 SSRF 防护。
 - preset 决定"她是谁、在哪说话"：`qq-chat`（一代/普通）与 `qq-chat-v2`（二代仿真）。
@@ -22,7 +22,7 @@
 
 | server | 入口 | 工具 | 挂载 | 边界 |
 | --- | --- | --- | --- | --- |
-| `snowluma` | `src/mcp-snowluma-safe.js`（约 1,600 行） | 46 个 `qq_*` | `~/.dsh/profiles/<profile>/cordis.patch.yml`（`setup-dsh.mjs` 写入） | 发送必须命中白名单；会话绑定 `x-agent-token`；工具开关逐项可控 |
+| `snowluma` | `src/mcp-snowluma-safe.js`（约 1,700 行） | 47 个 `qq_*` | `~/.dsh/profiles/<profile>/cordis.patch.yml`（`setup-dsh.mjs` 写入） | 发送必须命中白名单；会话绑定 `x-agent-token`；工具开关逐项可控 |
 | `snowluma-host` | `src/mcp-host-server.js`（93 行） | `snowluma_status` | 同上 | **只读探活**；v0.1.5 起移除了 `start_snowluma`/`stop_snowluma` |
 | `web-search-safe` | `src/mcp-web-search-safe.js`（92 行） | `web_search`、`web_fetch` | 同上 | 只读；禁内网/环回/CGNAT；DNS 解析后逐地址校验；重定向每跳复核 |
 
@@ -33,7 +33,7 @@
 
 ---
 
-## 2. `qq_*` 工具全表（46 个）
+## 2. `qq_*` 工具全表（47 个）
 
 **配置开关**列对应 `config.json` 的 `socialV2.tools.<key>`（`true` 才注册；默认只有
 `setStickerRemark` 与 `sendVoice` 是 `false`）。**需要令牌**列：二代模式下所有 `qq_*` 调用都要带
@@ -45,7 +45,7 @@
 | --- | --- | --- |
 | `qq_status` | 查机器人登录状态与账号信息 | —（常驻） |
 | `qq_list_groups` | 列出机器人所在的全部群 | — |
-| `qq_get_group_members` | 群成员列表（号/昵称/群名片） | — |
+| `qq_get_group_members` | 群成员列表（QQ 号 / 昵称 / 群名片 / **群身份 role**）。closed-agent 模式直接查；**reserved2 需带 `key`+`token`**（群聊限本群、主人私聊可查白名单群）——管理员按昵称点名禁言/改名片时用它解析真实 QQ 号，并看 role 避开群主/管理员（2026-11-02） | — |
 | `qq_get_group_history` | 群最近消息历史（可按 messageSeq 往前翻） | — |
 | `qq_get_active_members` | 最近活跃成员（判断话题参与者） | `getActiveMembers` |
 | `qq_get_self_image` | 看自己的 Q 版形象（DeepSeek 小鲸鱼） | `getSelfImage` |
@@ -92,6 +92,26 @@
 > 所以除 `SENSITIVE_RE` 外还过 `src/identity-guard.js` 身份闸——主人 QQ、群号等账号标识写上去就收不回来。
 > 行为边界见 [`RULES.md`](../../RULES.md) 硬边界第 5 条，踩坑记录见 `PITFALLS.md`
 > 「SnowLuma 动作目录是 SDK 构建期快照」。
+
+### 2.4.1 群管理动作（仅管理员本人授权后、仅群聊）
+
+> 2026-11-02 用户拍板：「允许 qqbot 在群聊中接受管理员除了访问电脑之外的所有工具，包括但不限于禁言群成员」。
+> 人工决策点：管理员 = **ownerQQ 本人**（不是 QQ 群管理员/群主）；电脑/本机工具仍只在主人私聊；第一批只做禁言+解禁。
+
+| 工具 | 作用 | 开关 | 硬约束 |
+| --- | --- | --- | --- |
+| `qq_set_group_ban` | **禁言 / 解除禁言**一个群成员（`durationSeconds` 秒；**0 = 解禁**） | `setGroupBan`（默认开） | 仅 `group:` 会话；只认管理员（ownerQQ）——要求他**最近在群里说过话**（`socialV2.adminActions.windowMs`，默认 10 分钟）；目标必须是本群成员，不能是她自己 / 管理员本人 / 群主 / 其他群管理员；时长 0~2592000 秒；每会话每小时 ≤ `maxPerHour`（默认 20）；只 reserved2 + 会话令牌 |
+| `qq_set_group_card` | 改群名片：默认改自己；**改别人**属于管理动作 | `setGroupCard`（默认开） | 改自己：群里/私聊都行；改别人：管理员私聊，或管理员在群里开口后的同一授权窗口；目标须为本群成员；≤60 字 |
+
+> **为什么用「时间窗」而不是「这条消息是不是管理员发的」**：工具调用发生在 AI 回合里，桥接无法可靠地把
+> 一次工具调用归因到某一条消息。时间窗只认真实 sender QQ（`isOwner` 由 `cfg.ownerQQ` 判定，群友无法伪造），
+> 所以它挡得住 prompt injection 的核心路径；窗口过期后必须等管理员再次开口。实现见
+> `src/bridge.js` 的 `groupAdminAuthority()`，测试见 `scripts/test-group-admin-tools.mjs`。
+> 唤醒提示在窗口有效时会多一小段【管理员在群里】（见 §5），窗口过期不注入。
+>
+> **目标解析**：管理员只说了昵称/群名片时，模型用 `qq_get_group_members(key, token)`（reserved2 的只读 v2
+> 通道，见 §2.1）拿到真实 QQ 号 + role；同名分不清就先问管理员。旧只读工具在 reserved2 下没有会话令牌，
+> 所以这条通道是 2026-11-02 专门为群管理动作补的（`GET /api/socialV2/group-members`）。
 
 ### 2.5 等待与状态机
 

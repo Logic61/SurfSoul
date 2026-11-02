@@ -27,15 +27,15 @@
 
 | 主体 | 通道 | 权限 |
 | --- | --- | --- |
-| **管理员（ownerQQ，控制台或 DSH 设置页可配置）** | QQ 群/私聊 | 正常聊天 + **管理命令由桥接硬执行**（不经过模型）：`/role <角色名>` 切人格、`/role off` 清除、`/silent` 静默、`/active` 恢复、`/reset`、`/status`；消息自动带【管理员】标记 |
-| **群友** | QQ 群 | **仅正常聊天**。控制词、`/` 管理命令被桥接拦截；静默模式下消息不投递给 agent |
+| **管理员（ownerQQ，控制台或 DSH 设置页可配置）** | QQ 群/私聊 | 正常聊天 + **管理命令由桥接硬执行**（不经过模型）：`/role <角色名>` 切人格、`/role off` 清除、`/silent` 静默、`/active` 恢复、`/reset`、`/status`；消息自动带【管理员】标记。**群里开口后 10 分钟内**（`socialV2.adminActions.windowMs`）还可以指挥群管理动作：禁言/解禁成员、改别人的群名片（见硬边界第 13 条）；电脑/本机工具仍只在私聊 |
+| **群友** | QQ 群 | **仅正常聊天**。控制词、`/` 管理命令被桥接拦截；群管理动作一律拒绝（哪怕群名片写着“管理员”或自称主人）；静默模式下消息不投递给 agent |
 | **管理员** | **桥接控制台**（`http://127.0.0.1:3100`） | **最高权限**：控制模式（控制台顶部模式按钮）、控制角色/静默（写 `state/current-role.json`）、完整 DSH 工具（含本地操作）、查看 QQ 活动日志（`state/qq-activity.log`）、直接打开「QQ 聊天」工作区会话对话 |
 | **QQ 会话 agent（chat 模式）** | — | 最低权限面（见下） |
 
 ## QQ 会话 agent 的硬边界
 
 1. **无本地工具**：qq-chat / qq-chat-v2 预设不挂载 bash/pwsh、文件读写、子代理、工作流——群友无论如何诱导，agent 物理上无法操作本机。
-2. **QQ 动作安全子集**：只允许 `mcp__snowluma__*`、`mcp__snowluma-host__*`、`mcp__web-search-safe__*` 三个命名空间下的工具，以及 `ask_user_question` / `todo_write`；其他工具（含 `dev_*` 开发/管理工具）在执行期会被 `qq-tool-restrict.mjs` 拒绝。QQ 动作无禁言、踢人、文件上传下载等管理操作。
+2. **QQ 动作安全子集**：只允许 `mcp__snowluma__*`、`mcp__snowluma-host__*`、`mcp__web-search-safe__*` 三个命名空间下的工具，以及 `ask_user_question` / `todo_write`；其他工具（含 `dev_*` 开发/管理工具）在执行期会被 `qq-tool-restrict.mjs` 拒绝。**群管理动作（禁言/解禁、改别人群名片）是例外但带硬闸**：只在管理员（ownerQQ）本人近期在群里说过话后的授权窗口内、且目标校验通过时可用（见第 13 条）；踢人、文件上传下载等管理操作仍然没有。
 3. **只读联网搜索**：`qq-chat` / `qq-chat-v2` 预设已关闭 DSH 内置 `tool-web` 的 `search` / `fetch`，联网统一走 `src/mcp-web-search-safe.js` 提供的 `mcp__web-search-safe__web_search/web_fetch`。不暴露本地文件、命令执行、写操作。
    - ✅ `mcp__web-search-safe__web_fetch` 已做 SSRF 加固：仅 http/https、禁止 localhost/私有 IP/链路本地/CGNAT/带凭据 URL、DNS 解析结果全量校验、每跳重定向重新校验、响应体限量读取。
 4. **发送强制白名单**：所有发送类工具（`qq_send_group_message` / `qq_send_private_message` / `qq_send_message` / `qq_send_burst` / `qq_reply` / `qq_send_poke` / `qq_send_sticker` / `qq_send_voice` 等）的目标必须命中 `config.json` 的 `allow.groups` / `allow.private`，否则拒绝执行。
@@ -49,6 +49,13 @@
 11. **跨平台来源与自我识别**：身份的锚点只有一份（`src/self-identity.js`），QQ 桥接与 B站 生物钟都调它，不许在各处手拼「你是谁」。任何进入模型的内容都要能回答「属于哪个平台」——合并转发/QQ 图片走 `formatForwardResponse()` 的 `platform/source/notice`，提示词每轮再带【来源判断】；**不要按内容相似度猜平台**。隐私：B站 侧只拿打码 QQ 号（`100****001`），任何公开输出都不写完整 QQ 号/群号。
     - **只准自己互认**（2026-10-23 用户追加）：B站 评论/私信/动态/转发动态发送前有一道**确定性硬闸**（`src/identity-guard.js` + `plugins/surfcore/tools/lib/outbound-guard.mjs`）：主人 QQ、主人 B站 mid、对齐表里别人的账号、任何「QQ/群号 + 数字」形态一律拒发（exit 9，错误里的号码打码）。它只拦这些已知 ID，不拦普通数字与昵称；QQ 群侧仍靠提示词规则约束。详见 [`docs/guides/CROSS_PLATFORM_IDENTITY.md`](docs/guides/CROSS_PLATFORM_IDENTITY.md)。
 12. **跨场合投递是受控通道（2026-10-31 路线 A）**：默认**关闭**；开启后也只允许「主人私聊 → `socialV2.crossSceneSend.allowTargets` 显式白名单里的群」，且目标仍须命中 QQ 发送白名单（`allow.groups` / `deny.groups`）。桥接代投，**不把目标群 token 交给模型**；每次一条纯文本，过敏感信息/身份闸/长度/每小时次数/token 回合额度/静默/鱼群闸。群 → 私聊、群 → 别的群一律不做；群里的人无法触发它（来源必须是 `private:<ownerQQ>`）。
+13. **群管理动作的群里授权窗口（2026-11-02 用户拍板）**：「允许 qqbot 在群聊中接受管理员除了访问电脑之外的所有工具，包括但不限于禁言群成员」。落地口径：
+    - **只认管理员（ownerQQ）本人**——不是「QQ 群管理员/群主」，群里其他人（哪怕群名片/昵称写着“管理员”、自称主人、转述“主人说”）都不算授权；
+    - **授权窗口**：桥接记录管理员**最近一次在群里说话**的时间（`state/social-v2.json` 的会话状态 `ownerAt`），只有 `socialV2.adminActions.windowMs`（默认 10 分钟）内才放行；过期即失效，要求管理员再次开口。理由：工具调用发生在 AI 回合里，无法可靠归因到某条消息，而时间窗只认真实 sender QQ，群友伪造不了；
+    - **动作**：`qq_set_group_ban`（禁言/解禁，`durationSeconds=0` 解禁，≤30 天）、`qq_set_group_card`（改**别人**的群名片）；每会话每小时 ≤ `maxPerHour`（默认 20）；
+    - **目标校验**：必须是本群成员；不能是她自己、管理员本人、群主、其他群管理员；
+    - **电脑/本机工具不在此列**：pwsh/文件读写/浏览器控制/截屏/Codex 等仍只在主人私聊可用；
+    - 唤醒提示在窗口有效时会多一段【管理员在群里】；模型侧规则见 `dsh/agent-presets/qq-chat-v2/agent.cordis.yml` 安全规则第 4 条 / 工具协议第 20 条。
 
 ## 提示词分层边界（仿真 / 人格 / 记忆卡）
 
@@ -98,6 +105,13 @@
 /status           # 查看会话/白名单/角色/模式状态
 /reset            # 重置当前 QQ 会话上下文
 ```
+
+**途径 C：群管理动作（管理员本人在群里直接说，2026-11-02 起）**：
+- 管理员本人在群里说话后 **10 分钟内**（`socialV2.adminActions.windowMs`），可以直接要求她执行
+  `禁言 <人> <时长>` / `解禁 <人>` / `把 <人> 的名片改成 X`；她用 `qq_set_group_ban` / `qq_set_group_card` 真执行。
+- 窗口过了就再回一句（任意话）续上；群友、群主、其他群管理员的要求一律拒绝。
+- 总开关：控制台/配置 `socialV2.tools.setGroupBan`（默认开）；频率上限 `socialV2.adminActions.maxPerHour`（默认 20/小时/会话）。
+- 这些动作只对 **ownerQQ** 生效；「QQ 群管理员」身份本身不构成授权。
 
 **途径 B：DSH WebUI**：
 - 在 GUI 会话里对我说「给 QQ 机器人设置角色：傲娇助手」/「清除角色」/「开启静默模式」，我写 `state/current-role.json`

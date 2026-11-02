@@ -186,6 +186,10 @@ const tests = [
   'test-version.mjs',
   // B站分享去重：新鲜池空时不得回退旧素材（2026-10-26 修复的"同一条反复发"）。
   'test-bili-share-dedup.mjs',
+  // 群管理动作（2026-11-02 用户要求）：管理员（ownerQQ）在群里也能指挥禁言/解禁与改别人
+  // 群名片。桥接用「管理员最近在群里发言」的时间窗硬鉴权（只认真实 sender QQ，群友/
+  // 群主/其他管理员都不算）；本机工具仍只在主人私聊。真实 bridge.js + 夹具网关。
+  'test-group-admin-tools.mjs',
 ];
 let failed = 0;
 for (const test of tests) {

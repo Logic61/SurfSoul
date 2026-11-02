@@ -131,7 +131,7 @@
 | 子段 | 关键键 | 作用 |
 | --- | --- | --- |
 | 总开关 | `enabled`、`autoReplyCheckMs`、`agentPreset`（`qq-chat-v2`）、`provideRecommendations` | 二代是"一切皆工具"，文本不自动发送 |
-| `tools` | 32 个布尔开关 | **逐个工具的开关**：发消息/引用/分条/等待/表情/语音/记忆/黑话/收尾/跨场合投递…默认全开，`setStickerRemark` 与 `sendVoice` 默认**关** |
+| `tools` | 33 个布尔开关 | **逐个工具的开关**：发消息/引用/分条/等待/表情/语音/记忆/黑话/收尾/跨场合投递/群管理…默认全开，`setStickerRemark` 与 `sendVoice` 默认**关**。群管理开关是 `setGroupBan`（默认开，对应 `qq_set_group_ban`；群名片是 `setGroupCard`） |
 | `wake` | `defaultMode`（diving）、`preSleepWaitEnabled`、`preSleepWaitMs`（300000）、`batchWindowMs`、`maxWakePerMinute/Hour`、`noActionLimit`、`recommended*`、`bootstrapOnlyContext`（true） | 唤醒调度与"沉睡前观察"的强制窗口。`bootstrapOnlyContext=true`（2026-11-02）：记忆卡（实测 5.9k 字/次）与叙事层等最大静态块**只在每段新会话首次唤醒（bootstrap）注入一次**，同一会话后续唤醒不再重发（唤醒提示 12.7k → ~6.8k 字）；身份/管理员规则/B站简报/文档记忆/私聊边界/style-notes 等小块仍每轮在。设 `false` 恢复旧行为（记忆卡每轮都带）。另：唤醒提示里新增「不回复也要静置」硬规则——决定不发言/收尾时先用 `qq_wait_for_messages(timeoutMs=300000)` 静置满 5 分钟再结束回合，期间有人说话就继续接（避免下一句变成一次新唤醒、重发一遍提示词） |
 | `closure` | `enabled`、`cooldownMs`（20 分钟）、`requireNoOpenQuestion`、`promptInWake`、`maxSummaryChars`、`maxNextOpeningChars`、`rotateAfterClosures`（5）、`rotateIdleMs`（300000） | 对话收尾：冷却只压普通概率唤醒，@/提问/私聊不压；**自然收尾累计 5 次、且收尾后静置 `rotateIdleMs`（默认 5 分钟）无新消息 → 才换新 DSH 会话**（期间又开口就继续用原会话；记忆卡/收尾记录保留，计数换会话后归零；0=关闭轮换 / 0=不等静置） |
 | `send` | `burstMaxMessages`（8）、`maxSendPerMinute/Hour`、`maxMessageChars`（500）、`gap*` | 发送节流与硬上限（超长 400、超条数 429） |
@@ -146,6 +146,7 @@
 | `history` | `enabled`、`limit`、`maxAgeMinutes`、`wake`、`includePrivate` | 上线补历史 |
 | `initialPromptMaxChars` | `2000` | 每会话首次唤醒的"环境说明"上限 |
 | `media` | `maxBytes`（8MB）、`maxPixels`（64MP）、`maxCount`（5） | 图片/表情/动图限制 |
+| `adminActions` | `windowMs`（默认 `600000`=10 分钟，1 分钟~24 小时）、`maxPerHour`（默认 20，1~200） | **群管理动作的群内授权窗口**（2026-11-02 用户拍板）：管理员（ownerQQ）**最近一次在群里说话**后的 `windowMs` 内，才允许她执行禁言/解禁、改别人群名片；过期即失效。`maxPerHour` 是每会话每小时的动作上限（跨重启保留）。这是桥接侧硬闸，不是提示词约束；见 `RULES.md` 硬边界第 13 条 |
 | `scenes` | `defaultPrivate.label/toneHint`、`defaultGroup.label/toneHint/memoryGuard`、`overrides.<key>` | **场合档位**（2026-10-31）：唤醒提示词顶部注入【场合】卡；`toneHint` 是该场合的语气提示，`memoryGuard`（默认群聊开）决定是否注入「私聊的事别搬到群里」守卫 |
 | `memoryScene` | `groupExcludePrivate`（默认 `false`）、`honorAudience`（默认 `true`） | 记忆卡注入的场合过滤：`honorAudience` 认记录级 `audience` 标记；`groupExcludePrivate=true` 时群聊连 `[私聊]` 记录也过滤（硬开关，默认关=记忆共同） |
 | `recall` / `docMemory` / `selfNotes` | `recall.{enabled,crossConversation,maxHits}`；`docMemory.{enabled,maxChars.qq\|group,docs}`（默认 1100/900；`docs=null` 用内置四本：薄版 560 注入、厚本 240 仅检索、公开日记 200、私密日记 240）；`selfNotes.{enabled,maxNotes,maxChars}` | 记忆扩展（2026-11-01/02），都不占记忆卡 6000 字预算：原文库按需召回（`qq_recall`；群聊只查本群、主人私聊可跨会话；厚本语感本可检索但不注入）；活文档记忆（薄版每轮注入 + 两本日记；文件一改下轮生效；`GET /api/socialV2/wake-preview` 可看 AI 真正收到的提示词）；selfNote 自我认知层（按角色共享，只在换新会话第一轮注入一次；桥接控制台「自我记录」可增删） |
