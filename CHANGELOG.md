@@ -16,14 +16,18 @@
 - **预算**：`socialV2.docMemory.maxChars` 默认 QQ **1100** / 群聊 **900**（旧 900/500 装不下薄版+日记）；
   注入块标题不再带文档路径（省 60~90 字/轮）；`docs=null` 内置 4 本；`kind` 新增 `style-recent`，
   `style` 支持编号列表（薄版用 `1. 2.`）。
+  ⚠️ 同时修掉一个**静默预算 bug**：`loadConfig()` 里还留着一份旧默认值 `900/500`，会把 prompt 处的
+  `|| 1100` 兜底顶掉——导致「私密日记整本被裁掉、连标题都没有」，且不报错。两处默认值必须一起改（PITFALLS **#92**）。
 - **新接口 `GET /api/socialV2/wake-preview?key=&reason=`**（只读、控制台令牌）：直接跑 `buildWakePromptV2`，
   返回 AI 真正会看到的提示词（会话令牌抹 `***`）。排障「文档记忆/记忆卡/selfNote 到底进没进提示词」用它。
 - **桥接控制台（3100）补 selfNote**：「轻量记忆」下新增「自我记录（selfNote）」——列表 / 添加一句 /
   单条删除 / 清空；角色级接口 `GET|POST /api/socialV2/self-notes`、`POST …/remove`、`POST …/clear`（不要会话 key）。
 - **B站 调度器提示同步**：厚本只增、薄版是 QQ 每轮看的；厚本攒出新规律要更新薄版（否则 QQ 永远看不到新东西）。
-- **测试**：`test-memory-docs` 扩到 10 组（含真实 `bridge.js` 的 wake-preview「文件一改下轮跟随」+ 群聊隐私）；
-  `test-self-note-wiring` 扩到 5 组（含控制台接口）。`npm run test:audit` **88/94**（仍是历史 6 红，无新增红）。
-- **运行态**：桥接已用新代码重启并验证——`wake-preview` 里带上了薄版全文、无厚本、无令牌泄露；
+- **测试**：`test-memory-docs` 扩到 10 组（含真实 `bridge.js` 的 wake-preview「文件一改下轮跟随」+ 群聊隐私 +
+  默认预算回归：薄版写大时私密日记仍必须出现）；`test-self-note-wiring` 扩到 5 组（含控制台接口）。
+  `npm run test:audit` **88/94**（仍是历史 6 红，无新增红）。
+- **运行态**：桥接已用新代码重启两次并验证（16:05 那次含预算修复）——`wake-preview` 私聊块 931 字，含
+  **薄版 + 公开日记 + 私密日记**（私密日记内容真实出现）、无厚本、无令牌泄露；群聊块 763 字只含薄版+公开日记；
   `self-notes` 接口 200；`qq_recall("金句 梗")` 命中厚本「十七、金句和梗（2026-11-02 傍晚）」；DSH 已就绪、SnowLuma 已连接。
   重启踩坑（过期 DSH 端口）记入 PITFALLS **#91**。
 

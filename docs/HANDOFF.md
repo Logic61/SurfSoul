@@ -25,23 +25,26 @@
 | --- | --- |
 | 薄版注入 | 新增 doc `yugan-thin`（`style`，560 字）：QQ 每轮注入的是薄版（实测 532 字摘要，覆盖「开口前」13 条 + 关系里前 3 条） |
 | 厚本改尾部 | `yugan` 改 `style-recent`（从文件末尾取最近几节）+ `inject: []` 不常驻注入；细节走 `qq_recall`（检索可见性按 scope 判，不看 inject） |
-| 预算 | `docMemory.maxChars.qq 900→1100`、`.group 500→900`；标题去掉路径（省 60~90 字/轮）；`style` 支持编号列表 |
+| 预算 | `docMemory.maxChars.qq 900→1100`、`.group 500→900`；标题去掉路径（省 60~90 字/轮）；`style` 支持编号列表。⚠️ 还修了 `loadConfig()` 里漏改的旧默认 900/500——它会把 `|| 1100` 顶掉，导致私密日记被静默裁掉（PITFALLS **#92**） |
 | B站 调度器 | 提示改成「厚本只增、薄版是 QQ 每轮看的那本，攒出新规律要更新薄版」 |
 | 控制台 selfNote | 桥接控制台「轻量记忆」下新增「自我记录」：列表/添加/单条删除/清空；角色级接口 `GET|POST /api/socialV2/self-notes`、`/remove`、`/clear` |
 | 新接口 | `GET /api/socialV2/wake-preview?key=&reason=`（只读）：跑 `buildWakePromptV2` 返回 AI 真正会看到的提示词（令牌抹 `***`） |
-| 测试 | `test-memory-docs` **10/10**（含真实 bridge 的「文件一改下轮唤醒跟随」+ 群聊隐私）；`test-self-note-wiring` **5/5**（含控制台接口）；`test:audit` **88/94**（历史 6 红，无新增） |
+| 测试 | `test-memory-docs` **10/10**（含真实 bridge 的「文件一改下轮唤醒跟随」+ 群聊隐私 + **默认预算回归**：薄版写大时私密日记必须出现）；`test-self-note-wiring` **5/5**（含控制台接口）；`test:audit` **88/94**（历史 6 红，无新增） |
 
 ### 运行态（已重启，已验证）
 
-- 桥接 15:52:57 以新代码启动（PID 54912）：`DSH 已就绪（模式: reserved2）`、`SnowLuma 已连接`、
-  `机器人昵称: 甘棠`；控制台 3100 的 selfNote 区块已可访问。
-- `wake-preview`（私聊 `private:<ownerQQ>`）：**11,883 字**，含【文档记忆】；样本是薄版「开口前」13 条；
-  **不含**厚本、**不含**控制台令牌。
+- 桥接 16:05:04 以修完预算的代码启动：`DSH 已就绪（模式: reserved2）`、`SnowLuma 已连接`、`机器人昵称: 甘棠`；
+  控制台 3100 的 selfNote 区块已可访问。
+- `wake-preview`（私聊 `private:<ownerQQ>`，16:0x）：提示词 **11,998 字**，【文档记忆】块 **931 字**，含
+  **薄版 + 公开日记 + 私密日记**（私密日记内容真实出现），**不含**厚本、**不含**控制台令牌（替换成 `***`）。
+- `wake-preview`（群聊 `group:1021716885`）：文档块 763 字，只含薄版 + 公开日记，**没有**私密日记。
 - `self-notes` 接口 200（当前 0 条——她还没写过）；`qq_recall("金句 梗")` 命中厚本
   「十七、金句和梗（2026-11-02 傍晚）」→ 厚本改动可检索。
-- ⚠️ 重启踩坑：第一次手动 spawn 把 config 里过期的 `dsh.baseUrl`(63321) 当 `DSH_WEB_URL` 传了，
-  DSH 实际在 61144 → 日志刷「DSH 不可用，消息入队」。修法：先 `node scripts/sync-dsh-port.mjs`，
-  再**不带** `DSH_WEB_URL` 重启。详见 PITFALLS **#91**。
+- ⚠️ 两次重启踩坑：
+  1. 第一次手动 spawn 把 config 里过期的 `dsh.baseUrl`(63321) 当 `DSH_WEB_URL` 传了，DSH 实际在 61144 →
+     日志刷「DSH 不可用，消息入队」。修法：先 `node scripts/sync-dsh-port.mjs`，再**不带** `DSH_WEB_URL` 重启（PITFALLS #91）。
+  2. 改预算后重启，私密日记仍不出现——根因是 `loadConfig()` 里还有一份旧默认 900/500 顶掉了 prompt 的 `|| 1100`
+     （PITFALLS #92）。改成 1100/900 再重启，验证通过。
 
 ### 没验证 / 下一步
 

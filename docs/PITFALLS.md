@@ -3335,3 +3335,20 @@ return list[0] ?? pool[0];
 - **验证**：`node state/agents/_research/memory-arch/fix-dsh-url-and-restart.mjs`（本机留档）跑完打印
   `DSH 已就绪（模式: reserved2）` + `wake-preview` 200；或重启后手动 `curl /api/status` 再读日志。
 - **回滚**：不需要——端口同步是幂等的；`config.json` 的 `dsh.baseUrl` 本来就是派生值。
+
+## #92（2026-11-02）改「默认配置」时漏了 `loadConfig()` 里那份 defaults：`|| 1100` 永远不生效
+
+- **现象**：文档记忆明明把 `socialV2.docMemory.maxChars.qq` 从 900 改成 1100（prompt 代码里的兜底、
+  `config.example.json` 都改了），重启后 `wake-preview` 里却还是**只有薄版 + 公开日记，私密日记整本消失**；
+  预算表现和「900」完全一致（block 763 字，私密日记连标题都没有）。
+- **根因**：`src/bridge.js` 的 `loadConfig()` 有一份 `socialV2` 默认值（`docMemory: { maxChars: { qq: 900, group: 500 } }`）。
+  它先被 merge 进 `cfg`，于是 `cfg.socialV2.docMemory.maxChars.qq` **永远是 900**——prompt 代码里
+  `(Number(...) || 1100)` 的 `||` 兜底只对 `undefined/0` 生效，配置里已有 900 时根本走不到。
+  表现就是「代码改了、配置示例改了、跑起来还是旧值」，而且不报错（预算类 bug 天生静默）。
+- **修法**：改默认值必须**两处一起改**：`loadConfig()` 的 defaults + prompt 处的 `||` 兜底
+  （+ `config.example.json`）。本次改 `loadConfig().docMemory.maxChars = { qq: 1100, group: 900 }`。
+- **怎么快速发现**：用 `GET /api/socialV2/wake-preview` 看**真实注入块**，不要只看「文件有没有被读」——
+  读到了但被预算裁掉，照样等于没跟上（文档记忆、记忆卡、selfNote 都有这个特性）。
+- **回归测试**：`test-memory-docs` 的真实 bridge 用例故意把薄版写大（约 420 字摘要），并断言私密日记的
+  「今天想他了」在**默认配置**下出现——默认掉回 900 时这条会红。
+- **回滚**：无（默认值本来就是 1100/900）。

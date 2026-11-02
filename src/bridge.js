@@ -1038,11 +1038,13 @@ function loadConfig() {
         crossConversation: true,
         maxHits: 5
       },
-      // 文档记忆（2026-11-02）：B站 那边活着的文档（语感本/两本日记）压缩后注入唤醒提示；
-      // 文件一改下一轮就跟上。docs 可覆盖（path/kind/scope/inject/maxChars），null = 内置三本。
+      // 文档记忆（2026-11-02）：B站 那边活着的文档（语感本薄版/厚本、两本日记）压缩后注入唤醒提示；
+      // 文件一改下一轮就跟上。docs 可覆盖（path/kind/scope/inject/maxChars），null = 内置四本。
+      // 预算 2026-11-02 下午：薄版才是每轮注入的那本（厚本走 qq_recall），1100/900 装得下薄版+两本日记；
+      // 旧值 900/500 会在薄版吃完后把日记挤掉（实测私密日记直接不出现——就是这次用户反馈的「没跟上」的一半）。
       docMemory: {
         enabled: true,
-        maxChars: { qq: 900, group: 500 },
+        maxChars: { qq: 1100, group: 900 },
         docs: null
       },
       sticker: {

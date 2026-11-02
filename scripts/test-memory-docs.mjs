@@ -258,7 +258,10 @@ test('真实 bridge.js：唤醒提示注入文档记忆；文件一改下一轮�
   try {
     const biliDir = path.join(h.temp, 'dsh', 'surfcore', 'bili');
     fs.mkdirSync(biliDir, { recursive: true });
-    fs.writeFileSync(path.join(biliDir, '语感本-薄版.md'), THIN_DOC, 'utf8');
+    // 薄版故意写「大」一点：旧默认预算 900 时它会吃满、把私密日记挤到只剩截断标题
+    // （2026-11-02 实测的回归：默认 900 时私密日记的「今天想他了」进不了提示词）。
+    const thinBig = `${THIN_DOC}\n## 三、补充条目\n${Array.from({ length: 12 }, (_, i) => `- 补充句式 ${i + 1}：短句、具体、不解释`).join('\n')}\n`;
+    fs.writeFileSync(path.join(biliDir, '语感本-薄版.md'), thinBig, 'utf8');
     fs.writeFileSync(path.join(biliDir, '语感本.md'), STYLE_DOC, 'utf8');
     fs.writeFileSync(path.join(biliDir, 'whale-diary.md'), DIARY_DOC, 'utf8');
     fs.writeFileSync(path.join(biliDir, 'whale-diary-private.md'), `${DIARY_DOC}\n## 私下那本\n\n今天想他了。\n`, 'utf8');
@@ -271,7 +274,7 @@ test('真实 bridge.js：唤醒提示注入文档记忆；文件一改下一轮�
     assert.ok(firstPrompt.includes('【文档记忆'), '私聊唤醒提示缺文档记忆块');
     assert.ok(firstPrompt.includes('有故事先讲故事'), '薄版应该进私聊提示');
     assert.ok(!firstPrompt.includes('语感本·最近记的'), '厚本不该每轮注入（inject: [])');
-    assert.ok(firstPrompt.includes('今天想他了'), '私聊应能看到私密日记');
+    assert.ok(firstPrompt.includes('今天想他了'), '私聊应能看到私密日记（默认预算 1100 必须装得下薄版+两本日记）');
     // 预览不能把会话令牌明文给出去（AI 那份提示词里是有的，预览要抹掉）。
     const token = h.getSocialV2State('private:123').agentToken;
     assert.ok(!firstPrompt.includes(token), 'wake-preview 泄露了会话令牌');
