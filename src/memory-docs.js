@@ -18,23 +18,36 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { gramsOf } from './memory-search.js';
 
-/** 默认三本（都相对角色目录；可在 socialV2.docMemory.docs 覆盖）。 */
+/**
+ * 默认四本（都相对角色目录；可在 socialV2.docMemory.docs 覆盖）。
+ *
+ * 2026-11-02 下午调整（语感本长到 17k 字之后）：
+ *   · 语感本现在有「厚本 + 薄版」两本：薄版（2.8k）是 B站 自己整理的「开口前翻的」，
+ *     厚本是只增不减的素材库。QQ 每次唤醒只能带一小段 → **薄版负责每轮注入**（460 字够了），
+ *     厚本**不注入**（inject: []，太长且新内容多是散文笔记），只留给 `qq_recall` 按需查原文。
+ *   · 旧的 style 压缩从头取，文件一长就永远看不到新内容（实测 17k 字时注入里还是 10-31 的句子）；
+ *     厚本即使配了注入也用 `style-recent`（从文件末尾取最近几节）。
+ */
 export const DEFAULT_MEMORY_DOCS = Object.freeze([
   {
-    id: 'yugan', enabled: true, path: 'bili/语感本.md', title: '语感本（B站那边学人说话的本子）',
+    id: 'yugan-thin', enabled: true, path: 'bili/语感本-薄版.md', title: '语感本·薄版（开口前翻的）',
     kind: 'style', scope: 'shared', inject: ['qq', 'group', 'bili'], maxChars: 560,
   },
   {
+    id: 'yugan', enabled: true, path: 'bili/语感本.md', title: '语感本·最近记的（厚本素材）',
+    kind: 'style-recent', scope: 'shared', inject: [], maxChars: 240,
+  },
+  {
     id: 'diary', enabled: true, path: 'bili/whale-diary.md', title: 'B站日记（公开那本「给他的信」）',
-    kind: 'diary', scope: 'shared', inject: ['qq', 'group', 'bili'], maxChars: 360,
+    kind: 'diary', scope: 'shared', inject: ['qq', 'group', 'bili'], maxChars: 200,
   },
   {
     id: 'diary-private', enabled: true, path: 'bili/whale-diary-private.md', title: 'B站日记（私下那本）',
-    kind: 'diary', scope: 'qq', inject: ['qq'], maxChars: 320,
+    kind: 'diary', scope: 'qq', inject: ['qq'], maxChars: 240,
   },
 ]);
 
-const DOC_KINDS = new Set(['style', 'diary', 'generic']);
+const DOC_KINDS = new Set(['style', 'style-recent', 'diary', 'generic']);
 const DOC_SCOPES = new Set(['qq', 'shared', 'bili']);
 
 function clampInt(value, fallback, min, max) {
@@ -93,6 +106,19 @@ function cleanText(text) {
  * 语感本这类文档的压缩：只留标题 / 列表条目 / 表格行（长段落、长表格行丢掉），保顺序、去重。
  * 这些正是「怎么说话」的可执行内容；散文部分留给日记那本。
  */
+const STYLE_LINE_MAX = 140;
+
+/** 语感本里「值得进摘要」的行：标题 / 破折号列表 / 编号列表 / 表格行（分隔行不算）。 */
+function styleLineKind(text) {
+  if (/^\|[\s:|-]+\|$/.test(text)) return '';
+  if (/^#{1,6}\s/.test(text)) return 'heading';
+  if (/^[-*]\s/.test(text)) return 'bullet';
+  // 薄版用「1. …」编号列表（2026-11-02 新增）；不认编号会漏掉薄版最核心的「开口前」那 13 条。
+  if (/^\d+[.、)]\s/.test(text)) return 'number';
+  if (/^\|/.test(text)) return 'table';
+  return '';
+}
+
 export function digestStyleDoc(content, maxChars) {
   const out = [];
   let used = 0;
@@ -100,16 +126,13 @@ export function digestStyleDoc(content, maxChars) {
   for (const line of cleanText(content).split('\n')) {
     const text = line.trim();
     if (!text) continue;
-    const isHeading = /^#{1,4}\s/.test(text);
-    const isBullet = /^[-*]\s/.test(text);
-    const isTableRow = /^\|/.test(text);
-    if (isTableRow && /^\|[\s:|-]+\|$/.test(text)) continue; // 跳过 | --- | 分隔行（不携带信息）
-    if (!isHeading && !isBullet && !isTableRow) continue;
-    if (isTableRow) {
+    const kind = styleLineKind(text);
+    if (!kind) continue;
+    if (kind === 'table') {
       tableRows += 1;
       if (tableRows > 20) continue; // 表格行太多就只留前面 20 行（示例句一般在前面）
     }
-    if (text.length > 140) continue; // 超长条目本质是段落，留给日记/原文
+    if (text.length > STYLE_LINE_MAX) continue; // 超长条目本质是段落，留给日记/原文
     const cut = text.slice(0, 150);
     if (out.includes(cut)) continue;
     if (used + cut.length + 1 > maxChars) break;
@@ -117,6 +140,65 @@ export function digestStyleDoc(content, maxChars) {
     used += cut.length + 1;
   }
   return out.join('\n');
+}
+
+/**
+ * 「最近记的」压缩（厚本语感本用）：从**文件末尾**往前取最近的几节，
+ * 每节保留 `## 标题` + 该节最后几条条目（表格行取最新 3 条）。
+ *
+ * 为什么不是 head：厚本只增不减，开头永远是 10 月底那批旧素材；旧的 style 压缩从头取，
+ * 文件一长新内容就永远挤不进预算（2026-11-02 实测：17k 字的厚本，注入里还是 10-31 的句子）。
+ * 厚本在 QQ 侧只当「最近学了什么」的窗口，稳定规则由薄版承担。
+ */
+export function digestStyleRecentDoc(content, maxChars) {
+  const sections = [];
+  let current = { head: '', lines: [] };
+  for (const line of cleanText(content).split('\n')) {
+    const text = line.trim();
+    if (/^##\s+/.test(text)) {
+      if (current.head || current.lines.length) sections.push(current);
+      current = { head: text.replace(/^##\s+/, ''), lines: [] };
+      continue;
+    }
+    if (text) current.lines.push(text);
+  }
+  if (current.head || current.lines.length) sections.push(current);
+
+  const blocks = [];
+  let used = 0;
+  for (const section of sections.slice().reverse()) {
+    const items = [];
+    let tableSeen = 0;
+    const tableTotal = section.lines.filter((line) => styleLineKind(line.trim()) === 'table').length;
+    for (const line of section.lines) {
+      const text = line.trim();
+      const kind = styleLineKind(text);
+      if (!kind || text.length > STYLE_LINE_MAX) continue;
+      if (kind === 'table') {
+        tableSeen += 1;
+        // 表格只留最后 3 条：新摘的句子在表尾。
+        if (tableTotal > 3 && tableSeen <= tableTotal - 3) continue;
+      }
+      items.push(text.slice(0, 150));
+    }
+    if (!items.length) continue;
+    const head = section.head ? `## ${section.head}` : '';
+    // 每节最多 5 条，且优先保留靠后的（最新）条目。
+    const picked = items.slice(-5);
+    const block = [head, ...picked].filter(Boolean).join('\n');
+    if (used + block.length + 1 > maxChars) {
+      // 预算不够整块：只放标题（有上下文比半截句子好读），然后停。
+      if (head && used + head.length + 1 <= maxChars) {
+        blocks.push(head);
+        used += head.length + 1;
+      }
+      break;
+    }
+    blocks.push(block);
+    used += block.length + 1;
+  }
+  // 上面是倒序取的，翻回文件顺序（读起来是「最近两节按时间排列」）。
+  return blocks.reverse().join('\n');
 }
 
 /**
@@ -156,6 +238,7 @@ export function digestDoc(content, { kind = 'generic', maxChars = 400 } = {}) {
   if (!text.trim()) return '';
   const cap = clampInt(maxChars, 400, 80, 2000);
   if (kind === 'style') return digestStyleDoc(text, cap);
+  if (kind === 'style-recent') return digestStyleRecentDoc(text, cap);
   if (kind === 'diary') return digestDiaryDoc(text, cap);
   const lines = [];
   let used = 0;
@@ -223,6 +306,16 @@ function includeForPlatform(doc, platform) {
   return doc.scope !== 'qq' && doc.inject.includes('bili');
 }
 
+/**
+ * 检索可见性（和注入可见性分开）：厚本语感本 inject=[] 不每轮注入，但 `qq_recall` 应该查得到。
+ * 隐私由 scope 决定：群里只查 shared；私聊可查 shared + qq；B站 只查 shared/bili。
+ */
+function searchAllowed(doc, platform) {
+  if (platform === 'group') return doc.scope === 'shared';
+  if (platform === 'qq') return doc.scope !== 'bili';
+  return doc.scope !== 'qq';
+}
+
 function formatStamp(ms) {
   try {
     return new Date(ms).toLocaleString('zh-CN', { hour12: false, month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
@@ -246,7 +339,9 @@ export function renderDocBlock(sources, { platform = 'qq', maxChars = 800 } = {}
   let used = header.length + footer.length + 2;
   let included = 0;
   for (const doc of available) {
-    const title = `## ${doc.title}（${doc.path}，更新 ${formatStamp(doc.mtime)}）`;
+    // 标题只留名字 + 更新时间：路径对 QQ 侧没用（要查原文会走 qq_recall，那里带出处），
+    // 三本各带一条路径会白吃 60~90 字预算（2026-11-02 下午压掉的）。
+    const title = `## ${doc.title}（更新 ${formatStamp(doc.mtime)}）`;
     const body = doc.digest;
     const cost = title.length + body.length + 2;
     if (used + cost > cap) {
@@ -299,7 +394,7 @@ export function splitDocChunks(content, maxChars = 900) {
 export function searchMemoryDocs(sources, query, { limit = 3, platform = 'qq' } = {}) {
   const grams = gramsOf(query);
   if (!grams.size) return [];
-  const docs = (sources?.docs ?? []).filter((doc) => doc.exists && doc.content && includeForPlatform(doc, platform));
+  const docs = (sources?.docs ?? []).filter((doc) => doc.exists && doc.content && searchAllowed(doc, platform));
   const hits = [];
   for (const doc of docs) {
     for (const chunk of splitDocChunks(doc.content)) {

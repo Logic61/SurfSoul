@@ -2352,6 +2352,21 @@ button:active:not(:disabled) {
       <div id="v2MemoryOutput" class="tool-log-table">（空）</div>
 
       </div></details>
+<details class="settings-group"><summary>自我记录（selfNote：她自己写的「我最近变成什么样」，换新会话第一轮读一次）</summary><div class="settings-content">
+      <div class="row">
+        <input type="text" id="v2SelfNoteText" placeholder="一句关于她自己的观察（≤200 字；不用写日记）" style="flex:1">
+        <button id="v2SelfNoteAdd" class="small">添加</button>
+        <button id="v2SelfNoteLoad" class="small">刷新</button>
+        <button id="v2SelfNoteClear" class="small danger">清空全部</button>
+        <span class="meta" id="v2SelfNoteMsg"></span>
+      </div>
+      <div class="meta" style="margin-bottom:6px">
+        按<b>角色</b>共享（不按会话）、上限 40 条、同一句重复只刷新时间。只在换新 DSH 会话的第一轮注入一次，
+        平时唤醒不带（不会每轮背人设）。文件：<code>memory/self-notes.json</code>
+      </div>
+      <div id="v2SelfNoteOutput" class="tool-log-table">（空）</div>
+
+      </div></details>
 <details class="settings-group"><summary>唤醒状态（AI 当前设置的下一次唤醒条件/倒计时）</summary><div class="settings-content">
       <div class="row">
         <input type="text" id="v2WakeKey" placeholder="group:123456789" style="flex:1">
@@ -3775,6 +3790,63 @@ document.getElementById('v2MemoryOutput').addEventListener('click', async (ev) =
   msg.textContent = r.ok ? '✅ 已更新' : ('❌ ' + (r.error || '失败'));
   msg.className = r.ok ? 'meta ok' : 'meta err';
   if (r.ok) loadV2Memory();
+});
+
+// ── selfNote（按角色共享的自我认知，2026-11-02）────────────────────────────
+// 和上面的轻记忆不同：这里不需要会话 key——同一个角色所有会话共用一份。
+function renderV2SelfNotes(data) {
+  const box = document.getElementById('v2SelfNoteOutput');
+  if (!data || !data.ok) { box.innerHTML = '<span class="meta">加载失败</span>'; return; }
+  const notes = Array.isArray(data.notes) ? data.notes : [];
+  if (!notes.length) { box.innerHTML = '<div class="meta">（空 — 她还没写过关于自己的观察）</div>'; return; }
+  let html = '<table><tr><th>最近提到</th><th>她自己的记录</th><th>操作</th></tr>';
+  for (const note of notes) {
+    const at = Number(note.lastTouchedAt) || Number(note.createdAt) || 0;
+    const when = at ? new Date(at).toLocaleString() : '-';
+    const text = esc(String(note.text || ''));
+    html += `<tr><td style="white-space:nowrap">${esc(when)}</td><td>${text}</td><td><button class="small" data-sn-action="remove" data-sn-text="${esc(String(note.text || ''))}">删除</button></td></tr>`;
+  }
+  html += '</table>';
+  box.innerHTML = html;
+}
+function setV2SelfNoteMsg(text, ok) {
+  const msg = document.getElementById('v2SelfNoteMsg');
+  msg.textContent = text;
+  msg.className = ok ? 'meta ok' : 'meta err';
+}
+function loadV2SelfNotes() {
+  return api('/api/socialV2/self-notes')
+    .then(r => {
+      renderV2SelfNotes(r);
+      setV2SelfNoteMsg(r.ok ? `✅ 共 ${r.total ?? 0} 条` : ('❌ ' + (r.error || '失败')), !!r.ok);
+    })
+    .catch(e => setV2SelfNoteMsg('❌ ' + (e.message || e), false));
+}
+document.getElementById('v2SelfNoteLoad').addEventListener('click', loadV2SelfNotes);
+document.getElementById('v2SelfNoteAdd').addEventListener('click', async () => {
+  const input = document.getElementById('v2SelfNoteText');
+  const text = input.value.trim();
+  if (!text) { setV2SelfNoteMsg('✗ 先写一句再添加', false); return; }
+  const r = await api('/api/socialV2/self-notes', 'POST', { text });
+  if (!r.ok) { setV2SelfNoteMsg('❌ ' + (r.error || '失败'), false); return; }
+  input.value = '';
+  renderV2SelfNotes(r);
+  setV2SelfNoteMsg(r.added ? `✅ 已添加（共 ${r.total} 条）` : '✅ 这句已经在里面了（刷新了时间）', true);
+});
+document.getElementById('v2SelfNoteClear').addEventListener('click', async () => {
+  if (!confirm('确定清空她的自我记录（selfNote）？这个操作不可撤销。')) return;
+  const r = await api('/api/socialV2/self-notes/clear', 'POST', {});
+  renderV2SelfNotes(r);
+  setV2SelfNoteMsg(r.ok ? '✅ 已清空自我记录' : ('❌ ' + (r.error || '失败')), !!r.ok);
+});
+document.getElementById('v2SelfNoteOutput').addEventListener('click', async (ev) => {
+  const btn = ev.target.closest('button[data-sn-action]');
+  if (!btn || btn.dataset.snAction !== 'remove') return;
+  const text = btn.dataset.snText || '';
+  if (!confirm('删除这条自我记录？')) return;
+  const r = await api('/api/socialV2/self-notes/remove', 'POST', { text });
+  if (r.ok) { renderV2SelfNotes(r); setV2SelfNoteMsg(`✅ 已删除（剩 ${r.total} 条）`, true); }
+  else setV2SelfNoteMsg('❌ ' + (r.error || '失败'), false);
 });
 
 function formatWakeStatus(r) {

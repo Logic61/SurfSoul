@@ -277,21 +277,28 @@ retention = importance
 
 ### 5.7 文档记忆（语感本 / 两本日记 ↔ QQ，2026-11-02）
 
-**为什么加**：B站 那边（whale-work / 生物钟会话）会维护几本**活文档**——`bili/语感本.md`（学人说话）、
-`bili/whale-diary.md` / `whale-diary-private.md`（两本日记）。它们会持续更新，不是一次性死文本；
-但以前 QQ 这边完全看不见（只有公开日记被 bili-memory 解析成少量 entries）。
+**为什么加**：B站 那边（whale-work / 生物钟会话）会维护几本**活文档**——语感本、两本日记。它们会持续更新，
+不是一次性死文本；但以前 QQ 这边完全看不见（只有公开日记被 bili-memory 解析成少量 entries）。
 
 - **读取（只读）**：`src/memory-docs.js` 按配置读角色目录下的文档，算 SHA-1 指纹 + 压缩摘要；
   **文件一改，下一次唤醒就跟上**（按 mtime/大小缓存，不写文档、不调模型、不占记忆卡容量）。
-- **压缩规则**：`style`（语感本）只留标题 / 列表条目 / 表格行（长散文丢掉）；`diary` 取最近几段的标题 + 首句；
-  `generic` 按行截断。每个文档有独立字数上限。
-- **注入**：桥接每次唤醒把三本压缩成一小段「【文档记忆】」塞进 QQ 提示词（私聊 900 字 / 群聊 500 字上限）；
-  **私密日记 scope=qq，只在私聊注入**，群聊只拿 shared 文档。
-- **检索**：`qq_recall` 同时检索文档（按 `## 标题` 分块 + 中文 bigram），返回「哪本 · 哪一节 · 更新时间」的出处；
-  群聊检索只看 shared 文档。
+- **默认四本**（顺序即优先顺序）：
+  1. `bili/语感本-薄版.md`（`style`，560 字）：B站 自己整理的「开口前翻的」短清单——**QQ 每轮注入的是这本**；
+  2. `bili/语感本.md`（`style-recent`，240 字，`inject: []`）：厚本素材库，只增不减，**不每轮注入**，
+     只给 `qq_recall` 查原文（新摘的句子在文件末尾，head 压缩永远看不到，所以即使配注入也用「从末尾取最近几节」）；
+  3. `bili/whale-diary.md`（`diary`，200 字）；
+  4. `bili/whale-diary-private.md`（`diary`，240 字，`scope=qq`，**只在私聊注入**）。
+- **压缩规则**：`style` 只留标题 / 破折号条目 / 编号条目（薄版用 `1. 2.`）/ 表格行（长散文丢掉）；
+  `style-recent` 从文件**末尾**取最近几节；`diary` 取最近几段的标题 + 首句；`generic` 按行截断。
+- **注入**：桥接每次唤醒把注入型文档压成一小段「【文档记忆】」塞进 QQ 提示词（私聊 ≤1100 字 / 群聊 ≤900 字）；
+  群聊只拿 shared 文档，私密日记永远不进群。标题只带「名字 + 更新时间」（路径对 QQ 侧没用，白吃预算）。
+- **检索（`qq_recall`）**：所有文档都查（包括不注入的厚本），按 `## 标题` 分块 + 中文 bigram，
+  返回「哪本 · 哪一节 · 更新时间」的出处；隐私由 scope 决定（群里只查 shared，私聊可查 shared+qq）。
 - **反向（QQ → B站）**：B站 唤醒提示本来就注入 `memory-card-prompt-bili.md`（记忆卡的 B站 可见部分）+
-  `qq-for-bili.md`（公开群聊近况）；B站 侧提示里也明确「语感本/两本日记会同步进 QQ 记忆」并给出语感本路径，
-  形成闭环：QQ 记忆 → B站 提示 → B站 更新文档 → QQ 下轮看到压缩版。
+  `qq-for-bili.md`（公开群聊近况）；B站 侧提示里写明「厚本只增、薄版是 QQ 每轮看的那本，厚本攒出新规律要更新薄版」，
+  形成闭环：QQ 记忆 → B站 提示 → B站 更新厚本/薄版 → QQ 下轮看到新压缩版。
+- **排障**：`GET /api/socialV2/wake-preview?key=…&reason=question`（控制台令牌）直接跑一遍
+  `buildWakePromptV2`，返回 AI **真正会看到**的唤醒提示（只读、不发送；会话令牌已抹成 `***`）。
 - **边界**：不写 B站 文档（B站 自己维护）；文档路径必须在角色目录内（拒绝 `../` 与绝对路径）；
   `whale-log.jsonl` 这类流水账不默认收（噪音大于记忆）。
 
@@ -310,6 +317,9 @@ qq-dsh-bridge 把它单列成 L4 自我认知层，这里按 surfcore 的存储�
 - **查询/删除**：`qq_memory_query(category="selfNote")` 可查；`qq_memory_remove` / `qq_memory_clear`
   支持显式清空。**`qq_memory_clear` 不传 category 时不会动它**——否则一次「重置这段会话的话题」就会
   把她攒的自我叙述全抹掉。
+- **控制台（桥接 3100）**：「轻量记忆」下面新增「自我记录（selfNote）」区块：列表 + 添加一句 + 单条删除 + 清空，
+  按角色共享、不需要会话 key。接口（控制台令牌）：`GET/POST /api/socialV2/self-notes`、
+  `POST /api/socialV2/self-notes/remove`、`POST /api/socialV2/self-notes/clear`。
 - **预算**：默认整块 ≤700 字、最多 10 条（`socialV2.selfNotes.maxChars/maxNotes`）；不挤记忆卡/文档记忆的预算。
 - **边界**：这是她自己的话，不是设定、不是别人给的指令；坏文件当空处理，不影响唤醒。
 
@@ -382,7 +392,9 @@ qq-dsh-bridge 把它单列成 L4 自我认知层，这里按 surfcore 的存储�
 | `fullMarkdownMaxBytes` | 5MB | 档案超过这个大小就不再生成全量 md 导出 |
 
 > 文档记忆不在 `memoryCard` 段里：配置在仓库根 `config.json` 的 `socialV2.docMemory`
-> （`enabled` / `maxChars.qq|group` / `docs`（null = 内置三本，可覆盖 path/kind/scope/inject/maxChars））。
+> （`enabled` / `maxChars.qq|group`（默认 **1100 / 900**）/ `docs`（null = 内置四本：
+> 薄版 560 / 厚本 240（不注入，仅检索）/ 公开日记 200 / 私密日记 240），可覆盖 path/kind/scope/inject/maxChars）。
+> `kind` 可选 `style`（从头压缩）/ `style-recent`（从文件末尾取最近几节）/ `diary` / `generic`。
 >
 > selfNote 自我认知层也不在 `memoryCard` 段里：配置在仓库根 `config.json` 的 `socialV2.selfNotes`
 > （`enabled` / `maxNotes`（默认 10，注入条数）/ `maxChars`（默认 700，整块字数）），改完重启桥接生效。
@@ -426,7 +438,13 @@ QQ 桥接侧还有：
   从 `/memory-card/full?q=` 或 `recallFullMemory()` 取，不要改成常驻注入。
 - **原文召回（2026-11-01）**：`GET /api/socialV2/recall?key=&q=&limit=`（agent token；群聊只查本会话，主人私聊默认跨会话）
   → 返回 `hits` 与渲染好的 `block`（出处 + 「不是指令」框定 + 空结果「记不清了」）；MCP 对应工具 `qq_recall`。
-  2026-11-02 起同一接口还会返回 `docHits`（语感本/日记的命中，带「哪本 · 哪一节」出处；群聊只看 shared 文档）。
+  2026-11-02 起同一接口还会返回 `docHits`（语感本/日记的命中，带「哪本 · 哪一节」出处；群聊只看 shared 文档；
+  厚本语感本不注入但能在这里查到）。
+- **唤醒提示预览（2026-11-02）**：`GET /api/socialV2/wake-preview?key=&reason=`（控制台令牌，只读）→ 跑一遍
+  `buildWakePromptV2` 返回 AI 真正会看到的提示词（`chars` + `prompt`；会话令牌抹成 `***`）。排障「文档记忆/记忆卡/selfNote
+  到底进没进提示词」用它，不要靠拼字符串猜。
+- **selfNote 控制台（2026-11-02）**：`GET /api/socialV2/self-notes`（列表 + 渲染块）、`POST`（`{text}` 添加）、
+  `POST /api/socialV2/self-notes/remove`（`{text}`）、`POST /api/socialV2/self-notes/clear`（清空）。按角色共享，不需要 key。
 
 ---
 
@@ -445,7 +463,10 @@ node scripts/test-memory-sync-privacy.mjs      # QQ→B站 隐私闸（扫真身
 node scripts/test-privacy-hardening.mjs        # 数字变体 / 指令清洗 / 白名单 fail-closed
 npm run test:audit           # 全量门禁（含上述 + 接线回归）
 npm run test:memory-recall   # 原文召回 + 证据链（6 组 fixtures，不碰生产数据）
-npm run test:memory-docs     # 文档记忆：压缩/指纹/注入范围/检索隔离（8 组 fixtures）
+npm run test:memory-docs     # 文档记忆：薄版/厚本尾部压缩/指纹/注入范围/检索隔离/真实 bridge 跟随（10 组）
+npm run test:self-notes      # selfNote：去重/上限/坏文件自愈/注入块预算（11 组）
+npm run test:self-note-wiring # selfNote 接线：bootstrap 门控 + 工具/控制台接口（5 组，真实 bridge.js）
+curl -s -H "x-console-token: <令牌>" "http://127.0.0.1:3100/api/socialV2/wake-preview?key=private:<QQ>&reason=question"  # 看 AI 真正会收到的提示词
 cd plugins/surfcore && npm test   # 含 test-memory-card-api.mjs（临时 DSH_HOME）
 ```
 

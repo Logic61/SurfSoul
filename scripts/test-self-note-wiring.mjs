@@ -95,6 +95,14 @@ test('源码接线：selfNote 有独立模块、写入端点、bootstrap 门控�
   assert.match(mcp, /selfNote=/, '工具描述里没有 selfNote 的说明');
   // 清空「全部」不能顺手动按角色共享的自我记录（见 bridge 里的注释与端点实现）。
   assert.match(bridge, /if \(category === 'selfNote'\) clearSelfNotes\(/, '清空端点没有单独的 selfNote 分支');
+  // 控制台（桥接 3100）：角色级接口 + 页面区块（2026-11-02 用户要求补上）。
+  assert.match(bridge, /url\.pathname === '\/api\/socialV2\/self-notes'/, '缺少控制台 selfNote 列表/添加接口');
+  assert.match(bridge, /url\.pathname === '\/api\/socialV2\/self-notes\/remove'/, '缺少控制台 selfNote 删除接口');
+  assert.match(bridge, /url\.pathname === '\/api\/socialV2\/self-notes\/clear'/, '缺少控制台 selfNote 清空接口');
+  const consoleHtml = read('public/console.html');
+  assert.match(consoleHtml, /自我记录（selfNote/, '控制台页面缺少 selfNote 区块');
+  assert.match(consoleHtml, /id="v2SelfNoteOutput"/, '控制台缺少 selfNote 列表容器');
+  assert.match(consoleHtml, /\/api\/socialV2\/self-notes/, '控制台 JS 没接 selfNote 接口');
 });
 
 test('端到端：写入 → bootstrap 注入一次 → 查询/清空/删除', async () => {
@@ -166,6 +174,41 @@ test('端到端：写入 → bootstrap 注入一次 → 查询/清空/删除', a
     assert.equal((await post(server.port, 'memory-append', { key: OWNER, category: 'selfNote', content: NOTE_B })).data.ok, true);
     assert.equal((await post(server.port, 'memory-clear', { key: OWNER, category: 'selfNote' })).status, 200);
     assert.equal((await get(server.port, memoryRoute('selfNote'))).data.raw.selfNotes.length, 0);
+  } finally {
+    await server.close();
+    await h.close();
+  }
+});
+
+test('控制台接口：角色级 self-notes 列表/添加/删除/清空（不依赖会话 key）', async () => {
+  const h = await bridgeHarness({ config: { ownerQQ: 123, allow: { private: ['123'], groups: ['456'] } } });
+  const server = await withServer(h);
+  try {
+    const empty = await get(server.port, 'self-notes');
+    assert.equal(empty.status, 200);
+    assert.equal(empty.data.ok, true);
+    assert.deepEqual(empty.data.notes, []);
+
+    const added = await post(server.port, 'self-notes', { text: NOTE_A });
+    assert.equal(added.status, 200);
+    assert.equal(added.data.ok, true);
+    assert.equal(added.data.added, true);
+    assert.equal(added.data.total, 1);
+
+    const duplicated = await post(server.port, 'self-notes', { text: NOTE_A.replace(/。$/, '') });
+    assert.equal(duplicated.data.added, false);
+    assert.equal(duplicated.data.total, 1, '控制台重复添加也应去重');
+
+    const removed = await post(server.port, 'self-notes/remove', { text: NOTE_A });
+    assert.equal(removed.status, 200);
+    assert.equal(removed.data.removed, 1);
+    assert.equal((await get(server.port, 'self-notes')).data.total, 0);
+
+    assert.equal((await post(server.port, 'self-notes', { text: NOTE_B })).data.total, 1);
+    const cleared = await post(server.port, 'self-notes/clear', {});
+    assert.equal(cleared.status, 200);
+    assert.equal(cleared.data.total, 0);
+    assert.equal((await get(server.port, 'self-notes')).data.total, 0);
   } finally {
     await server.close();
     await h.close();

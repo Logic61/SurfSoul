@@ -453,8 +453,8 @@
     "docMemory": {
       "enabled": true,
       "maxChars": {
-        "qq": 900,
-        "group": 500
+        "qq": 1100,
+        "group": 900
       },
       "docs": null
     },

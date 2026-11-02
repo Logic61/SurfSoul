@@ -6181,6 +6181,27 @@ async function main() {
           sendJson({ ok: true, conversations: list });
           return;
         }
+        // 唤醒提示词预览（只读，2026-11-02）：控制台/排障用——不发送、不写状态、不建会话。
+        // 为什么需要它：文档记忆/记忆卡/selfNote 都是「拼进唤醒提示」才生效，光看文件不知道
+        // 真正喂给模型的是什么；这个接口直接跑同一个 buildWakePromptV2（AI 看到的同一份）。
+        if (req.method === 'GET' && url.pathname === '/api/socialV2/wake-preview') {
+          const key = String(url.searchParams.get('key') ?? '').trim();
+          const reason = String(url.searchParams.get('reason') ?? 'question').trim() || 'question';
+          if (!key) { sendJson({ ok: false, error: 'key 不能为空' }, 400); return; }
+          if (req.headers['x-agent-token'] && !agentTokenOk(key, req.headers['x-agent-token'])) { sendJson({ ok: false, error: 'agent token 无效' }, 403); return; }
+          let prompt = '';
+          try {
+            prompt = buildWakePromptV2(key, reason);
+          } catch (error) {
+            sendJson({ ok: false, error: String(error?.message ?? error) }, 500);
+            return;
+          }
+          // 预览是给人排障看的：会话令牌在提示词里会明文出现，这里先抹掉再返回。
+          const agentToken = String(getSocialV2State(key)?.agentToken ?? '');
+          if (agentToken) prompt = prompt.split(agentToken).join('***');
+          sendJson({ ok: true, key, reason, chars: prompt.length, prompt });
+          return;
+        }
         if (req.method === 'POST' && url.pathname === '/api/socialV2/wake') {
           const body = await readBody();
           const key = String(body.key ?? '').trim();
@@ -8845,6 +8866,39 @@ async function main() {
           sendJson({ ok: true, key, category: category || 'all', memory: formatMemoryV2(st, key), block: formatSelfNotesBlock(loadSelfNotes(MEMORY_CARD_PATHS.dir)) });
           return;
         }
+        // ── selfNote 自我认知层（控制台，2026-11-02）──────────────────────────────
+        // 和上面的轻记忆不同：selfNote 按**角色**共享（不按会话），所以这几个接口不要 key，
+        // 控制台输入框里的 key 对它没有影响。写入走同一条脱敏闸门（抹掉已知令牌后再落盘）。
+        if (req.method === 'GET' && url.pathname === '/api/socialV2/self-notes') {
+          const notes = loadSelfNotes(MEMORY_CARD_PATHS.dir);
+          sendJson({ ok: true, total: notes.length, notes, block: formatSelfNotesBlock(notes) });
+          return;
+        }
+        if (req.method === 'POST' && url.pathname === '/api/socialV2/self-notes') {
+          const body = await readBody();
+          const text = redactKnownTokensOnly(String(body.text ?? '')).trim();
+          if (!text) { sendJson({ ok: false, error: 'text 不能为空' }, 400); return; }
+          const result = addSelfNote(MEMORY_CARD_PATHS.dir, text);
+          if (!result.ok) { sendJson({ ok: false, error: result.error || '写入失败' }, 500); return; }
+          const notes = loadSelfNotes(MEMORY_CARD_PATHS.dir);
+          sendJson({ ok: true, added: result.added, touched: result.touched, total: result.total, notes, block: formatSelfNotesBlock(notes) });
+          return;
+        }
+        if (req.method === 'POST' && url.pathname === '/api/socialV2/self-notes/remove') {
+          const body = await readBody();
+          const text = String(body.text ?? '').trim();
+          if (!text) { sendJson({ ok: false, error: 'text 不能为空' }, 400); return; }
+          const result = removeSelfNote(MEMORY_CARD_PATHS.dir, text);
+          if (!result.ok) { sendJson({ ok: false, error: result.error || '删除失败' }, 500); return; }
+          const notes = loadSelfNotes(MEMORY_CARD_PATHS.dir);
+          sendJson({ ok: true, removed: result.removed, total: result.total, notes, block: formatSelfNotesBlock(notes) });
+          return;
+        }
+        if (req.method === 'POST' && url.pathname === '/api/socialV2/self-notes/clear') {
+          clearSelfNotes(MEMORY_CARD_PATHS.dir);
+          sendJson({ ok: true, total: 0, notes: [], block: '' });
+          return;
+        }
         // ── 二代黑话学习（reserved2）：AI 查询/提交黑话候选 ─────────────────
         if (req.method === 'GET' && url.pathname === '/api/socialV2/slang/query') {
           const key = String(url.searchParams.get('key') ?? '').trim();
@@ -9246,7 +9300,7 @@ async function main() {
         }
         // ── 记忆卡容量告警：只私聊管理员本人，不发群、不接受任意收件人 ──────────
         if (req.method === 'POST' && url.pathname === '/api/memory-card/notify') {
-          const body = JSON.parse(await readBody() || '{}');
+          const body = await readBody();
           if (!cfg.ownerQQ) { sendJson({ ok: false, error: '未配置管理员 QQ（ownerQQ）' }, 400); return; }
           const level = Math.max(1, Math.min(3, Number(body.level) || 1));
           const now = Date.now();
@@ -14123,13 +14177,15 @@ async function main() {
       : '';
     // 文档记忆（2026-11-02）：语感本 / 两本日记压缩成一小段；文件一改，下轮唤醒就跟上
     // （readMemoryDocs 按 mtime 缓存，只读不写、不调模型；私密日记只在私聊注入）。
+    // 预算 2026-11-02 下午：语感本有了薄版（每轮注入的那本），厚本改走 qq_recall，所以
+    // 1100/900 里装的是「薄版 + 日记」；旧值 900/500 会让薄版挤掉日记。
     const docMemoryText = cfg.socialV2?.docMemory?.enabled === false
       ? ''
       : renderDocBlock(readMemoryDocs({ memoryDir: MEMORY_CARD_PATHS.dir }), {
         platform: isPrivateChat ? 'qq' : 'group',
         maxChars: isPrivateChat
-          ? (Number(cfg.socialV2?.docMemory?.maxChars?.qq) || 900)
-          : (Number(cfg.socialV2?.docMemory?.maxChars?.group) || 500),
+          ? (Number(cfg.socialV2?.docMemory?.maxChars?.qq) || 1100)
+          : (Number(cfg.socialV2?.docMemory?.maxChars?.group) || 900),
       });
     const docMemoryLine = docMemoryText ? `${docMemoryText}\n\n` : '';
     // selfNote 自我认知层（2026-11-02）：按角色共享的「她对自己的叙述」。

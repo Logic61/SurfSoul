@@ -3318,3 +3318,20 @@ return list[0] ?? pool[0];
 - **验证**：`test-conversation-closure.mjs` 增 `rotateIdleMs` 默认/归一化断言；桥接重启后
   `[轮换]` 日志应带「静置 5 分钟无新消息」；连续聊天时不再出现几分钟一个新会话（`state/sessions.json` 稳定）。
 - **回滚**：`rotateIdleMs: 0`（回到「回合结束即换」旧行为）或 `rotateAfterClosures: 0`（关闭轮换）。
+
+## #91（2026-11-02）手动重启桥接别把「过期的 DSH 端口」当 DSH_WEB_URL 传进去
+
+- **现象**：用脚本手动重启桥接（为了加载新代码），起来后 `bridge.log` 一直刷
+  `DSH 不可用，消息入队 (group:…)`，QQ 消息全部排队、AI 不处理；但控制台/QQ 网关都正常。
+- **根因**：脚本把 `config.json` 里的 `dsh.baseUrl`（`http://127.0.0.1:63321`）当成 `DSH_WEB_URL` 传给子进程。
+  DSH 桌面端**每次启动都换回环端口**（当时实际是 `61144`），过期的 URL 又通过 env 覆盖了桥接自己的兜底探测
+  （`src/bridge.js` 启动时只在**没有** `DSH_WEB_URL` 时才 `discoverDshBaseUrl()`）。
+- **修法**：手动重启前先 `node scripts/sync-dsh-port.mjs`（把当前端口写回 config.json），然后**不要**设
+  `DSH_WEB_URL` 启动桥接——让它走同一份探测（找不到会明确打「DSH 端口探测：… 连不上」）。
+  用插件/设置页的「重启桥接」按钮则不受影响（它传的是 `currentDshUrl()`，是活的）。
+- **坑（别误判为桥接坏了）**：手动 spawn 后要等 **30~40 秒**：启动时的 `state/` ACL 收紧 `icacls` 会
+  `ETIMEDOUT`（无管理员权限），占掉启动预算；日志出现「桥接已启动」「DSH 已就绪（模式: reserved2）」
+  才说明真的好了。起完先看 `bridge.log` 最后 20 行，再判断。
+- **验证**：`node state/agents/_research/memory-arch/fix-dsh-url-and-restart.mjs`（本机留档）跑完打印
+  `DSH 已就绪（模式: reserved2）` + `wake-preview` 200；或重启后手动 `curl /api/status` 再读日志。
+- **回滚**：不需要——端口同步是幂等的；`config.json` 的 `dsh.baseUrl` 本来就是派生值。

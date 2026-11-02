@@ -148,7 +148,7 @@
 | `media` | `maxBytes`（8MB）、`maxPixels`（64MP）、`maxCount`（5） | 图片/表情/动图限制 |
 | `scenes` | `defaultPrivate.label/toneHint`、`defaultGroup.label/toneHint/memoryGuard`、`overrides.<key>` | **场合档位**（2026-10-31）：唤醒提示词顶部注入【场合】卡；`toneHint` 是该场合的语气提示，`memoryGuard`（默认群聊开）决定是否注入「私聊的事别搬到群里」守卫 |
 | `memoryScene` | `groupExcludePrivate`（默认 `false`）、`honorAudience`（默认 `true`） | 记忆卡注入的场合过滤：`honorAudience` 认记录级 `audience` 标记；`groupExcludePrivate=true` 时群聊连 `[私聊]` 记录也过滤（硬开关，默认关=记忆共同） |
-| `recall` / `docMemory` / `selfNotes` | `recall.{enabled,crossConversation,maxHits}`；`docMemory.{enabled,maxChars.qq\|group,docs}`；`selfNotes.{enabled,maxNotes,maxChars}` | 记忆扩展（2026-11-01/02），都不占记忆卡 6000 字预算：原文库按需召回（`qq_recall`；群聊只查本群、主人私聊可跨会话）；活文档记忆（语感本/两本日记压缩注入 + 检索，文件一改下轮生效）；selfNote 自我认知层（按角色共享，只在换新会话第一轮注入一次） |
+| `recall` / `docMemory` / `selfNotes` | `recall.{enabled,crossConversation,maxHits}`；`docMemory.{enabled,maxChars.qq\|group,docs}`（默认 1100/900；`docs=null` 用内置四本：薄版 560 注入、厚本 240 仅检索、公开日记 200、私密日记 240）；`selfNotes.{enabled,maxNotes,maxChars}` | 记忆扩展（2026-11-01/02），都不占记忆卡 6000 字预算：原文库按需召回（`qq_recall`；群聊只查本群、主人私聊可跨会话；厚本语感本可检索但不注入）；活文档记忆（薄版每轮注入 + 两本日记；文件一改下轮生效；`GET /api/socialV2/wake-preview` 可看 AI 真正收到的提示词）；selfNote 自我认知层（按角色共享，只在换新会话第一轮注入一次；桥接控制台「自我记录」可增删） |
 | `crossSceneSend` | `enabled`（默认 **`false`**）、`allowTargets`（如 `["group:123"]`）、`maxPerHour`（6）、`maxChars`（200） | **受控跨场合投递**：只允许主人私聊 → 显式白名单群；默认关，开了也必须配 `allowTargets`。桥接代投、不给模型目标 token；过敏感/身份/长度/频率/token 回合额度/静默/鱼群闸 |
 
 #### 1.11.1 语音（`socialV2.voice`）

@@ -164,6 +164,9 @@ function memoryCardBlockForBili() {
 /**
  * 文档记忆（2026-11-02）：语感本是 B站 这边「学人说话」的本子，和两本日记一样会同步进
  * QQ 那边的记忆（QQ 唤醒提示里有压缩版）。这里只提示路径与维护方式，不重复注入全文。
+ *
+ * 2026-11-02 下午：语感本分成「厚本（素材库，只增）+ 薄版（开口前翻的，QQ 每轮注入的那本）」，
+ * 所以这里必须把两本的分工写清楚，否则 B站 只往厚本里加，QQ 那边（读薄版）永远看不到新东西。
  */
 function docMemoryLines() {
   let biliDir = ''
@@ -172,12 +175,18 @@ function docMemoryLines() {
     biliDir = path.join(path.dirname(memoryDir), 'bili')
   } catch { return [] }
   const yugan = path.join(biliDir, '语感本.md')
+  const thin = path.join(biliDir, '语感本-薄版.md')
   let hasYugan = false
   try { hasYugan = fs.statSync(yugan).isFile() } catch {}
   if (!hasYugan) return []
+  let hasThin = false
+  try { hasThin = fs.statSync(thin).isFile() } catch {}
   return [
-    `2.5) 语感本 \`${yugan}\`：你自己在用的本子（摘句/模式/别学）。学到新的就按原格式补 1~3 条，别重写整本 ✓`,
-    '     这本和两本日记会同步进 QQ 那边的记忆（她每次醒来会看到压缩版）；QQ 近况/记忆卡也在这段提示里 ✓',
+    `2.5) 语感本（厚本）\`${yugan}\`：素材库，只增不改。学到新的就按原格式补 1~3 条，别重写整本 ✓`,
+    ...(hasThin
+      ? [`     语感本（薄版）\`${thin}\`：**QQ 那边每次醒来真正看的是这本**（厚本只在按需查原文时用）。厚本攒出新规律/新做法时，把薄版一起更新——薄版保持「开口前翻的」那种短句清单，别把素材搬进去 ✓`]
+      : []),
+    '     这两本和两本日记会同步进 QQ 那边的记忆；QQ 近况/记忆卡也在这段提示里 ✓',
   ]
 }
 

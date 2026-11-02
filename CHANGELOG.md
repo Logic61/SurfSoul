@@ -4,6 +4,29 @@
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 发布规则见 [docs/guides/VERSIONS.md](docs/guides/VERSIONS.md)。
 
+## [未发布] - 2026-11-02（文档记忆跟随语感本：薄版每轮注入 / 厚本按需查 + 控制台 selfNote + wake-preview）
+
+### 变更
+
+- **语感本拆两本，注入换成薄版**：用户反馈「语感本改了不少，检查是否跟随、并给到 QQ bot」。实测发现旧实现
+  （`style` 从头压缩）在厚本长到 17k 字后，注入里还是 10-31 那批旧句子——**机制跟随、内容没跟上**。
+  现在：`bili/语感本-薄版.md`（B站 整理的「开口前翻的」，`style`，560 字）每轮注入；
+  厚本 `bili/语感本.md` 改 `style-recent`（从文件**末尾**取最近几节）+ `inject: []` 不常驻注入，
+  细节一律走 `qq_recall`（检索可见性按 scope 判，不看 inject）。
+- **预算**：`socialV2.docMemory.maxChars` 默认 QQ **1100** / 群聊 **900**（旧 900/500 装不下薄版+日记）；
+  注入块标题不再带文档路径（省 60~90 字/轮）；`docs=null` 内置 4 本；`kind` 新增 `style-recent`，
+  `style` 支持编号列表（薄版用 `1. 2.`）。
+- **新接口 `GET /api/socialV2/wake-preview?key=&reason=`**（只读、控制台令牌）：直接跑 `buildWakePromptV2`，
+  返回 AI 真正会看到的提示词（会话令牌抹 `***`）。排障「文档记忆/记忆卡/selfNote 到底进没进提示词」用它。
+- **桥接控制台（3100）补 selfNote**：「轻量记忆」下新增「自我记录（selfNote）」——列表 / 添加一句 /
+  单条删除 / 清空；角色级接口 `GET|POST /api/socialV2/self-notes`、`POST …/remove`、`POST …/clear`（不要会话 key）。
+- **B站 调度器提示同步**：厚本只增、薄版是 QQ 每轮看的；厚本攒出新规律要更新薄版（否则 QQ 永远看不到新东西）。
+- **测试**：`test-memory-docs` 扩到 10 组（含真实 `bridge.js` 的 wake-preview「文件一改下轮跟随」+ 群聊隐私）；
+  `test-self-note-wiring` 扩到 5 组（含控制台接口）。`npm run test:audit` **88/94**（仍是历史 6 红，无新增红）。
+- **运行态**：桥接已用新代码重启并验证——`wake-preview` 里带上了薄版全文、无厚本、无令牌泄露；
+  `self-notes` 接口 200；`qq_recall("金句 梗")` 命中厚本「十七、金句和梗（2026-11-02 傍晚）」；DSH 已就绪、SnowLuma 已连接。
+  重启踩坑（过期 DSH 端口）记入 PITFALLS **#91**。
+
 ## [未发布] - 2026-11-02（selfNote 自我认知层：她对自己的叙述，只在换新会话时读一次）
 
 ### 变更
