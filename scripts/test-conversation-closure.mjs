@@ -243,4 +243,18 @@ test('会话轮换阈值：默认自然收尾 5 次后换；0 = 关闭；可配'
   assert.equal(shouldRotateSessionAfterClosure('x', {}), false);
 });
 
+// 2026-11-02 修 PITFALLS #90：收尾后要「静置 5 分钟无新消息」才换会话，避免活跃聊天时
+// 几分钟就换一次 session、每次都要重发很长的 bootstrap（≈37–38k tokens）。
+test('会话轮换静置窗口：默认 5 分钟；0=不等；坏值收敛', () => {
+  assert.equal(DEFAULT_CLOSURE_CONFIG.rotateIdleMs, 5 * 60 * 1000);
+  assert.equal(normalizeClosureConfig({}).rotateIdleMs, 5 * 60 * 1000);
+  assert.equal(normalizeClosureConfig({ rotateIdleMs: 0 }).rotateIdleMs, 0, '0=回合结束即换（旧行为）');
+  assert.equal(normalizeClosureConfig({ rotateIdleMs: 600000 }).rotateIdleMs, 600000);
+  assert.equal(normalizeClosureConfig({ rotateIdleMs: -5 }).rotateIdleMs, 0);
+  assert.equal(normalizeClosureConfig({ rotateIdleMs: 99 * 60 * 60 * 1000 }).rotateIdleMs, 60 * 60 * 1000, '上限 1 小时');
+  // 静置窗口不影响「是否该轮换」的纯判断（bridge 里在 tick 时再按 lastIncomingAt 顺延）
+  assert.equal(shouldRotateSessionAfterClosure(5, { rotateIdleMs: 300000 }), true);
+  assert.equal(shouldRotateSessionAfterClosure(4, { rotateIdleMs: 300000 }), false);
+});
+
 console.log(`\n${process.exitCode ? 'FAILED' : 'OK'}（conversation-closure ${passed} 组）`);

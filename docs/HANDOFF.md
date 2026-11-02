@@ -5,6 +5,35 @@
 
 ---
 
+## 快照（2026-11-02 00:2x，QQ 会话轮换加静置窗口：5 分钟没有新对话才换 session）
+
+### 用户原话
+
+> 「你的改动需要重启生效吗，我现在观察到已于终止对话，这意味着要发很多次很长的前文提示词，
+> 这是不好的，之前应该是5分钟无对话再终止」
+
+### 结论 / 做到哪
+
+- **发送前评审那批改动不用再重启**：22:00 重启桥接时已加载，00:06–00:13 的私聊日志里真实在跑
+  （`[预发送评审] private:3237216875 通过 88/75`、`86/75`，审过才发）。commit 7a972ce 本身也不影响运行态。
+- **「终止对话」不是评审改动**，是 11-01 的会话轮换：自然收尾次数 ≥5 后，收尾回合结束约 5s 就
+  `retireSession`，活跃聊天时十几分钟换一次 DSH 会话；每次新会话第一轮都要重发 bootstrap
+  （环境说明 + 记忆卡注入，冷启动 ≈37–38k tokens）→ 用户说的「很多次很长的前文提示词」。
+- 修法：新增 `socialV2.closure.rotateIdleMs`（默认 **300000=5 分钟**，0=不等）。收尾次数达标后先等回合结束，
+  再等静置窗口内没有新消息才退役；期间对方又开口就按剩余时间顺延（`st.lastIncomingAt` 判定），不打断对话。
+  纯逻辑在 `src/conversation-closure.js`，定时/顺延在 `src/bridge.js scheduleSessionRotationAfterCloseV2`。
+- live `config.json` 里 `rotateAfterTurns` 是误写（代码只认 `rotateAfterClosures`），已改回并补 `rotateIdleMs`；
+  `config.example.json` 同步补默认值。
+
+### 验证 / 下一步
+
+- `node scripts/test-conversation-closure.mjs`（14 组，含静置窗口默认/0/上限）通过；`test-closure-wiring.mjs` 11 组通过。
+- 桥接需重启一次才生效；重启后 `/dsh-surfcore/api/bridge` 的 `closure.config` 应含 `rotateIdleMs: 300000`。
+  之后连续聊天时 `state/sessions.json` 不再频繁换 session；真要换时 `bridge.log` 会打印
+  「静置 5 分钟无新消息，换新会话」。
+- 如果还嫌换得勤：`rotateAfterClosures` 调到 8~10，或 `rotateIdleMs` 调大（更省 bootstrap token、上下文更长）。
+
+---
 ## 快照（2026-11-02 00:1x，记忆架构第二批：文档记忆互通——语感本/两本日记 ↔ QQ）
 
 ### 用户原话

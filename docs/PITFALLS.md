@@ -3299,8 +3299,22 @@ return list[0] ?? pool[0];
 - **回滚**：`socialV2.review.enabled=false`（桥接重启生效）即可恢复「发前不审」；代码删除
   `src/presend-review.js` 与两处 `maybePresendReview()` 调用。
 
+## #90（2026-11-02）会话轮换太勤：每次换 session 都要重发很长的 bootstrap，等于「终止对话=烧 token」
 
-
-
-
-
+- **现象**：主人发现 QQ 会话「已于…终止对话」，而且每段对话都要重发很长的前文提示词（环境说明 + 记忆卡注入）。
+  查 `bridge.log`/`state/sessions.json`：18:33、20:44、20:55、21:13 各新建过一个 DSH 会话，全是自然收尾触发的
+  `[轮换] … 已自然收尾 N 次 ≥ 5，换新会话`，活跃聊天时约十几分钟就换一次。
+- **根因**：轮换的触发条件只有「本会话自然收尾次数 ≥ rotateAfterClosures（5）」，满足后**收尾回合一结束（5s 轮询）就 retireSession**。
+  而每换一个新会话，下一条消息走 `bootstrap` 冷启动：环境说明 + 记忆卡注入 + 工具定义，实测冷启动首轮 ≈37–38k tokens。
+  活跃聊天时「收尾 → 换会话 → 下一句又要 bootstrap」循环，成本高且上下文被切断；主人要的是「**5 分钟没有新对话**才终止」。
+- **修法**：`socialV2.closure.rotateIdleMs`（默认 **300000=5 分钟**，0=不等）。收尾次数达标后不再立即退役：
+  先等回合结束（busy 检查照旧），再检查 `lastIncomingAt` 是否已静置满 `rotateIdleMs`；
+  静置不够就把剩余时间顺延（不是放弃），新消息只推后退役、不打断对话。
+  轮换真要发生时才 `retireSession`，并记 `[轮换] … 静置 5 分钟无新消息，换新会话`。
+- **坑 1（别把「配置键写错」当默认生效）**：live `config.json` 里出现过 `rotateAfterTurns`（代码从不读这个键）。
+  归一化只认 `rotateAfterClosures`/`rotateIdleMs`，写错键等于**静默回退默认值**——排查时先确认键名在 `DEFAULT_CLOSURE_CONFIG` 里真的存在。
+- **坑 2（放弃条件不要混）**：静置不够 ≠ 放弃轮换（下一条新消息可能永远等不到下一次收尾）；
+  只有「回合一直忙 / 收尾记录被覆盖 / 对方重开」才是放弃，计数不清零、下次收尾重新触发。
+- **验证**：`test-conversation-closure.mjs` 增 `rotateIdleMs` 默认/归一化断言；桥接重启后
+  `[轮换]` 日志应带「静置 5 分钟无新消息」；连续聊天时不再出现几分钟一个新会话（`state/sessions.json` 稳定）。
+- **回滚**：`rotateIdleMs: 0`（回到「回合结束即换」旧行为）或 `rotateAfterClosures: 0`（关闭轮换）。

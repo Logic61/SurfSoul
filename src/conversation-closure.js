@@ -30,11 +30,17 @@ export const DEFAULT_CLOSURE_CONFIG = Object.freeze({
   maxNextOpeningChars: 120,
   // 是否在每次唤醒里注入判断块（有近期对话时）。
   promptInWake: true,
-  // 自然收尾 N 次后换 DSH 会话：本次会话内累计自然收尾次数 ≥ 该值 → 收尾回合结束后退役重建。
-  // 0 = 关闭。2026-11-01 主人拍板「自然收尾 5 次后换 session」——不按 token 压力，
+  // 自然收尾 N 次后换 DSH 会话：本次会话内累计自然收尾次数 ≥ 该值 →
+  // **收尾后静置 `rotateIdleMs` 无新消息**才退役重建（0 = 关闭轮换）。
+  // 2026-11-01 主人拍板「自然收尾 5 次后换 session」——不按 token 压力，
   // 数的是「收尾次数」（一次自然收尾 = 一段完整对话的结束）；换会话只换 DSH session，
   // 记忆卡/收尾记录/未读窗口都在 social-v2.json，不丢长期记忆。
   rotateAfterClosures: 5,
+  // 收尾后静置多久（无新消息）才换会话；期间来了新消息就继续用原会话。
+  // 2026-11-02 修 PITFALLS #90：原来收尾回合结束 5 秒就换，活跃聊天时几分钟就换一次，
+  // 每次新会话都要重发很长的 bootstrap（环境说明 + 记忆卡注入），token 成本高、上下文还断。
+  // 默认 5 分钟；0 = 不等（回合结束即换，旧行为）。
+  rotateIdleMs: 5 * 60 * 1000,
 });
 
 const BOOL = (v, fallback) => (typeof v === 'boolean' ? v : fallback);
@@ -57,6 +63,7 @@ export function normalizeClosureConfig(raw = {}) {
     maxNextOpeningChars: NUM(src.maxNextOpeningChars, DEFAULT_CLOSURE_CONFIG.maxNextOpeningChars, 10, 300),
     promptInWake: BOOL(src.promptInWake, DEFAULT_CLOSURE_CONFIG.promptInWake),
     rotateAfterClosures: NUM(src.rotateAfterClosures, DEFAULT_CLOSURE_CONFIG.rotateAfterClosures, 0, 100),
+    rotateIdleMs: NUM(src.rotateIdleMs, DEFAULT_CLOSURE_CONFIG.rotateIdleMs, 0, 60 * 60 * 1000),
   };
 }
 

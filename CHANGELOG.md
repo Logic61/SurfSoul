@@ -4,6 +4,24 @@
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 发布规则见 [docs/guides/VERSIONS.md](docs/guides/VERSIONS.md)。
 
+## [未发布] - 2026-11-02（QQ 会话轮换加静置窗口：5 分钟没有新对话才换 session）
+
+### 修复
+
+- **会话轮换加静置窗口**：`socialV2.closure.rotateIdleMs`（默认 **300000 = 5 分钟**，0=不等）。
+  原来「自然收尾次数达标 → 收尾回合结束（约 5s）就 retireSession」，活跃聊天时十几分钟就换一次
+  DSH 会话；每次新会话第一轮都要重发很长的 bootstrap（环境说明 + 记忆卡注入，冷启动 ≈37–38k tokens），
+  token 成本高、上下文还被切断。现在收尾后要**静置 `rotateIdleMs` 没有新消息**才换；期间对方又开口
+  就用剩余时间顺延，不打断正在进行的对话（PITFALLS #90）。
+- **配置修正**：live `config.json` 里的 `rotateAfterTurns` 是误写（代码只认 `rotateAfterClosures`），
+  已改回 `rotateAfterClosures: 5` 并补 `rotateIdleMs: 300000`；`config.example.json` 同步补默认值。
+
+### 测试/文档
+
+- `scripts/test-conversation-closure.mjs` 增「静置窗口默认/0/坏值收敛」断言；`test-closure-wiring` 仍全过
+  （轮换只测「挂起」，真正退役在 bridge tick 里按 `rotateIdleMs` 判定）。
+- `CONVERSATION_CLOSURE.md` §3.4/§5、`DATA-AND-CONFIG.md` §1.11 的 `closure` 行、PITFALLS **#90** 同步。
+
 ## [未发布] - 2026-11-02（文档记忆互通：语感本/两本日记 ↔ QQ 记忆）
 
 ### 变更
