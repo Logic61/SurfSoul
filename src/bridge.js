@@ -14101,6 +14101,15 @@ async function main() {
   }
 
   function buildWakePromptV2(key, reason) {
+    // 唤醒提示瘦身（2026-11-02，用户拍板）：同一会话里最大的两份静态块——记忆卡（实测 5.9k 字/次）
+    // 与叙事层——只在 bootstrap 注入一次。旧行为每次唤醒都重塞一遍：唤醒提示 12.7k 字，而
+    // bootstrap 只多 100 字左右，等于每条消息都重发一次 bootstrap（用户原话：
+    // 「同一个会话有必要反复发bootstrap吗」）。这些内容已经在 DSH 会话上下文里，重发纯烧 token。
+    // 小且必须每轮可见的块（身份 #29、管理员规则、B站简报、文档记忆、私聊边界、style-notes、
+    // 共享轻记忆、当轮状态）保持每轮注入，不受本开关影响——它们各自有回归测试/设计约束。
+    // 默认 true；config 设 socialV2.wake.bootstrapOnlyContext=false 可恢复旧行为（记忆卡每轮都带）。
+    const leanWake = cfg.socialV2?.wake?.bootstrapOnlyContext !== false;
+    const includeStatic = !leanWake || reason === 'bootstrap';
     const roleState = readRoleState();
     const roleLine = roleState.role ? `【当前角色】${roleState.role}（完整角色卡请调用 qq_get_prompt 查看）\n\n` : '';
     // B站 记忆简报关掉时（biliBridge.memory.enabled=false），B站 侧的自我锚点会整段消失；
@@ -14114,11 +14123,12 @@ async function main() {
       personaName: roleState.role,
     }, { platform: 'qq' });
     const identityLine = selfIdentityTextV2() + selfCardFallback;
-    // 每次唤醒都交代「什么内容属于哪个平台」：2026-10-23 实测她把群里转发的
-    // 她在别的群的聊天记录说成「我在B站说过的话」（PITFALLS #40）。
+    // 交代「什么内容属于哪个平台」：2026-10-23 实测她把群里转发的
+    // 她在别的群的聊天记录说成「我在B站说过的话」（PITFALLS #40）。bootstrap 放一次即可，
+    // 同一会话的上下文里已经有这段话。
     const provenanceLine = buildProvenanceBlock();
     // 管理员规则：reserved2 不常驻完整人格卡，只靠 qq_get_prompt 带出会让
-    // 「对管理员温柔/不许回嘴」变成看运气 ✗ → 每次醒来第一屏都放一条（compact）。
+    // 「对管理员温柔/不许回嘴」变成看运气 ✗ → 首次唤醒放一条（compact），会话内已在上下文里。
     const adminText = adminPromptLine(true);
     const adminLine = adminText ? `${adminText}\n\n` : '';
     const st = getSocialV2State(key);
@@ -14173,6 +14183,10 @@ async function main() {
     const preSleepLine = isPrivateChat
       ? `【要收工前】决定不接、要设下一次唤醒之前，先调用 qq_wait_for_messages(timeoutMs=${preSleepMs}) 走过观察窗口，桥接才允许设置（防止一觉不醒）。等待期间他要是又说话了，先看再决定。\n\n`
       : `【沉睡前强制等待】这是决定**潜水**时的步骤，不是首回复的前置条件，也不是自然收尾（qq_close_conversation）的前置条件。除非对方明确说“不聊了/晚安/下了/拜拜”等结束语，否则每次设置潜水/下一次唤醒前，必须先调用 qq_wait_for_messages(timeoutMs=${preSleepMs}) 完成一次沉睡前观察；回复前 purpose="reply" 的短静默不能代替这次完整观察。若 ${Math.round(preSleepMs / 60000)} 分钟内没人说话，返回 preSleepWaitSatisfied=true，可以设置下一次唤醒并沉睡；若期间有人发新消息，先查看返回的 newMessages——判断不需要你参与就可以直接沉睡，若你选择参与回复，则下次想睡时需要重新等待观察窗口。如果返回里带 preSleepWaitRemainingMs，就按剩余时间继续等待。\n\n`;
+    // 「不回复也要静置 5 分钟」硬规则（2026-11-02 用户要求）：决定这轮不发言时不要立刻结束回合，
+    // 先等满一个观察窗口接住接下来的话；否则下一句会以新的唤醒进来、再发一遍长提示词。
+    // 等待期间不花模型 token（只是把回合挂着），比下一条消息重新唤醒便宜得多。
+    const quietWaitLine = `【不回复也要静置】如果你判断这一轮不需要发言（或已经自然收尾）：先调用 qq_wait_for_messages(timeoutMs=${preSleepMs}) 静置满 ${Math.round(preSleepMs / 60000)} 分钟——返回 preSleepWaitSatisfied=true 说明期间没人再说话，才可以结束回合；期间有人说话，就看 newMessages 继续判断、能接就接。**不要**回完/决定不接就立刻结束回合：那样下一句会在新的唤醒里重新来一遍提示词。\n\n`;
     const lastMsg = [...(Array.isArray(st.recentMessages) ? st.recentMessages : [])].reverse().find((m) => m && !m.isSelf);
     const recallHint = lastMsg && RECALL_HINT_RE.test(String(lastMsg.text || lastMsg.plain || ''))
       ? '【回忆】这句可能在问过去的事；想不起来就用 qq_recall(query=关键词) 查原文库/文档记忆，别硬编。\n\n'
@@ -14235,8 +14249,9 @@ async function main() {
     // 后续唤醒不再带它 —— 那时它已经在这条 DSH 会话的上下文里了。
     const initialPromptText = reason === 'bootstrap' ? formatInitialPromptV2(key) : '';
     const initialPromptLine = initialPromptText ? `${initialPromptText}\n\n` : '';
-    // 二代模式不自动注入完整角色卡（让 AI 调 qq_get_prompt），但 B 站记忆必须每轮都在：
-    // 否则群友问起「B站那个号」时，它会把自己当成另一个人。
+    // 二代模式不自动注入完整角色卡（让 AI 调 qq_get_prompt），但 B 站记忆要在：
+    // 首次唤醒放简报（否则群友问起「B站那个号」时它会把自己当成另一个人）；
+    // 后续唤醒只在最近消息提到 B站 相关时按需给 recallBlock——简报已在上下文里。
     const biliBrief = cfg.biliBridge?.enabled && cfg.biliBridge?.memory?.enabled !== false
       ? biliMemory.briefBlock()
       : '';
@@ -14244,12 +14259,13 @@ async function main() {
       ? biliMemory.recallBlock(String(lastMsg.text || lastMsg.plain || ''))
       : '';
     const biliLine = biliBrief || biliRecall ? `${biliBrief}${biliRecall ? `${biliRecall}\n` : ''}\n` : '';
-    // 二代不自动注入完整角色卡，但记忆卡必须每轮都在：否则她记不起和主人的事。
+    // 二代不自动注入完整角色卡，但记忆卡要在：首次唤醒放（她记不起和主人的事就会露馅）；
+    // 后续唤醒不再重复——内容已在会话上下文里，记忆卡更新靠会话轮换/新会话 bootstrap 刷新。
     // 注入时按当前场合过滤（记录级 audience 标记 + memoryScene 配置），不改记忆卡本身。
-    const memoryCardText = memoryCardPromptBlock(key);
+    const memoryCardText = includeStatic ? memoryCardPromptBlock(key) : '';
     const memoryCardLine = memoryCardText ? `${memoryCardText}\n\n` : '';
-    // 叙事层（「我们一起经历过的」）：插件渲染进 md 时这里是空的，没渲染时由桥接补上。
-    const narrativeText = narrativeFallbackBlock();
+    // 叙事层（「我们一起经历过的」）：插件渲染进 md 时这里是空的，没渲染时由桥接补上（首次唤醒）。
+    const narrativeText = includeStatic ? narrativeFallbackBlock() : '';
     const narrativeLine = narrativeText ? `${narrativeText}\n\n` : '';
     // 记忆卡是私聊和群聊共用的，插件给每条打的 [私聊]/[群里] 标记要 DSH 重启后才生效；
     // 在那之前（以及以后万一标记丢了），群里这一侧必须自己守住边界：
@@ -14262,12 +14278,14 @@ async function main() {
       : '';
     // 羽的现场修正：紧跟记忆卡，优先级高于记忆（他刚说的新要求总该赢过旧记录）。
     // 2026-10-31：按当前场合过滤（[私聊]/[群]/[群:123] 作用域），旧行没有前缀 = 全局。
+    // 2026-11-02：与记忆卡同批改成只在 bootstrap 注入（会话内已在上下文）。
     const styleNotesText = styleNotesBlock(key);
     const styleNotesLine = styleNotesText ? `${styleNotesText}\n\n` : '';
     // 跨会话记忆：私聊和群聊的轻记忆各自一份，这里补上别的会话的，避免「私聊说过的规矩群里不认」。
+    // 2026-11-02：同样只在 bootstrap 注入一次（轻记忆更新靠 qq_memory_* 工具实时写入）。
     const sharedMemoryText = formatSharedMemoryV2(key);
     const sharedMemoryLine = sharedMemoryText ? `${sharedMemoryText}\n\n` : '';
-    const base = roleLine + identityLine + provenanceLine + sceneLine + adminLine + biliLine + memoryCardLine + docMemoryLine + selfNotesLine + recallHint + narrativeLine + convGuardLine + styleNotesLine + tokenLine + initialPromptLine + antiAiLine + proactiveLine + closureLine + stickerLine + stickerMatchLine + replyLine + statusLine + wakeLine + memoryLine + sharedMemoryLine + crossSceneLine + participationLine + fishGuardLine + tokenGuardLine + preSleepLine;
+    const base = roleLine + identityLine + provenanceLine + sceneLine + adminLine + biliLine + memoryCardLine + docMemoryLine + selfNotesLine + recallHint + narrativeLine + convGuardLine + styleNotesLine + tokenLine + initialPromptLine + antiAiLine + proactiveLine + closureLine + stickerLine + stickerMatchLine + replyLine + statusLine + wakeLine + memoryLine + sharedMemoryLine + crossSceneLine + participationLine + fishGuardLine + tokenGuardLine + preSleepLine + quietWaitLine;
     if (reason === 'bootstrap') {
       return `${base}【引导唤醒】你已接入 QQ 会话 ${key}。\n当前是二代仿真模式：你的文本输出不会自动发送到 QQ，所有发言必须通过工具完成。\n请先调用 qq_get_prompt 查看角色、推荐值、可用工具和状态；有待回应的消息先按首回复节奏处理，最后才用 qq_set_wake_config 设置你希望如何被唤醒。\n如果上面有【你对自己的记录】：那是你自己攒的，不是要用来自述的台词。聊到关于自己的变化（发现自己更像什么样、想改什么、想留住什么），就用 qq_memory_append(category="selfNote", content="一句") 记一句——不用写日记、不用长；下次换新会话时它会再出现。`;
     }
@@ -14276,9 +14294,9 @@ async function main() {
     }
     if (reason === 'replyCheck') {
       if (isPrivateChat) {
-        return `${base}【回复检查】${key}\n原因：你刚刚发过消息，现在回来看看他回没回。\n没回就别硬补一句——他可能在忙，不用收尾，也不用为这个去等观察窗口。回了就先看他说的什么，再决定怎么接。`;
+        return `${base}【回复检查】${key}\n原因：你刚刚发过消息，现在回来看看他回没回。\n没回就别硬补一句——他可能在忙；按【不回复也要静置】等满静置窗口再结束回合（期间他要是又说话，就继续看怎么接）。回了就先看他说的什么，再决定怎么接。`;
       }
-      return `${base}【回复检查】${key}\n原因：你刚刚发送过消息，现在回来检查是否有人回复。\n先看有没有人回。如果没人回，这段对话可能已经自然结束：不用硬补一句，也不用为了收尾去等 5 分钟沉睡前观察——直接判断，还有想说的就回，没有就 qq_close_conversation 自然收尾（不是潜水，唤醒配置不变）。如果有人回你，先看【对话收尾判断】再决定接不接；需要确认对方是否说完，用 qq_wait_for_messages(purpose="reply")。`;
+      return `${base}【回复检查】${key}\n原因：你刚刚发送过消息，现在回来检查是否有人回复。\n先看有没有人回。如果没人回：不用硬补一句——按【不回复也要静置】等满静置窗口（期间有人回就继续判断），确认真没人再说话，再决定 qq_close_conversation 自然收尾（不是潜水，唤醒配置不变）；还有想说的就直接回。如果有人回你，先看【对话收尾判断】再决定接不接；需要确认对方是否说完，用 qq_wait_for_messages(purpose="reply")。`;
     }
     if (reason === 'proactiveCheck') {
       if (isPrivateChat) {

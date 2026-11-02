@@ -3352,3 +3352,33 @@ return list[0] ?? pool[0];
 - **回归测试**：`test-memory-docs` 的真实 bridge 用例故意把薄版写大（约 420 字摘要），并断言私密日记的
   「今天想他了」在**默认配置**下出现——默认掉回 900 时这条会红。
 - **回滚**：无（默认值本来就是 1100/900）。
+
+## #93（2026-11-02）每条 QQ 消息都重发一遍「bootstrap」：唤醒提示 12.7k 字、记忆卡占 5.9k
+
+- **现象**：主人算 token 时发现，同一段对话里每醒一次都像重发一次 bootstrap；实测 `buildWakePromptV2`
+  群聊唤醒提示 **12,739 字**，而 bootstrap 只有 12,876 字——**几乎一样大**。逐段量：
+  【记忆卡】5,944 字（47%）、【对话收尾判断】1,323、【管理员模式】1,085、【文档记忆】814、【表情包】639…
+  也就是说每条消息的唤醒都在重复塞一张几乎不变的记忆卡。
+- **根因**：`buildWakePromptV2` 里身份/出处/管理员/B站简报/记忆卡/叙事/私聊边界/style-notes/共享轻记忆/文档记忆
+  都无条件拼进每次唤醒。bootstrap 与普通唤醒只差一个【引导唤醒】尾巴；而记忆卡（~5.9k）和叙事是最大的两块静态内容，
+  它们**已经在这条 DSH 会话的上下文里**，重发纯烧 token。用户原话：「同一个会话有必要反复发 bootstrap 吗？
+  如果按照一个 session 不超过 5 轮，是否第一次发 bootstrap 就够了」。
+- **修法**：`socialV2.wake.bootstrapOnlyContext`（默认 **true**）。`buildWakePromptV2` 里加
+  `const includeStatic = !leanWake || reason === "bootstrap"`，**只**把记忆卡（`memoryCardPromptBlock`）与叙事层
+  （`narrativeFallbackBlock`）改成只在 bootstrap 注入；其他块保持每轮（见下条坑）。
+  实测效果：群聊唤醒 12,739 → **7,004 字**（bootstrap 仍 12,881）；私聊 12,049 → **6,314 字**（-48%）。
+- **坑 1（不能一刀切）**：第一版把身份/管理员/B站简报/文档记忆也改成 bootstrap-only，直接打挂 3 个回归：
+  `test-issue-regressions` #29「唤醒 prompt 必须写明机器人昵称与 QQ 号」、`test-admin-prompt-wiring`
+  「二代唤醒必须带管理员温柔规则」、`test-memory-docs`「私聊唤醒提示缺文档记忆块」。这些小块每轮在是**设计约束**，
+  不是冗余：身份是 agent 唯一对上号的地方、管理员规则决定对谁温柔、文档记忆承诺「文件一改下轮跟上」。
+  所以只砍最大的静态块（记忆卡+叙事），其余保留。
+- **坑 2（测试要跟着语义走）**：`test-scene-wiring` 第 4 组原本用 `reason="question"` 验记忆卡 audience 过滤；
+  记忆卡改成 bootstrap-only 后必须改成 `reason="bootstrap"` 验同一规则（过滤逻辑没变，变的是注入时机）。
+- **配套：不回复也要静置 5 分钟**（用户同批要求）：唤醒提示新增【不回复也要静置】硬规则——决定不发言/收尾时
+  先用 `qq_wait_for_messages(timeoutMs=300000)` 静置满 5 分钟（`preSleepWaitSatisfied=true`）再结束回合；
+  期间有人说话就继续判断。等待不花 token，比下一句重新唤醒（再发 6.8k 字提示）便宜得多。`replyCheck` 文案同步改口。
+- **验证**：`npm run test:audit` 88/94（6 个失败全是历史漂移：self-identity/identity-guard/media-search/
+  voice-system/preset-local-tools/version，与改动无关）；`test-scene-wiring` 7/7、`test-memory-docs`、`test-admin-prompt-wiring`、
+  `test-issue-regressions`、`test-memory-card-wiring`、`test-closure-wiring`、`test-self-note-wiring` 全过；
+  重启后 `GET /api/socialV2/wake-preview?key=...&reason=question` 得 7,004 字且不含【记忆卡】，`reason=bootstrap` 仍含。
+- **回滚**：`socialV2.wake.bootstrapOnlyContext=false`（记忆卡回到每轮都带；桥接重启生效）。

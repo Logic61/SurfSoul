@@ -285,7 +285,8 @@
       "maxWakePerMinute": 1,
       "maxWakePerHour": 12,
       "noActionLimit": 3,
-      "maxWakeConfigReminders": 2
+      "maxWakeConfigReminders": 2,
+      "bootstrapOnlyContext": true
     },
     "closure": {
       "enabled": true,
@@ -517,7 +518,11 @@
       "apiKeyRef": "DEEPSEEK_API_KEY",
       "timeoutMs": 60000,
       "minInterruptible": 0.55,
-      "blockActivities": ["gaming", "video", "meeting"],
+      "blockActivities": [
+        "gaming",
+        "video",
+        "meeting"
+      ],
       "failOpen": true,
       "keepScreenshots": false
     }

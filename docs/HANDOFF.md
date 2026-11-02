@@ -5,6 +5,44 @@
 
 ---
 
+## 快照（2026-11-02 17:3x，唤醒提示瘦身 + 不回复也要静置 5 分钟）
+
+### 用户原话
+
+> 「CC，可以不回，但是应该wait 5 min，否则下次唤醒又要发一串bootstrap，或者你觉得同一个会话有必要反复发bootstrap吗，
+> 如果按照一个session不超过5轮，是否第一次发bootstrap就够了」
+
+### 结论 / 做到哪
+
+- 先量了真实唤醒提示：群聊 **12,739 字/次**（bootstrap 12,876，几乎一样大），其中【记忆卡】**5,944 字（47%）**、
+  【对话收尾判断】1,323、【管理员模式】1,085、【文档记忆】814。结论：不是每轮必须「重发 bootstrap」，
+  是记忆卡被无条件每轮塞进唤醒提示；同一会话里它已经在上下文里，重发纯烧 token。
+- **修法**：`socialV2.wake.bootstrapOnlyContext`（默认 true）→ 记忆卡 + 叙事层只在 `reason === "bootstrap"` 注入。
+  实测群聊唤醒 **12,739 → 7,004 字**、私聊 **12,049 → 6,314 字**（-45%~48%）。身份/管理员规则/B站简报/
+  文档记忆/私聊边界/style-notes 等小块**保留每轮**（它们各有回归与设计约束，见 PITFALLS #93 坑 1）。
+- **不回复也要静置 5 分钟**（用户同批要求）：唤醒提示新增【不回复也要静置】硬规则——这轮决定不发言/收尾时，
+  先 `qq_wait_for_messages(timeoutMs=300000)` 静置满 5 分钟（`preSleepWaitSatisfied=true`）再结束回合；
+  期间有人说话就继续判断、能接就接。等待不花 token，比下一句重新唤醒再发 6.8k 字便宜得多。`replyCheck` 文案同步。
+- 改动文件：`src/bridge.js`（buildWakePromptV2 + 唤醒尾巴文案）、`config.json`/`config.example.json`（wake.bootstrapOnlyContext）、
+  `scripts/test-scene-wiring.mjs`（记忆卡注入时机）、文档四处 + PITFALLS #93。桥接已重启（PID **6392**）。
+
+### 验证
+
+- `GET /api/socialV2/wake-preview?key=group:1021716885&reason=question` → **7,004 字、不含【记忆卡】**；
+  `reason=bootstrap` → 12,881 字、含【记忆卡】；poke/replyCheck 同样 6.8~6.9k 字。私聊 question 6,314 字。
+- `test:audit` **88/94**（失败集合是历史漂移：self-identity/identity-guard/media-search/voice-system/
+  preset-local-tools/version，与本次无关）；`test-scene-wiring` 7/7、`test-memory-docs`、`test-admin-prompt-wiring`、
+  `test-issue-regressions`、`test-memory-card-wiring`、`test-closure-wiring`、`test-self-note-wiring` 全过。
+
+### 未验证 / 下一步
+
+- 「不回复也要静置」目前是**提示词硬规则**，没有桥接强制：下次真实 QQ 出现「bot 决定不接」的回合时，
+  看 `bridge.log` / DSH 会话事件是否真的先 `qq_wait_for_messages(timeoutMs=300000)` 再 `turn/end`；
+  如果模型仍提前结束，下一步在桥接侧加提醒/拦截（turn 结束前检查最近一次 wait 的 `preSleepWaitSatisfied`）。
+- 记忆卡更新现在要等换新会话（自然收尾 5 次 + 静置 5 分钟）或手动触发；嫌慢可设 `bootstrapOnlyContext:false`
+  （恢复每轮 5.9k 字），或以后做「记忆增量注入」。
+
+---
 ## 快照（2026-11-02 15:5x，记忆架构第四批：语感本跟随改动 + 控制台 selfNote + 桥接已重启验证）
 
 ### 用户原话

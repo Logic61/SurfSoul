@@ -227,12 +227,14 @@ test('记忆卡：audience 标记按场合过滤（默认共享；groupExcludePr
   });
   try {
     h.setMode('reserved2');
-    const groupPrompt = h.buildWakePromptV2(GROUP, 'question');
+    // 2026-11-02：记忆卡改成只在 bootstrap 注入（每轮重发 = 重复烧 5.9k 字）；这里断言的
+    // 是「注入时按场合过滤」的规则，所以用 bootstrap 这一份来验。
+    const groupPrompt = h.buildWakePromptV2(GROUP, 'bootstrap');
     assert.ok(groupPrompt.includes('私聊里说过的事'), '默认记忆共同：[私聊] 普通记录进群');
     assert.ok(groupPrompt.includes('群里发生的事'));
     assert.ok(!groupPrompt.includes('只在私聊可见的事'), 'private-only 记录不得进群');
     assert.ok(groupPrompt.includes('只在群里可见的事'));
-    const privatePrompt = h.buildWakePromptV2(OWNER, 'question');
+    const privatePrompt = h.buildWakePromptV2(OWNER, 'bootstrap');
     assert.ok(privatePrompt.includes('只在私聊可见的事'));
     assert.ok(!privatePrompt.includes('只在群里可见的事'), 'group-only 记录不得进私聊');
   } finally { await h.close(); }
@@ -243,7 +245,7 @@ test('记忆卡：audience 标记按场合过滤（默认共享；groupExcludePr
   });
   try {
     h2.setMode('reserved2');
-    const groupPrompt = h2.buildWakePromptV2(GROUP, 'question');
+    const groupPrompt = h2.buildWakePromptV2(GROUP, 'bootstrap');
     assert.ok(!groupPrompt.includes('私聊里说过的事'), 'groupExcludePrivate=true 时群聊连 [私聊] 记录也过滤');
     assert.ok(groupPrompt.includes('群里发生的事'));
   } finally { await h2.close(); }

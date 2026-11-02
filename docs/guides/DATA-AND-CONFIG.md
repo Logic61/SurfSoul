@@ -132,7 +132,7 @@
 | --- | --- | --- |
 | 总开关 | `enabled`、`autoReplyCheckMs`、`agentPreset`（`qq-chat-v2`）、`provideRecommendations` | 二代是"一切皆工具"，文本不自动发送 |
 | `tools` | 32 个布尔开关 | **逐个工具的开关**：发消息/引用/分条/等待/表情/语音/记忆/黑话/收尾/跨场合投递…默认全开，`setStickerRemark` 与 `sendVoice` 默认**关** |
-| `wake` | `defaultMode`（diving）、`preSleepWaitEnabled`、`preSleepWaitMs`（300000）、`batchWindowMs`、`maxWakePerMinute/Hour`、`noActionLimit`、`recommended*` | 唤醒调度与"沉睡前观察"的强制窗口 |
+| `wake` | `defaultMode`（diving）、`preSleepWaitEnabled`、`preSleepWaitMs`（300000）、`batchWindowMs`、`maxWakePerMinute/Hour`、`noActionLimit`、`recommended*`、`bootstrapOnlyContext`（true） | 唤醒调度与"沉睡前观察"的强制窗口。`bootstrapOnlyContext=true`（2026-11-02）：记忆卡（实测 5.9k 字/次）与叙事层等最大静态块**只在每段新会话首次唤醒（bootstrap）注入一次**，同一会话后续唤醒不再重发（唤醒提示 12.7k → ~6.8k 字）；身份/管理员规则/B站简报/文档记忆/私聊边界/style-notes 等小块仍每轮在。设 `false` 恢复旧行为（记忆卡每轮都带）。另：唤醒提示里新增「不回复也要静置」硬规则——决定不发言/收尾时先用 `qq_wait_for_messages(timeoutMs=300000)` 静置满 5 分钟再结束回合，期间有人说话就继续接（避免下一句变成一次新唤醒、重发一遍提示词） |
 | `closure` | `enabled`、`cooldownMs`（20 分钟）、`requireNoOpenQuestion`、`promptInWake`、`maxSummaryChars`、`maxNextOpeningChars`、`rotateAfterClosures`（5）、`rotateIdleMs`（300000） | 对话收尾：冷却只压普通概率唤醒，@/提问/私聊不压；**自然收尾累计 5 次、且收尾后静置 `rotateIdleMs`（默认 5 分钟）无新消息 → 才换新 DSH 会话**（期间又开口就继续用原会话；记忆卡/收尾记录保留，计数换会话后归零；0=关闭轮换 / 0=不等静置） |
 | `send` | `burstMaxMessages`（8）、`maxSendPerMinute/Hour`、`maxMessageChars`（500）、`gap*` | 发送节流与硬上限（超长 400、超条数 429） |
 | `tokenGuard` | `maxWakesPerDay`（群 20 / 私聊 10）、`minWakeGapMs`（2 分钟）、`directBypassGap`、`maxOutboundPerTurn`、`maxDailyCostCNY` | 防爆破：@/引用/拍一拍可越过 2 分钟间隔，但每日次数仍生效 |

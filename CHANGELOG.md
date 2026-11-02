@@ -4,6 +4,26 @@
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 发布规则见 [docs/guides/VERSIONS.md](docs/guides/VERSIONS.md)。
 
+## [未发布] - 2026-11-02（QQ 唤醒提示瘦身 + 不回复也要静置 5 分钟）
+
+### 变更
+
+- **唤醒提示瘦身**（`socialV2.wake.bootstrapOnlyContext`，默认 **true**）：同一条 DSH 会话里，
+  记忆卡（实测 **5,944 字/次**，占唤醒提示 47%）与叙事层只在**首次唤醒（bootstrap）**注入；后续唤醒不再重发。
+  实测群聊唤醒提示 **12,739 → 7,004 字**、私聊 **12,049 → 6,314 字**（-45%~48%）；bootstrap 仍带全量。
+  身份/管理员规则/B站简报/文档记忆/私聊边界/style-notes 等小块保持每轮（各有设计约束与回归测试）。
+- **不回复也要静置 5 分钟**：唤醒提示新增【不回复也要静置】硬规则——判断这轮不发言/自然收尾时，
+  先 `qq_wait_for_messages(timeoutMs=300000)` 静置满 5 分钟（`preSleepWaitSatisfied=true`）再结束回合；
+  期间有人说话就继续判断、能接就接。避免下一句变成一次新唤醒、重发一遍长提示词。`replyCheck` 文案同步改口。
+- **配置**：`config.example.json` / 本机 `config.json` 增 `socialV2.wake.bootstrapOnlyContext`。
+
+### 测试/文档
+
+- `test-scene-wiring` 第 4 组改用 `reason=bootstrap` 验记忆卡 audience 过滤（注入时机变了、规则没变），7/7；
+  `test-memory-docs` / `test-admin-prompt-wiring` / `test-issue-regressions` / `test-memory-card-wiring` /
+  `test-closure-wiring` / `test-self-note-wiring` 全过；`npm run test:audit` **88/94**（6 个失败全是历史漂移，无新增）。
+- 文档：`MEMORY_CARD.md` §1 注入说明、`DATA-AND-CONFIG.md` §1.11 `wake` 行、`CONVERSATION_CLOSURE.md` §3.5、PITFALLS **#93**。
+
 ## [未发布] - 2026-11-02（文档记忆跟随语感本：薄版每轮注入 / 厚本按需查 + 控制台 selfNote + wake-preview）
 
 ### 变更
