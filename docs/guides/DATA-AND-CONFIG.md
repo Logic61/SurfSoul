@@ -148,6 +148,7 @@
 | `media` | `maxBytes`（8MB）、`maxPixels`（64MP）、`maxCount`（5） | 图片/表情/动图限制 |
 | `scenes` | `defaultPrivate.label/toneHint`、`defaultGroup.label/toneHint/memoryGuard`、`overrides.<key>` | **场合档位**（2026-10-31）：唤醒提示词顶部注入【场合】卡；`toneHint` 是该场合的语气提示，`memoryGuard`（默认群聊开）决定是否注入「私聊的事别搬到群里」守卫 |
 | `memoryScene` | `groupExcludePrivate`（默认 `false`）、`honorAudience`（默认 `true`） | 记忆卡注入的场合过滤：`honorAudience` 认记录级 `audience` 标记；`groupExcludePrivate=true` 时群聊连 `[私聊]` 记录也过滤（硬开关，默认关=记忆共同） |
+| `recall` / `docMemory` / `selfNotes` | `recall.{enabled,crossConversation,maxHits}`；`docMemory.{enabled,maxChars.qq\|group,docs}`；`selfNotes.{enabled,maxNotes,maxChars}` | 记忆扩展（2026-11-01/02），都不占记忆卡 6000 字预算：原文库按需召回（`qq_recall`；群聊只查本群、主人私聊可跨会话）；活文档记忆（语感本/两本日记压缩注入 + 检索，文件一改下轮生效）；selfNote 自我认知层（按角色共享，只在换新会话第一轮注入一次） |
 | `crossSceneSend` | `enabled`（默认 **`false`**）、`allowTargets`（如 `["group:123"]`）、`maxPerHour`（6）、`maxChars`（200） | **受控跨场合投递**：只允许主人私聊 → 显式白名单群；默认关，开了也必须配 `allowTargets`。桥接代投、不给模型目标 token；过敏感/身份/长度/频率/token 回合额度/静默/鱼群闸 |
 
 #### 1.11.1 语音（`socialV2.voice`）
@@ -278,6 +279,7 @@
 | `memory/memory-card-prompt-{qq,bili,pet}.md` | 插件 | 桥接 / 调度器 / 桌宠 | **三份场景化注入块**（读取方不解析 JSON；桌宠那份 2026-11-01 新增，顺序与预算另配） |
 | `memory/memory-inbox.jsonl` | 桥接/桌宠（只 append） | 插件 | 待摄取事件（`platform=qq/bili/pet`） |
 | `memory/events/<YYYY-MM>.jsonl` + `events/index/ids.txt` | 插件（只 append） | 桥接 `qq_recall`（只读） | 原文库 L0：inbox 增量落盘；id 幂等、索引可重建；不进提示词 |
+| `memory/self-notes.json` 🔒 | 桥接（`qq_memory_append(category="selfNote")`，唯一写者） | 桥接 bootstrap | selfNote 自我认知层（2026-11-02）：按角色共享、40 条上限；只在换新会话第一轮注入一次 |
 | `memory/memory-card-full.jsonl` + `-stats.json` + `.md` | 插件 | 人 | 全量卡：append-only 存档，**永不进提示词** |
 | `memory/qq-for-bili.md` / `bili-for-qq.md` | 插件 | 桥接/调度器 | 双向记忆的成品文本 |
 | `characters/<id>/` 🔒 | 插件 | 插件/桥接 | 角色包（见 §4.3） |

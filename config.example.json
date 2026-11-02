@@ -458,6 +458,11 @@
       },
       "docs": null
     },
+    "selfNotes": {
+      "enabled": true,
+      "maxNotes": 10,
+      "maxChars": 700
+    },
     "memoryScene": {
       "groupExcludePrivate": false,
       "honorAudience": true

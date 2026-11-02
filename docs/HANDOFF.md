@@ -5,7 +5,58 @@
 
 ---
 
-## 快照（2026-11-02 00:2x，QQ 会话轮换加静置窗口：5 分钟没有新对话才换 session）
+## 快照（2026-11-02 11:5x，记忆架构第三批：selfNote 自我认知层）
+
+### 用户原话
+
+> 「没错，就是语感本和日记,然后继续下一批」
+> （确认第二批的「融入记忆」对象就是语感本 + 两本日记，已在前一批落地；本轮继续下一批。）
+
+### 为什么先做 selfNote（遵守 ROADMAP 的四项门槛，比较了 3 条路线）
+
+| 路线 | 收益 | 成本 | 本轮选择 |
+| --- | --- | --- | --- |
+| A. 冻结记忆评测基线（分析报告 P0-2） | 后续每次记忆改动的量化尺子 | 1~2 人日；纯基础设施，用户看不到变化 | 下一批（做「调参类」改动前必须有） |
+| B. 保护集配额（P1-2） | 腾出可裁剪空间 | 当前卡才 5 天、`forgetAfterDays=60`，未来 ~55 天根本不会遗忘；**现在没有可测收益**，还要动用户很在意的「最初」 | 推后（等 bench 能量化再动） |
+| C. selfNote 自我认知层（P1-3） | 和刚修的「收尾 5 次 + 静置 5 分钟才换会话」直接互补：换新会话后第一屏想起「我这段时间变成了什么样」；纯新增（独立文件 + 独立预算），不碰记忆卡/文档记忆主体 | 0.5~1 人日 | ✅ 本轮 |
+
+### 做到哪（已改代码，**未重启验证**）
+
+| 改动 | 内容 |
+| --- | --- |
+| 新模块 | `src/self-notes.js`：`memory/self-notes.json`（按角色共享、不按会话）；整句归一化去重（重复只刷新 `lastTouchedAt`）、40 条上限淘汰最久没碰的、每条 200 字、原子写（tmp+rename）、坏文件当空 |
+| 写入 | `POST /api/socialV2/memory-append` 新增 `category=selfNote`（`qq_memory_append` 工具同一条路）；`memory-remove` / `memory-clear` 支持；**`memory-clear` 不传 category 不清 selfNote**（防误抹） |
+| 注入 | 只在 `reason === 'bootstrap'` 注入【你对自己的记录（你自己写下的，不是别人给你的设定）】，块 ≤700 字 / 最多 10 条；平时唤醒不带。bootstrap 文案加一句「想到关于自己的变化就记一句，不用写日记」 |
+| 工具描述 | `qq_memory_append/query/remove/clear` 枚举 + 说明都加 `selfNote`；工具总数不变（仍 46） |
+| 配置 | `socialV2.selfNotes { enabled: true, maxNotes: 10, maxChars: 700 }`（`config.example.json` 同步） |
+| 测试 | `scripts/test-self-notes.mjs`（11 组）+ `scripts/test-self-note-wiring.mjs`（4 组：真实 bridge.js + 夹具 HTTP 端点 + bootstrap 门控 + 群聊共享 + 开关关闭 + 坏文件）；均进 `test:audit` |
+| 文档 | `MEMORY_CARD.md` §2 文件行 / §5.8 / §8；`DATA-AND-CONFIG.md` 文件表 + `socialV2` 段；`AGENT-TOOLS-AND-PRESETS.md` 记忆工具行；CHANGELOG |
+
+### 已验证
+
+- `node scripts/test-self-notes.mjs` **11/11**；`node scripts/test-self-note-wiring.mjs` **4/4**；
+  `node --check` bridge / self-notes / mcp / harness 全过。
+- `npm run test:audit` 见本轮提交前的完整输出（无新增红；bench 仍是历史 6 红）。
+
+### 没验证 / 下一步
+
+1. **要生效必须重启桥接**（写入端点/注入逻辑在桥接进程）。
+   **注意**：当前 DSH 会话如果已经 bootstrap 过，本轮不会突然出现自我记录块——
+   要等下一次换会话（自然收尾 5 次 + 静置 5 分钟）才会读一次；重启后新会话第一轮即可验证。
+   验证：私聊让她「记一句关于你自己的变化」→ `~/.dsh/surfcore/characters/<角色>/memory/self-notes.json` 出现；
+   下一段新会话的 bootstrap 提示里能看到【你对自己的记录】；平时唤醒不带。
+2. 下一批候选（顺序）：
+   - **冻结 bench 基线（P0-2，先做）**：`plugins/surfcore/bench/` + `npm run bench:memory`，固定时钟语料，
+     指标=注入命中/噪声/字数预算/隐私/出处泄露；之后调参类改动（保护集配额、P2-1 把 6000 收 4800~5000）才有尺子。
+   - 保护集配额（P1-2，等 bench 就位）
+   - 控制台「记忆」页展示/删除 selfNote（本轮只做了工具/API，前端没动）
+   - 桥接侧「相关记忆」小节（P2-1）、轻记忆自动沉淀（P2-2）
+3. 回滚：`socialV2.selfNotes.enabled=false` 即不注入；删除 `src/self-notes.js` / 两个测试 / 还原
+   `src/bridge.js`、`src/mcp-snowluma-safe.js`、`scripts/audit-bridge-harness.mjs`、`config.example.json`、
+   `package.json`、`scripts/test-audit.mjs`、文档即可；数据文件 `memory/self-notes.json` 独立可删。
+
+---
+
 
 ### 用户原话
 

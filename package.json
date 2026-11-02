@@ -44,6 +44,8 @@
     "test:memory-card-wiring": "node scripts/test-memory-card-wiring.mjs",
     "test:memory-recall": "node scripts/test-memory-recall.mjs",
     "test:memory-docs": "node scripts/test-memory-docs.mjs",
+    "test:self-notes": "node scripts/test-self-notes.mjs",
+    "test:self-note-wiring": "node scripts/test-self-note-wiring.mjs",
     "test:admin": "node scripts/test-admin-identity.mjs && node scripts/test-admin-prompt-wiring.mjs",
     "preview:console": "node scripts/console-ui-fixture.mjs",
     "verify:adaptation": "node scripts/verify-dsh-020-adaptation.mjs",

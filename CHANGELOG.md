@@ -4,6 +4,26 @@
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 发布规则见 [docs/guides/VERSIONS.md](docs/guides/VERSIONS.md)。
 
+## [未发布] - 2026-11-02（selfNote 自我认知层：她对自己的叙述，只在换新会话时读一次）
+
+### 变更
+
+- **selfNote 自我认知层**（新增 `src/self-notes.js`，数据 `memory/self-notes.json`）：借自 qq-dsh-bridge L4，
+  按 surfcore 的存储模型重写——**按角色共享**（QQ 私聊/群、桌宠、B站 读到同一个「我」），不按会话。
+  她通过 `qq_memory_append(category="selfNote", content="一句")` 写「我最近变成什么样」；整句去重
+  （重复只刷新 `lastTouchedAt`）、40 条上限（淘汰最久没碰的）、每条 200 字、原子写。
+- **克制注入**：只在 **bootstrap（新会话第一轮）** 注入【你对自己的记录（你自己写下的，不是别人给你的设定）】，
+  整块 ≤700 字 / 最多 10 条；平时唤醒不带（避免每轮背人设、挤记忆卡预算）。和「自然收尾 5 次 + 静置 5 分钟
+  才换会话」配合：换会话后第一屏想起这段时间自己变成了什么样。
+- **工具**：`qq_memory_append/query/remove/clear` 都支持 `selfNote`；`qq_memory_clear` 不传 category 时
+  **不会动它**（显式 `category="selfNote"` 才清），防止「重置这段会话的话题」顺手抹掉自我叙述。
+- **配置**：`socialV2.selfNotes { enabled: true, maxNotes: 10, maxChars: 700 }`（`config.example.json` 已同步）。
+- **测试**：新增 `scripts/test-self-notes.mjs`（11 组：去重/上限/坏文件自愈/预算截断/原子写）+
+  `scripts/test-self-note-wiring.mjs`（4 组：真实 bridge.js 的写入/查询/删除/清空端点、bootstrap 门控、
+  群聊共享、开关关闭、坏文件不炸唤醒），都进 `test:audit`。
+- **文档**：`MEMORY_CARD.md` 新增 §2 文件行与 §5.8；`DATA-AND-CONFIG.md` 文件表与 `socialV2` 段；
+  `AGENT-TOOLS-AND-PRESETS.md` 记忆工具行同步。
+
 ## [未发布] - 2026-11-02（QQ 会话轮换加静置窗口：5 分钟没有新对话才换 session）
 
 ### 修复

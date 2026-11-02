@@ -76,6 +76,9 @@ const tests = [
   'test-admin-identity.mjs', 'test-admin-prompt-wiring.mjs',
   // 记忆卡：重要度评分 / 主人锚点 / 每日模糊与遗忘 / 80·90·100% 容量 / 提示词裁剪 / 隐私 scope。
   'test-memory-card.mjs', 'test-memory-card-wiring.mjs', 'test-memory-recall.mjs', 'test-memory-docs.mjs',
+  // selfNote 自我认知层（2026-11-02，借自 qq-dsh-bridge L4）：按角色共享、整句去重、40 条上限、
+  // 只在 bootstrap 注入一次；真实 bridge.js 的写入/查询/删除/清空端点与工具描述接线。
+  'test-self-notes.mjs', 'test-self-note-wiring.mjs',
   // 场合作用域（2026-10-31 路线 A）：规矩 scope / style-notes 作用域 / 场合档位 /
   // 记忆卡 audience 过滤 / 受控跨场合投递（私聊→白名单群）的纯函数与真实桥接接线。
   'test-scene-scope.mjs', 'test-scene-wiring.mjs',

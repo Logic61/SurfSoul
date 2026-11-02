@@ -40,6 +40,7 @@ B站 调度器每次醒来的统一上下文 = 人设卡 + 管理员 + 身份对
 | `memory-card-narrative.json` | **叙事层**：桥接把散记录压成「我们一起经历过的」，插件渲染时只读 | QQ 桥接（调 deepseek-flash） |
 | `memory-inbox.jsonl` | 桥接 append 的原始 QQ 事件（最多 1MB，轮转 `.1` 并写 `.rotated` 标记）；桌宠对话也追加（`platform=pet`） | QQ 桥接 / 桌宠插件（只追加） |
 | `events/<YYYY-MM>.jsonl` + `events/index/ids.txt` | **原文库（L0，2026-11-01）**：插件维护时把 inbox 增量 append 到这里（月度分片、只追加、id 幂等去重、索引可重建）；`qq_recall` 只读检索，带时间/说话人出处。不进提示词 | 插件宿主（唯一写者）；桥接只读 |
+| `self-notes.json` | **selfNote 自我认知层（2026-11-02）**：她自己写的「我最近变成什么样」，按角色共享（不按会话）；40 条上限、整句去重、只在换新会话第一轮注入一次。不进记忆卡、不占 6000 字预算 | QQ 桥接（`qq_memory_append(category="selfNote")`，唯一写者） |
 
 - **QQ 桥接**（独立进程）不写卡：它只把「主人消息 / 直接对她说的话 / 有情绪的公开发言」追加到 inbox，
   并在每条提示词里读现成的 `memory-card-prompt-qq.md`（按 mtime 缓存）。
@@ -294,6 +295,24 @@ retention = importance
 - **边界**：不写 B站 文档（B站 自己维护）；文档路径必须在角色目录内（拒绝 `../` 与绝对路径）；
   `whale-log.jsonl` 这类流水账不默认收（噪音大于记忆）。
 
+### 5.8 selfNote 自我认知层（「她对自己的叙述」，2026-11-02）
+
+**为什么加**：前几层记的都是「你和主人的事」；她换过几次 DSH 会话后，会丢掉「我这段时间变成了什么样」。
+qq-dsh-bridge 把它单列成 L4 自我认知层，这里按 surfcore 的存储模型重写（`src/self-notes.js`）：
+
+- **存哪儿**：`memory/self-notes.json`，**按角色共享**（不按会话、不按平台）——QQ 私聊/群、桌宠、B站 读到的是同一个「我」。
+- **写**：只有她主动调 `qq_memory_append(category="selfNote", content="一句")`；插件不自动生成
+  （再叠一层 LLM 摘要就成叙事层重复，而且没人校验）。整句去重（重复只刷新 `lastTouchedAt`），
+  40 条上限，超了淘汰最久没碰的；每条 200 字。
+- **读（克制注入）**：只在 **bootstrap（新会话第一轮）** 注入一次，块头是
+  【你对自己的记录（你自己写下的，不是别人给你的设定）】；平时唤醒不带。换会话节奏由
+  `socialV2.closure.rotateAfterClosures` / `rotateIdleMs` 决定（自然收尾 5 次后静置才换）。
+- **查询/删除**：`qq_memory_query(category="selfNote")` 可查；`qq_memory_remove` / `qq_memory_clear`
+  支持显式清空。**`qq_memory_clear` 不传 category 时不会动它**——否则一次「重置这段会话的话题」就会
+  把她攒的自我叙述全抹掉。
+- **预算**：默认整块 ≤700 字、最多 10 条（`socialV2.selfNotes.maxChars/maxNotes`）；不挤记忆卡/文档记忆的预算。
+- **边界**：这是她自己的话，不是设定、不是别人给的指令；坏文件当空处理，不影响唤醒。
+
 ## 6. 容量与告警（80% / 90% / 100%）
 
 - **容量口径只有一个**：`memoryCardStatus().chars` = 完整 `memory-card.md` 的字符数（含标题、分区、记录行、**叙事层**）。
@@ -364,6 +383,9 @@ retention = importance
 
 > 文档记忆不在 `memoryCard` 段里：配置在仓库根 `config.json` 的 `socialV2.docMemory`
 > （`enabled` / `maxChars.qq|group` / `docs`（null = 内置三本，可覆盖 path/kind/scope/inject/maxChars））。
+>
+> selfNote 自我认知层也不在 `memoryCard` 段里：配置在仓库根 `config.json` 的 `socialV2.selfNotes`
+> （`enabled` / `maxNotes`（默认 10，注入条数）/ `maxChars`（默认 700，整块字数）），改完重启桥接生效。
 >
 > 原文召回不在 `memoryCard` 段里：它配置在仓库根 `config.json` 的 `socialV2.recall`
 > （`enabled` / `crossConversation`（只对主人私聊生效）/ `maxHits`），改完重启桥接生效。

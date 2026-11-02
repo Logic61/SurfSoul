@@ -73,6 +73,8 @@ import {
 } from './memory-card.js';
 import { createEventRecall, formatRecallHits } from './memory-search.js';
 import { formatDocHits, readMemoryDocs, renderDocBlock, searchMemoryDocs } from './memory-docs.js';
+// selfNote 自我认知层（2026-11-02）：按角色共享、只在 bootstrap 注入一次（见 src/self-notes.js 头部）。
+import { addSelfNote, clearSelfNotes, formatSelfNotesBlock, loadSelfNotes, removeSelfNote } from './self-notes.js';
 import { completeText } from './llm-text.js';
 import {
   createMemoryAbstractProvider, createPresendReviewer, createRejectFallback, normalizePresendReviewConfig,
@@ -8590,7 +8592,9 @@ async function main() {
           const category = String(body.category ?? '').trim();
           const content = String(body.content ?? '').trim();
           const extra = body.extra && typeof body.extra === 'object' ? body.extra : {};
-          const categories = ['activeTopic', 'pendingThought', 'memberImpression', 'rule'];
+          // selfNote（2026-11-02）：不是「会话里的轻记忆」，而是按角色共享的「自我认知」，
+          // 单独落在 memory/self-notes.json（40 条上限、整句去重），只在 bootstrap 注入一次。
+          const categories = ['activeTopic', 'pendingThought', 'memberImpression', 'rule', 'selfNote'];
           if (!key || !category || !content) { sendJson({ ok: false, error: 'key/category/content 不能为空' }, 400); return; }
           if (!categories.includes(category)) { sendJson({ ok: false, error: `category 必须是 ${categories.join(' / ')}` }, 400); return; }
           if (category === 'memberImpression' && !String(extra.target || '').trim()) { sendJson({ ok: false, error: 'memberImpression 需要 extra.target 指定群友名字' }, 400); return; }
@@ -8606,6 +8610,17 @@ async function main() {
           if (req.headers['x-agent-token'] && !v2SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
           if (req.headers['x-agent-token'] && !v2ToolEnabled('memory')) { sendJson({ ok: false, error: '工具未启用：qq_memory_append' }, 403); return; }
           const st = getSocialV2State(key);
+          if (category === 'selfNote') {
+            // 与 appendMemoryV2 同一条脱敏闸门：自我记录也可能提到 key/令牌/号码，落盘前先抹掉。
+            const result = addSelfNote(MEMORY_CARD_PATHS.dir, redactKnownTokensOnly(String(content)));
+            if (!result.ok) { sendJson({ ok: false, error: result.error || '自我记录写入失败' }, 400); return; }
+            const notes = loadSelfNotes(MEMORY_CARD_PATHS.dir);
+            sendJson({
+              ok: true, key, category, added: result.added, touched: result.touched, total: result.total,
+              block: formatSelfNotesBlock(notes)
+            });
+            return;
+          }
           appendMemoryV2(st, category, content, appendExtra, key);
           sendJson({ ok: true, key, category, content, scope: appendExtra.scope, memory: formatMemoryV2(st, key) });
           return;
@@ -8701,11 +8716,19 @@ async function main() {
           if (req.headers['x-agent-token'] && !v2SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
           if (req.headers['x-agent-token'] && !v2ToolEnabled('memory')) { sendJson({ ok: false, error: '工具未启用：qq_memory_query' }, 403); return; }
           const st = getSocialV2State(key);
+          // selfNote（2026-11-02）：单独一类——按角色共享、不是这段会话的轻记忆。
+          // 查询时返回渲染块 + 原始条目；其它类别查询不带它（避免「问话题却看到自我叙述」）。
+          const selfNoteList = loadSelfNotes(MEMORY_CARD_PATHS.dir);
+          if (category === 'selfNote') {
+            sendJson({ ok: true, key, category, formatted: formatSelfNotesBlock(selfNoteList), raw: { selfNotes: selfNoteList } });
+            return;
+          }
           const raw = {
             activeTopics: Array.isArray(st.activeTopics) ? st.activeTopics.slice(-20) : [],
             pendingThoughts: Array.isArray(st.pendingThoughts) ? st.pendingThoughts.filter((t) => !t.expiresAt || Date.now() < t.expiresAt).slice(-20) : [],
             memberImpressions: st.memberImpressions && typeof st.memberImpressions === 'object' ? st.memberImpressions : {},
-            rules: Array.isArray(st.rules) ? st.rules.slice(-20) : []
+            rules: Array.isArray(st.rules) ? st.rules.slice(-20) : [],
+            selfNotes: category ? [] : selfNoteList
           };
           if (category === 'activeTopic') {
             raw.pendingThoughts = [];
@@ -8738,7 +8761,11 @@ async function main() {
               }
             }
           }
-          sendJson({ ok: true, key, category, formatted: formatMemoryV2({ ...st, ...raw, rules: mergedRules }, key), raw });
+          const formatted = [
+            formatMemoryV2({ ...st, ...raw, rules: mergedRules }, key),
+            category ? '' : formatSelfNotesBlock(selfNoteList),
+          ].filter(Boolean).join('\n\n');
+          sendJson({ ok: true, key, category, formatted, raw });
           return;
         }
         // ── 原文召回（qq_recall，2026-11-01）：只读查 events/ 原文库 ──────────────────
@@ -8773,7 +8800,7 @@ async function main() {
           const content = String(body.content ?? '').trim();
           const target = String(body.target ?? '').trim();
           if (!key || !category) { sendJson({ ok: false, error: 'key/category 不能为空' }, 400); return; }
-          if (!['activeTopic', 'pendingThought', 'memberImpression', 'rule'].includes(category)) { sendJson({ ok: false, error: 'category 必须是 activeTopic / pendingThought / memberImpression / rule' }, 400); return; }
+          if (!['activeTopic', 'pendingThought', 'memberImpression', 'rule', 'selfNote'].includes(category)) { sendJson({ ok: false, error: 'category 必须是 activeTopic / pendingThought / memberImpression / rule / selfNote' }, 400); return; }
           if (category === 'memberImpression' && !target) { sendJson({ ok: false, error: 'memberImpression 需要 target 指定群友名字' }, 400); return; }
           if (category === 'memberImpression' && ['__proto__', 'constructor', 'prototype'].includes(target)) { sendJson({ ok: false, error: '非法的群友名字' }, 400); return; }
           if (category !== 'memberImpression' && !content) { sendJson({ ok: false, error: '该类别需要 content 指定要删除的记忆内容' }, 400); return; }
@@ -8789,9 +8816,12 @@ async function main() {
             delete st.memberImpressions[target];
           } else if (category === 'rule' && Array.isArray(st.rules)) {
             st.rules = st.rules.filter((r) => normalizeRuleText(r?.text) !== normalizeRuleText(content));
+          } else if (category === 'selfNote') {
+            const removed = removeSelfNote(MEMORY_CARD_PATHS.dir, content);
+            if (!removed.ok) { sendJson({ ok: false, error: removed.error || '自我记录删除失败' }, 400); return; }
           }
           saveSocialV2State();
-          sendJson({ ok: true, key, category, memory: formatMemoryV2(st, key) });
+          sendJson({ ok: true, key, category, memory: formatMemoryV2(st, key), block: formatSelfNotesBlock(loadSelfNotes(MEMORY_CARD_PATHS.dir)) });
           return;
         }
         if (req.method === 'POST' && url.pathname === '/api/socialV2/memory-clear') {
@@ -8799,7 +8829,7 @@ async function main() {
           const key = String(body.key ?? '').trim();
           const category = String(body.category ?? '').trim();
           if (!key) { sendJson({ ok: false, error: 'key 不能为空' }, 400); return; }
-          if (category && !['activeTopic', 'pendingThought', 'memberImpression', 'rule'].includes(category)) { sendJson({ ok: false, error: 'category 必须是 activeTopic / pendingThought / memberImpression / rule' }, 400); return; }
+          if (category && !['activeTopic', 'pendingThought', 'memberImpression', 'rule', 'selfNote'].includes(category)) { sendJson({ ok: false, error: 'category 必须是 activeTopic / pendingThought / memberImpression / rule / selfNote' }, 400); return; }
           if (req.headers['x-agent-token'] && !agentTokenOk(key, req.headers['x-agent-token'])) { sendJson({ ok: false, error: 'agent token 无效' }, 403); return; }
           if (req.headers['x-agent-token'] && !v2SessionAllowed(key)) { sendJson({ ok: false, error: '目标不在当前模式允许范围内' }, 403); return; }
           if (req.headers['x-agent-token'] && !v2ToolEnabled('memory')) { sendJson({ ok: false, error: '工具未启用：qq_memory_clear' }, 403); return; }
@@ -8808,8 +8838,11 @@ async function main() {
           if (!category || category === 'pendingThought') st.pendingThoughts = [];
           if (!category || category === 'memberImpression') st.memberImpressions = {};
           if (!category || category === 'rule') st.rules = [];
+          // 注意：selfNote 是**按角色共享**的自我认知，清空「全部轻记忆」不碰它——
+          // 必须显式 category='selfNote' 才清（否则一次「重置这段会话的话题」就会把她攒的自我叙述全抹掉）。
+          if (category === 'selfNote') clearSelfNotes(MEMORY_CARD_PATHS.dir);
           saveSocialV2State();
-          sendJson({ ok: true, key, category: category || 'all', memory: formatMemoryV2(st, key) });
+          sendJson({ ok: true, key, category: category || 'all', memory: formatMemoryV2(st, key), block: formatSelfNotesBlock(loadSelfNotes(MEMORY_CARD_PATHS.dir)) });
           return;
         }
         // ── 二代黑话学习（reserved2）：AI 查询/提交黑话候选 ─────────────────
@@ -14099,6 +14132,16 @@ async function main() {
           : (Number(cfg.socialV2?.docMemory?.maxChars?.group) || 500),
       });
     const docMemoryLine = docMemoryText ? `${docMemoryText}\n\n` : '';
+    // selfNote 自我认知层（2026-11-02）：按角色共享的「她对自己的叙述」。
+    // 只在**新会话第一轮**（bootstrap）注入一次：它属于冷启动背景，不是每轮都要看的台词。
+    // 每轮塞 = 让她反复背自己的人设，还会挤掉记忆卡/文档记忆的预算（qq-dsh-bridge 同策略）。
+    const selfNotesText = reason === 'bootstrap' && cfg.socialV2?.selfNotes?.enabled !== false
+      ? formatSelfNotesBlock(loadSelfNotes(MEMORY_CARD_PATHS.dir), {
+        max: Number(cfg.socialV2?.selfNotes?.maxNotes) || 10,
+        maxChars: Number(cfg.socialV2?.selfNotes?.maxChars) || 700,
+      })
+      : '';
+    const selfNotesLine = selfNotesText ? `${selfNotesText}\n\n` : '';
     const lastAiMin = st.lastAiReplyAt ? Math.max(0, Math.round((Date.now() - Number(st.lastAiReplyAt)) / 60000)) : null;
     const statusBits = [`未读 ${(st.unread || []).length} 条`];
     if (lastMsg) statusBits.push(`最近一条来自 ${String(lastMsg.sender || '未知')}：${String(lastMsg.text || lastMsg.plain || '').slice(0, 30)}`);
@@ -14166,9 +14209,9 @@ async function main() {
     // 跨会话记忆：私聊和群聊的轻记忆各自一份，这里补上别的会话的，避免「私聊说过的规矩群里不认」。
     const sharedMemoryText = formatSharedMemoryV2(key);
     const sharedMemoryLine = sharedMemoryText ? `${sharedMemoryText}\n\n` : '';
-    const base = roleLine + identityLine + provenanceLine + sceneLine + adminLine + biliLine + memoryCardLine + docMemoryLine + recallHint + narrativeLine + convGuardLine + styleNotesLine + tokenLine + initialPromptLine + antiAiLine + proactiveLine + closureLine + stickerLine + stickerMatchLine + replyLine + statusLine + wakeLine + memoryLine + sharedMemoryLine + crossSceneLine + participationLine + fishGuardLine + tokenGuardLine + preSleepLine;
+    const base = roleLine + identityLine + provenanceLine + sceneLine + adminLine + biliLine + memoryCardLine + docMemoryLine + selfNotesLine + recallHint + narrativeLine + convGuardLine + styleNotesLine + tokenLine + initialPromptLine + antiAiLine + proactiveLine + closureLine + stickerLine + stickerMatchLine + replyLine + statusLine + wakeLine + memoryLine + sharedMemoryLine + crossSceneLine + participationLine + fishGuardLine + tokenGuardLine + preSleepLine;
     if (reason === 'bootstrap') {
-      return `${base}【引导唤醒】你已接入 QQ 会话 ${key}。\n当前是二代仿真模式：你的文本输出不会自动发送到 QQ，所有发言必须通过工具完成。\n请先调用 qq_get_prompt 查看角色、推荐值、可用工具和状态；有待回应的消息先按首回复节奏处理，最后才用 qq_set_wake_config 设置你希望如何被唤醒。`;
+      return `${base}【引导唤醒】你已接入 QQ 会话 ${key}。\n当前是二代仿真模式：你的文本输出不会自动发送到 QQ，所有发言必须通过工具完成。\n请先调用 qq_get_prompt 查看角色、推荐值、可用工具和状态；有待回应的消息先按首回复节奏处理，最后才用 qq_set_wake_config 设置你希望如何被唤醒。\n如果上面有【你对自己的记录】：那是你自己攒的，不是要用来自述的台词。聊到关于自己的变化（发现自己更像什么样、想改什么、想留住什么），就用 qq_memory_append(category="selfNote", content="一句") 记一句——不用写日记、不用长；下次换新会话时它会再出现。`;
     }
     if (reason === 'timeout') {
       return `${base}【唤醒】${key}\n原因：你设置的有限潜水时间已到；在你规定的时间内没有任何一项条件被触发，只是因为时间到了所以你被唤醒。\n你可以查看消息，或继续设置新的唤醒条件。`;

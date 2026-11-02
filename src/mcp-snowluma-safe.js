@@ -1014,12 +1014,12 @@ server.tool(
 
 server.tool(
   'qq_memory_append',
-  '记录一条轻量记忆：activeTopic=进行中的话题；pendingThought=你想说但还没说的话；memberImpression=对某位群友的印象；rule=**规矩/说话习惯**（主人定的：「以后别叫管理员」「群里别发路径」这类，要当指令遵守、不是普通记忆）。记忆会持久化，并在后续唤醒/qq_get_prompt 中自动出现。rule 必须用 extra.scope 指定生效场合：global=所有场合都认（私聊里定的规矩群里也认）/ private=只私聊 / group=任何群 / group:<群号>=只在那个群 / here=当前场合。不写 scope 默认 global。',
+  '记录一条轻量记忆：activeTopic=进行中的话题；pendingThought=你想说但还没说的话；memberImpression=对某位群友的印象；rule=**规矩/说话习惯**（主人定的：「以后别叫管理员」「群里别发路径」这类，要当指令遵守、不是普通记忆）；selfNote=**对你自己**的叙述（你发现自己最近变成什么样、想留住/想改掉什么）——一句一条、不写日记，按角色共享，只在换新会话的第一轮出现一次，不每轮刷屏。记忆会持久化，并在后续唤醒/qq_get_prompt 中自动出现。rule 必须用 extra.scope 指定生效场合：global=所有场合都认（私聊里定的规矩群里也认）/ private=只私聊 / group=任何群 / group:<群号>=只在那个群 / here=当前场合。不写 scope 默认 global。',
   {
     key: z.string().describe('会话 key，格式 group:群号 或 private:QQ号'),
     token: z.string().describe('会话令牌（见唤醒提示中的【会话令牌】）'),
-    category: z.enum(['activeTopic', 'pendingThought', 'memberImpression', 'rule']).describe('记忆类别；rule=规矩/说话习惯（带作用域）'),
-    content: z.string().describe('记忆内容，例如话题、想说的话、对某人的印象标签、或一条规矩'),
+    category: z.enum(['activeTopic', 'pendingThought', 'memberImpression', 'rule', 'selfNote']).describe('记忆类别；rule=规矩/说话习惯（带作用域）；selfNote=对自己的一句观察'),
+    content: z.string().describe('记忆内容，例如话题、想说的话、对某人的印象标签、一条规矩、或一句关于自己的观察'),
     extra: z.object({
       target: z.string().optional().describe('memberImpression 时的群友名字/昵称'),
       participants: z.array(z.string()).optional().describe('activeTopic 的参与者列表'),
@@ -1045,11 +1045,11 @@ server.tool(
 
 server.tool(
   'qq_memory_query',
-  '查看当前会话的轻量记忆：进行中的话题、你想说但还没说的话、对群友的印象、按场合生效的规矩（只读）。跨场合的全局规矩也会合并在里面。',
+  '查看当前会话的轻量记忆：进行中的话题、你想说但还没说的话、对群友的印象、按场合生效的规矩（只读）。跨场合的全局规矩也会合并在里面。不传 category 时还会带上【你对自己的记录】（按角色共享的 selfNote）。',
   {
     key: z.string().describe('会话 key，格式 group:群号 或 private:QQ号'),
     token: z.string().describe('会话令牌（见唤醒提示中的【会话令牌】）'),
-    category: z.enum(['activeTopic', 'pendingThought', 'memberImpression', 'rule']).optional().describe('可选：只看某一类记忆')
+    category: z.enum(['activeTopic', 'pendingThought', 'memberImpression', 'rule', 'selfNote']).optional().describe('可选：只看某一类记忆（selfNote=你对自己的记录）')
   },
   async ({ key, token, category }) => {
     try {
@@ -1088,11 +1088,11 @@ server.tool(
 
 server.tool(
   'qq_memory_remove',
-  '删除一条轻量记忆：activeTopic/pendingThought/rule 用 content 匹配原文删除；memberImpression 用 target 参数指定群友名字删除。',
+  '删除一条轻量记忆：activeTopic/pendingThought/rule/selfNote 用 content 匹配原文删除；memberImpression 用 target 参数指定群友名字删除。',
   {
     key: z.string().describe('会话 key，格式 group:群号 或 private:QQ号'),
     token: z.string().describe('会话令牌（见唤醒提示中的【会话令牌】）'),
-    category: z.enum(['activeTopic', 'pendingThought', 'memberImpression', 'rule']).describe('记忆类别'),
+    category: z.enum(['activeTopic', 'pendingThought', 'memberImpression', 'rule', 'selfNote']).describe('记忆类别'),
     content: z.string().optional().describe('要删除的话题/想法原文（memberImpression 不需要）'),
     target: z.string().optional().describe('memberImpression 时要删除的群友名字')
   },
@@ -1112,11 +1112,11 @@ server.tool(
 
 server.tool(
   'qq_memory_clear',
-  '清空轻量记忆：不传 category 清空全部；传 activeTopic/pendingThought/memberImpression/rule 只清空对应类别。',
+  '清空轻量记忆：不传 category 清空全部（**不碰 selfNote**，它是按角色共享的自我记录）；传 activeTopic/pendingThought/memberImpression/rule/selfNote 只清空对应类别。',
   {
     key: z.string().describe('会话 key，格式 group:群号 或 private:QQ号'),
     token: z.string().describe('会话令牌（见唤醒提示中的【会话令牌】）'),
-    category: z.enum(['activeTopic', 'pendingThought', 'memberImpression', 'rule']).optional().describe('要清空的类别，缺省清空全部')
+    category: z.enum(['activeTopic', 'pendingThought', 'memberImpression', 'rule', 'selfNote']).optional().describe('要清空的类别，缺省清空全部（不含 selfNote）')
   },
   async ({ key, token, category }) => {
     try {
