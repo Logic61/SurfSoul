@@ -1,6 +1,6 @@
 # 桥接内核（src/bridge.js）
 
-> 阅读范围：`src/bridge.js:1-14964`（全文，逐段 500 行）。
+> 阅读范围：`src/bridge.js` 全文（行数以 [CURRENT-NUMBERS.md](CURRENT-NUMBERS.md) 为准；逐段 500 行）。
 > 本文只描述**桥接这一侧**的行为；插件宿主、SnowLuma 内部、DSH 服务端的实现不在范围内。
 > 所有 `src/bridge.js:行号` 都指本仓库该文件。
 > **最后核对**：2026-10-26（全仓库逐行梳理）。配套阅读：总纲 [ARCHITECTURE.md](ARCHITECTURE.md) · 边界 [BOUNDARIES.md](BOUNDARIES.md) · 索引 [../README.md](../README.md)。

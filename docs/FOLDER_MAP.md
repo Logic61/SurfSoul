@@ -22,14 +22,14 @@
 
 | 目录 | 作用 | 能不能删/动 |
 | --- | --- | --- |
-| `src/` | **桥接内核与共享引擎**：主程序 `bridge.js`、DSH 客户端、三个 MCP server、黑话/表情/语音共享库、鱼群保护（`fish-guard.js`）、记忆卡引擎（`memory-card.js`）、目的机制纯逻辑（`purpose-engine.js`）、对话收尾判断（`conversation-closure.js`）、**每日 token 额度纯逻辑（`token-budget.js`）+ 账本（`token-ledger.js`）**、**状态目录 ACL 收紧（`state-acl.mjs`，与 `scripts/harden-state-acl.mjs` 同一实现）**、**安全抓取（`safe-fetch.js`）**、**上线补历史（`history-catchup.js`）**、**价目表（`model-prices.js`）**、**发送语音内核（`voice-core.js` / `voice-packs.js` / `voice-tts.js`，三者职责不同：解析与探测 / 语音包安装 / 本地 TTS 客户端）** | 不能动。`bridge.js` 是主程序（**约 15,000 行**，仍是全仓库最大单体，控制台 126 条路由写在同一条 if 链里）；`voice-core.js` 与 `snowluma-conn.js` 是**独立工具也在用的单一实现**；`memory-card.js` 同时被桥接/插件/单测引用，改评分权重必须跑 `npm run test:memory-card`；`purpose-engine.js` / `token-budget.js` 是纯逻辑，改它们要跑 `npm run test:audit`。**目录里只应有 `.js`/`.mjs`**：曾经的 `bridge.js.bak-*` 会污染全局搜索并看起来像 module，2026-09-20 已移出（见下） |
+| `src/` | **桥接内核与共享引擎**：主程序 `bridge.js`、DSH 客户端、四个 MCP server、黑话/表情/语音共享库、鱼群保护（`fish-guard.js`）、记忆卡引擎（`memory-card.js`）、目的机制纯逻辑（`purpose-engine.js`）、对话收尾判断（`conversation-closure.js`）、**每日 token 额度纯逻辑（`token-budget.js`）+ 账本（`token-ledger.js`）**、**状态目录 ACL 收紧（`state-acl.mjs`，与 `scripts/harden-state-acl.mjs` 同一实现）**、**安全抓取（`safe-fetch.js`）**、**上线补历史（`history-catchup.js`）**、**价目表（`model-prices.js`）**、**发送语音内核（`voice-core.js` / `voice-packs.js` / `voice-tts.js`，三者职责不同：解析与探测 / 语音包安装 / 本地 TTS 客户端）**、**唤醒决策流水（`wake-decisions.js`）**、**直连 OneBot 只读白名单（`onebot-readonly.js`）** | 不能动。`bridge.js` 是主程序（**约 1.7 万行**，仍是全仓库最大单体，控制台 150+ 条路由写在同一条 if 链里）；`voice-core.js` 与 `snowluma-conn.js` 是**独立工具也在用的单一实现**；`memory-card.js` 同时被桥接/插件/单测引用，改评分权重必须跑 `npm run test:memory-card`；`purpose-engine.js` / `token-budget.js` 是纯逻辑，改它们要跑 `npm run test:audit`。**目录里只应有 `.js`/`.mjs`**：曾经的 `bridge.js.bak-*` 会污染全局搜索并看起来像 module，2026-09-20 已移出（见下） |
 | `scripts/` | 调试 / 测试 / 一次性运维脚本（见第二节命名约定） | 测试脚本不能删；`cleanup-*` / `fix-*` / `patch-*` / `diag-*` 多为历史遗留 |
 | `dsh/` | 要装进 DSH 的东西：`agent-presets/qq-chat`、`agent-presets/qq-chat-v2`（preset 的**权威源**，含工具白名单 `qq-tool-restrict.mjs` 的 re-export 壳）。DSH 0.1.7 起 preset 以 bundle patch 形式安装，patch 由 `scripts/build-agent-preset-patches.mjs` 从这里的源生成到 `plugins/surfcore/presets/` | 改 preset 会影响所有人设行为；改完必须重新生成 patch |
 | `plugins/` | DSH 插件：**`surfcore`（合体插件：QQ 设置 + B站养鱼 + 双向记忆 + 身份对齐 + 鱼群保护 + 目的载体（QQ / 桌宠） + 桌宠对话/语音 + token 额度 + 扩展/平台接口；含 `qq-mode` 命名空间与设置窗口）**；两个 QQ preset 行与 `qq-tool-restrict` 权威实现也在同一个 bundle 的 `presets/` 里。原 `qq-mode-console` 已并入 SurfCore，目录已从本仓库移除。桌宠相关：`lib/pet.js`（安装/启动）、`lib/pet-chat.js`（对话/语音/事件）、`lib/pet-purpose.js`（目的载体）、`lib/pet-api.js`（本地令牌接口），说明见 `plugins/surfcore/docs/PET.md`。另外：`lib/token-budget.js`（用量采集器，纯逻辑在 `src/token-budget.js`）、`lib/http-guard.js`（设置页 API 与桌宠 API **共用**的回环/同源/令牌判据） | 改了要重装/重启 DSH。⚠️ 插件通过 `../../../src/*.js` **相对路径直接引用同仓库核心模块**（12 个），其中 `src/memory-card.js` 带 `?rev=` 缓存破坏后缀——热重载前要 bump，规则见 PITFALLS #68 |
 | `public/` | 浏览器静态资源：`console.html`（桥接自带控制台，127.0.0.1:3100） | 目录里只应有这一个文件；历史备份 `console.html.bak` 已移出仓库 |
 | `roles/` | 人格卡的**旧布局**（`roles/*.md`；角色人格系统启动时会自动迁移到 `~/.dsh/surfcore/characters/<id>/persona.md`）：设置页「角色」页仍可查看/编辑当前人格卡 | 用户内容，别乱动 |
 | `assets/` | 仓库用图片等资源（`deepseek娘.png`；`project-intro.mp4` 已改为 Release 附件、不入库） | 别加体积大的二进制 |
-| `state/` | **只放运行时数据**（会话映射、模式、角色、黑话库、日志、锁、令牌）。`.gitignore` 排除。**这里不该出现 `.mjs` / 截图 / 一次性审计日志**——2026-10-26 审计一次清出 50 个（21 个一次性 `.mjs`、5 张 probe 截图、24 个日志），已隔离到 `_backups/state-residue-*/` | **用户数据，绝不删除/移动**（清理走 `_backups/`，带 README 与回滚说明） |
+| `state/` | **只放运行时数据**（会话映射、模式、角色、黑话库、日志、锁、令牌）。`.gitignore` 排除。**这里不该出现 `.mjs` / 截图 / 一次性审计日志**——2026-10-26 审计一次清出 50 个（21 个一次性 `.mjs`、5 张 probe 截图、24 个日志），已隔离到 `_backups/state-residue-*/`。2026-11-03 实测 7.04GB：`voice-packs/` 是用户语音包（合理），`slang-agent/` 与 `agents/` 含历史工作区（**DSH 会话工作区默认落在这里，建议把 `config.sessionCwd` 指到仓库外**）；用 `npm run state:usage` 看占用，别直接删 | **用户数据，绝不删除/移动**（清理走 `_backups/`，带 README 与回滚说明） |
 | `docs/` | 全部文档，按用途分子目录（见第三节） | 见第三节 |
 | `node_modules/` `.npm-cache/` | 依赖与 npm 缓存 | 忽略 |
 | `config.json` | 运行配置（真实配置**不入库**）；模板是 `config.example.json` | 值属于用户，别改 |
@@ -62,6 +62,9 @@
 | `audit-bridge-harness.mjs` | 虚拟网关 + 沙箱化的桥接行为审计脚手架（被 `test-audit-bridge.mjs` 使用） | 保留 |
 | `harden-state-acl.mjs` | 收紧 `state/` 目录权限（Windows 上 `mode 0o600` 是空操作，必须动 ACL）。直接试 → 失败提权重试 → 仍失败则打印可复制命令；**任何路径都以 0 退出，绝不阻断启动**。被 `start.bat` 调用 | 保留（`start.bat` 依赖） |
 | `diagnose-acl.mjs` | 只读盘点：列出仓库里所有被**切断 ACL 继承**的路径，分「有意收紧（`state/`、`config.json`）」与「非预期收紧」两类，并对后者打印恢复继承的命令。背景见 [guides/SECURITY_BASELINE.md](guides/SECURITY_BASELINE.md) §2.6：DSH 沙箱的写权限只靠继承下发能力 SID，切断继承 ⇒ 沙箱里写不进去。**必须在无沙箱终端跑**（沙箱禁止以管道 stdio 拉起 icacls） | 保留（`npm run diagnose:acl`） |
+| `state-usage.mjs` | **只读**报表：`state/` 按目录/文件排序 + 每类处理建议（语音包/生图/TTS 缓存/工作区/日志）。不删除、不改名 | 保留（`npm run state:usage`，2026-11-03 加） |
+| `config-check.mjs` | **只读**核对 `config.example.json`（同时是插件运行时默认层）与 live `config.json` 的键差；只打印键名，不打印值 | 保留（`npm run config:check`，2026-11-03 加） |
+| `doc-numbers.mjs` + `test-doc-numbers.mjs` | 生成并校验 `docs/guides/CURRENT-NUMBERS.md`（版本/bridge 行数/工具数/MCP server 数/restrict 名单/控制台页数/审计脚本数），防手写数字漂移 | 保留（`npm run docs:numbers` / `test:doc-numbers`，2026-11-03 加） |
 | `dsh-modules.mjs` | 小工具：按路径加载 DSH 安装内的模块 | 保留 |
 | `check-onebot-status.mjs` | 手工排查：查 OneBot 连通性 | 保留（运维常用） |
 | `patch-*.mjs` | **补丁**（含 `postinstall` 的 `patch-snowluma-sdk.mjs`：修 `@snowluma/sdk` 的 ESM 打包 bug） | `patch-snowluma-sdk.mjs` **必须保留**（postinstall 依赖）；其余见第四节 |

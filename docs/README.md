@@ -24,7 +24,7 @@
 | 文档 | 一句话说明 | 状态 |
 | --- | --- | --- |
 | ~~guides/PROJECT_GUIDE.md~~ | **（已不在工作区）** 旧的「权威项目说明书」（113 KB / 1450+ 行）。2026-10-26 逐行梳理后由 `ARCHITECTURE.md` + `MODULE-*.md` + `SUBSYSTEM-*.md` 这套**带 `文件:行号`** 的新文档取代 | 🗄️ 已被取代；本机文件已不存在（`.gitignore` 排除的那批历史文档之一），链接点不开属预期 |
-| [guides/DSH_SETUP.md](guides/DSH_SETUP.md) | DSH 端安装说明：`qq-chat` / `qq-chat-v2` preset 与三个 MCP server 怎么挂到目标设备的 DSH 上 | ✅ |
+| [guides/DSH_SETUP.md](guides/DSH_SETUP.md) | DSH 端安装说明：`qq-chat` / `qq-chat-v2` preset 与四个 MCP server 怎么挂到目标设备的 DSH 上 | ✅ |
 | [guides/TOKEN_USAGE_CONSOLE.md](guides/TOKEN_USAGE_CONSOLE.md) | 控制台「令牌与花费」看板：数据来源、计价口径（峰谷分时）、API、配置 | ✅ |
 | [guides/CONSOLE-UI-TESTING.md](guides/CONSOLE-UI-TESTING.md) | 控制台离线预览（`npm run preview:console`）与离线浏览器回归（`npm run test:console-ui`）怎么用 | ✅ 2026 整理时自 `scripts/` 移入 |
 | [guides/SECURITY_BASELINE.md](guides/SECURITY_BASELINE.md) | **安全基线与威胁模型**：威胁主体、已实现的边界（准入/工具面/出站/控制台/落盘/网络）、已知残余风险、发布前回归清单、改动检查单 | ✅ **改动安全相关代码前必读**（2026-09-20 新增） |
@@ -49,7 +49,7 @@
 | 文档 | 一句话说明 | 状态 |
 | --- | --- | --- |
 | [guides/ARCHITECTURE.md](guides/ARCHITECTURE.md) | **总纲**：进程/端口拓扑、五层代码分层、两个世界（QQ/B站）+ 三个共享引擎、6 条关键数据流、两套状态根、三份配置、安全模型、**启动/重启矩阵**、术语表、文档地图 | ✅ 2026-10-26 新增，先读这篇 |
-| [guides/MODULE-BRIDGE.md](guides/MODULE-BRIDGE.md) | **桥接内核逐段**（`src/bridge.js` 约 15,000 行）：启动序列、入站/出站全链路、会话与状态、控制台 API 分组、安全闸门、定时器、失败模式 | ✅ 2026-10-26 新增 |
+| [guides/MODULE-BRIDGE.md](guides/MODULE-BRIDGE.md) | **桥接内核逐段**（`src/bridge.js`，行数见 [CURRENT-NUMBERS.md](guides/CURRENT-NUMBERS.md)）：启动序列、入站/出站全链路、会话与状态、控制台 API 分组、安全闸门、定时器、失败模式 | ✅ 2026-10-26 新增 |
 | [guides/MODULE-CORE-A.md](guides/MODULE-CORE-A.md) | **核心引擎 A**：记忆卡、角色人格、目的机制、对话收尾、每日额度、token 账本、价目表、管理员/自我/身份闸、分享范围 | ✅ 2026-10-26 新增 |
 | [guides/MODULE-CORE-B.md](guides/MODULE-CORE-B.md) | **核心引擎 B**：B站 API/记忆/动态/卡片、鱼群、表情语义、黑话、md→纯文本、转发展开、补历史、问候、SSRF 防护、联网搜索、DSH 客户端、语音内核、ACL | ✅ 2026-10-26 新增 |
 | [guides/MODULE-PLUGIN.md](guides/MODULE-PLUGIN.md) | **插件宿主**：装配顺序、配置模型（脱敏/原子写/备份保留）、设置页 API 动作面、B站 调度器、记忆与对齐、token 采集、扩展/平台接口、桥接自愈 | ✅ 2026-10-26 新增 |
@@ -57,7 +57,8 @@
 | [guides/SUBSYSTEM-BILI.md](guides/SUBSYSTEM-BILI.md) | **B站 子系统**：账号与凭据、生物钟、内容生产/消费、34 个 CLI 命令与 23 个库、四本账额度、鱼群、脱敏、配置全解 | ✅ 2026-10-26 新增 |
 | [guides/SUBSYSTEM-VOICE.md](guides/SUBSYSTEM-VOICE.md) | **语音子系统**：三条链路（语音库/现场合成/语音包）、状态机、本地↔云端路由、合成契约、发送全链路、触发规则、配置全解 | ✅ 2026-10-26 新增 |
 | [guides/SUBSYSTEM-PET.md](guides/SUBSYSTEM-PET.md) | **桌宠子系统**：拓扑、发现与鉴权、pet-api 端点、对话链路、事件队列、目的载体与互斥、记忆写入、语音与回音、专注模式、桌宠侧契约 | ✅ 2026-10-26 新增 |
-| [guides/AGENT-TOOLS-AND-PRESETS.md](guides/AGENT-TOOLS-AND-PRESETS.md) | **工具面与 preset**：三个 MCP server、39 个 `qq_*` 工具全表与开关、权限与会话绑定、fail-closed 工具守卫、两代 preset、装配流程 | ✅ 2026-10-26 新增 |
+| [guides/AGENT-TOOLS-AND-PRESETS.md](guides/AGENT-TOOLS-AND-PRESETS.md) | **工具面与 preset**：四个 MCP server、47 个 `qq_*` 工具全表与开关、权限与会话绑定、fail-closed 工具守卫、两代 preset、装配流程 | ✅ 2026-10-26 新增 |
+| [guides/CURRENT-NUMBERS.md](guides/CURRENT-NUMBERS.md) | **自动生成的当前规模数字**（bridge 行数 / 工具数 / MCP server 数 / restrict 名单 / 控制台页数 / 审计脚本数）；手写文档引用它、不要手抄 | ✅ 2026-11-03 自动生成 |
 | [guides/DATA-AND-CONFIG.md](guides/DATA-AND-CONFIG.md) | **配置与数据**：三份配置逐段全解（含默认值/生效时机）、约 95 个状态文件全表（谁写谁读/能不能删）、角色包结构、备份与迁移 | ✅ 2026-10-26 新增 |
 | [guides/BOUNDARIES.md](guides/BOUNDARIES.md) | **能力边界**：环境边界、能力矩阵（能做/有条件/不做）、失败模式 → 恢复动作表、安全承诺与不承诺、资源与数据出机边界 | ✅ 2026-10-26 新增 |
 

@@ -170,7 +170,7 @@
 
 | 项 | 性质 | 备注 |
 | --- | --- | --- |
-| `src/bridge.js` 15,000 行单体、控制台 126 条路由一条 if 链 | 架构债 | 拆分需要单独一轮 + 完整回归 |
+| `src/bridge.js` 单体（约 1.7 万行，见 [CURRENT-NUMBERS.md](CURRENT-NUMBERS.md)）、控制台 150+ 条路由一条 if 链 | 架构债 | 拆分需要单独一轮 + 完整回归 |
 | 双进程写同一份 `config.json`，无跨进程锁 | 已知风险 | 原子写保证不写坏，极端情况下后写覆盖先写 |
 | 插件 → 核心用相对路径 + `?rev=` 缓存破坏 | 耦合 | 有 `test-core-rev-sync.mjs` 兜底 |
 | `config.example.json` 缺四段 | 模板债 | 见 DATA-AND-CONFIG §1.13 |

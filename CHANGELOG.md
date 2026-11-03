@@ -4,6 +4,52 @@
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 发布规则见 [docs/guides/VERSIONS.md](docs/guides/VERSIONS.md)。
 
+## [未发布] - 2026-11-03（工程可信度：门禁修绿 + 决策流水 + 安全姿态 + 重启恢复 + state 治理）
+
+### 修复
+
+- **`test:audit` 从 89/95 修到全绿**（PITFALLS #98）：版本号、打码期望、模型名、语音 preset 文案、DSH 工具名对账
+  五处历史漂移全部按真相源修正；门禁不再长期红着。
+- **DSH 工具名对账扫错安装**（PITFALLS #97）：0.2.x 桌面版工具包只在 `resources/app.asar`，过去按 npm 装的
+  0.1.0-rc.6 对账，47 个真实工具被误判成假名。现在优先扫 app.asar；并补上 0.2.1 新增的 `terminal_*` /
+  `plugin_market` / `session_*`（另一条 shell / 装插件 / 跨会话读日志）进 restrict（名单 87→99）。
+- **桥接重启后已有未读不补唤醒**（PITFALLS #99）：DSH 就绪/切回 reserved2 后对「有未读且完成过 bootstrap」的
+  会话补一次 `recovery` 唤醒（受正常限频/闸门，`socialV2.wake.recoveryWake` 可关）。
+- **重置配置把本机设置写丢**：`config-check` 发现 live 配置里 `chat` 等键不在模板（已知 A5），只报告、不自动改默认层。
+
+### 新增
+
+- **唤醒决策流水**（`src/wake-decisions.js`）：每个「醒 / 跳过（哪道闸门）/ 压后 / 回合无行动」落一行 JSONL，
+  只读接口 `GET /api/wake-decisions`，控制台「二代仿真 → 唤醒决策流水」可看 6h~7d 的聚合与明细；
+  同时统计「回合无行动且没先静置」的占比（静置规则落地的第一手数据）。
+- **安全姿态一屏**（`GET /api/security-posture` + 控制台「访问与安全 → 安全姿态」）：把 state ACL、SnowLuma token
+  是否 staged、鱼群保护/防爆破/发送频率/发送前评审/跨场合投递/白名单/群管理窗口/关闭的工具聚合成一屏，
+  橙色项要求人工确认「是不是有意关的」。
+- **出口边界冻结**（`src/onebot-readonly.js`）：MCP 直连 OneBot 只剩 5 个只读动作，`onebot()` 入口运行时断言；
+  写动作永远经桥接（`test-egress-boundary.mjs` 钉住）。
+- **模式矩阵测试**（`test-mode-matrix.mjs`）+ ROADMAP §1.4 **一代模式冻结**声明：`chat`/`reserved` 只修安全，
+  `reserved2` 是唯一演进模式；closed-agent 是边界模式保留。
+- **`npm run state:usage`**：只读报表（7.04GB 里 voice-packs 6.65GB / slang-agent 238.7MB / agents 153MB），
+  每类给处理建议，不删任何东西（PITFALLS #100）。
+- **`npm run config:check`**：只读核对 `config.example.json`（同时是运行时默认层）与 live config 的键差。
+- **`npm run docs:numbers` + `test-doc-numbers.mjs`**：生成 `docs/guides/CURRENT-NUMBERS.md`（版本/bridge 行数/
+  工具数/MCP server 数/restrict 名单/控制台页数/审计脚本数），手写文档引用它，不再手抄数字。
+- **`test-wake-decisions.mjs` / `test-security-posture.mjs` / `test-egress-boundary.mjs` / `test-mode-matrix.mjs` /
+  `test-doc-numbers.mjs`** 全部进 `test:audit`。
+
+### 变更
+
+- **DSH 会话工作区根移出 `state/`**：本机 `config.json.sessionCwd` 改为 `C:/Users/32372/surfcore-workspaces`
+  （新会话生效；旧工作区保留待人工清）。`state/` 恢复「只放桥接运行时数据」。
+- **语音 preset 文案中性化**：不再写死「已开启」，改成「出厂的语音工具默认关闭；工具面里能看到就是已开启」，
+  避免 repo 里的 preset 与用户本机配置互相矛盾。
+- `config.example.json` 的 `socialV2.wake` 补 `recoveryWake` / `recoveryMaxAgeMs` 两个默认值。
+
+### 测试
+
+- `npm run test:audit`：**100/100**（原 89/95；新增 5 个脚本 + 此前 1 个补登）。
+- 新增/修复脚本：见上；`scan-dsh-tool-names` 从「悬空 47 / 未覆盖危险名 14」→ 0 / 0。
+
 ## [未发布] - 2026-11-02（群管理动作：管理员群内禁言/解禁 + 群名片授权窗口）
 
 ### 修复

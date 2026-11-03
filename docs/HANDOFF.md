@@ -5,6 +5,56 @@
 
 ---
 
+## 快照（2026-11-03 19:0x–20:0x，工程可信度批次：门禁修绿 + 决策流水 + 安全姿态 + 重启恢复 + 4789 + 低成本）
+
+### 用户原话
+
+> 「这个我现在是本地自己用，就只用git就行，然后照你说的把那三件事做掉，然后做4789，以及所谓低成本顺手」
+
+### 做了什么（全部只提交、**未重启**）
+
+| 类别 | 内容 |
+| --- | --- |
+| 门禁 | `test:audit` 89/95 → **100/100**。修 6 个历史红：README 版本、打码期望（fixture 值）、`deepseek-flash` 模型名、语音 preset 文案、DSH 工具名对账（见 #97/#98） |
+| 工具名对账 | `dsh-tool-names.mjs` 优先扫运行中 `app.asar`（新增 `dshAsarPath()`/`readAsarHeader()`）；守卫补 0.2.1 新工具 `terminal_*`/`plugin_market`/`session_*`（87→99） |
+| 任务 2 | 唤醒决策流水：`src/wake-decisions.js` + `GET /api/wake-decisions` + 控制台「二代仿真 → 唤醒决策流水」；`turn` 事件统计「无行动且没静置」 |
+| 任务 3 | 安全姿态：`GET /api/security-posture` + 控制台「访问与安全 → 安全姿态」（ACL/token staged/硬闸开关/白名单/关闭的工具） |
+| 任务 4 | 重启恢复唤醒：`scheduleRecoveryWakesV2()`（DSH 就绪/切回 reserved2 后，有未读且 bootstrap 过的会话补一次 `recovery`；`socialV2.wake.recoveryWake` 可关） |
+| 任务 7 | 出口边界冻结：`src/onebot-readonly.js`（MCP 直连 OneBot 只允许 5 个只读动作，`onebot()` 运行时断言）+ 文档 §3.1 + `test-egress-boundary` |
+| 任务 8 | 一代模式冻结：ROADMAP §1.4 + `test-mode-matrix.mjs`（四模式准入/preset 矩阵） |
+| 任务 9 | `npm run state:usage`（只读报表）+ 本机 `config.json.sessionCwd` 改到 `C:/Users/32372/surfcore-workspaces`（新会话不再落进 `state/agents`；旧工作区保留未删） |
+| 低成本 | `npm run config:check`、`npm run docs:numbers` + `CURRENT-NUMBERS.md` + 文档手写数字清理、静置统计（合并在决策流水 `turn` 事件里） |
+
+### 验证
+
+- `npm run test:audit` → 全绿（100 个脚本）。
+- 新增单测：`test-wake-decisions`、`test-security-posture`、`test-egress-boundary`、`test-mode-matrix`、`test-doc-numbers` 全过；
+  `test-preset-local-tools` 7/7；`scan-dsh-tool-names` 悬空 0 / 未覆盖危险名 0。
+- `node scripts/state-usage.mjs --top 10` → 7.04GB（voice-packs 6.65GB / slang-agent 238.7MB / agents 153MB）。
+- `node scripts/config-check.mjs` → 只报已知 A5 缺口（example 缺 `chat` 等段落）+ 6 个叶子键；未改默认层。
+
+### 未验证 / 下一步（按顺序）
+
+1. **重启桥接**（`restart.bat` 或控制台）让 2/3/4/9 生效；重启后看 `bridge.log` 有没有
+   `[reserved2] 恢复唤醒 …`（若有未读）、`state/wake-decisions.jsonl` 是否出现、`GET /api/wake-decisions` 是否 200。
+2. **重启 DSH**：`qq-tool-restrict` 新增 12 个 restrict 名与 preset 语音文案走的是插件/preset 装配；已有 QQ 会话
+   的 system prompt 是建会话时定格的，建议在主人号 `/reset` 一次。
+3. 真机看控制台两页：「二代仿真 → 唤醒决策流水」（含 6h/24h/3d/7d 切换）与「访问与安全 → 安全姿态」
+   （应看到 `state/ 权限 未收紧`、`鱼群保护 关`、`tokenGuard 关`、`发送频率 不限` 等橙色项——都是本机现状）。
+4. `config.json` 已被重写（加 `sessionCwd`、格式化）；备份在 `state/agents/_backups/config-2026-11-03/config.json`。
+   SnowLuma token 轮换仍是 **staged**（下次 SnowLuma 重启才生效，桥接会自动 heal 写回）。
+5. 旧 `state/agents` / `state/slang-agent` 里的历史工作区与 ffmpeg 副本仍在（未删）；要清先人工隔离到
+   `_backups/`，别直接删 `state/`。
+6. 已提交但**未 push**；本地自用，按用户要求只用 git。
+
+### 回滚
+
+- 代码：按提交粒度 `git revert`（本轮会拆成多个逻辑提交，见 `git log`）。
+- 配置：`Copy-Item state/agents/_backups/config-2026-11-03/config.json config.json -Force`，再重启桥接。
+- 新增功能可单独关：`socialV2.wake.recoveryWake=false`（恢复唤醒）；决策流水/姿态是只读观测，不写业务状态。
+
+---
+
 ## 快照（2026-11-03 13:11–19:0x，上线补历史补不到：加「重连窗口 + 延迟重补」；token 已 staged）
 
 ### 用户原话

@@ -1,6 +1,6 @@
 # 工具面与 preset（AGENT-TOOLS-AND-PRESETS）
 
-> 这份文档回答：**agent 的手从哪来**（三个 MCP server + 47 个 `qq_*` 工具）、**哪些手被绑住**
+> 这份文档回答：**agent 的手从哪来**（四个 MCP server + 47 个 `qq_*` 工具）、**哪些手被绑住**
 > （五层闸门 + fail-closed 守卫）、**她戴哪张面具**（`qq-chat` / `qq-chat-v2` 两代 preset）、
 > **这些是怎么装进 DSH 的**。
 > **最后核对**：2026-11-02（新增 `qq_set_group_ban` 群管理动作 / 管理员群内授权窗口，47 个工具）。配套阅读：总纲 [ARCHITECTURE.md](ARCHITECTURE.md) · 边界 [BOUNDARIES.md](BOUNDARIES.md) · 索引 [../README.md](../README.md)。
@@ -18,13 +18,16 @@
 
 ---
 
-## 1. 三个 MCP server
+## 1. 四个 MCP server
 
 | server | 入口 | 工具 | 挂载 | 边界 |
 | --- | --- | --- | --- | --- |
 | `snowluma` | `src/mcp-snowluma-safe.js`（约 1,700 行） | 47 个 `qq_*` | `~/.dsh/profiles/<profile>/cordis.patch.yml`（`setup-dsh.mjs` 写入） | 发送必须命中白名单；会话绑定 `x-agent-token`；工具开关逐项可控 |
 | `snowluma-host` | `src/mcp-host-server.js`（93 行） | `snowluma_status` | 同上 | **只读探活**；v0.1.5 起移除了 `start_snowluma`/`stop_snowluma` |
 | `web-search-safe` | `src/mcp-web-search-safe.js`（92 行） | `web_search`、`web_fetch` | 同上 | 只读；禁内网/环回/CGNAT；DNS 解析后逐地址校验；重定向每跳复核 |
+| `stock` | `src/mcp-stock-safe.js` | 3 个只读行情工具 | 同上 | 只读公开行情；无 key、无账号、不落盘（2026-10-29 加） |
+
+> 数量以 [CURRENT-NUMBERS.md](CURRENT-NUMBERS.md) 为准（自动生成，避免手抄漂移）。
 
 三者都是 **stdio** transport，由 DSH 的 MCP 客户端按 profile 配置拉起，进程生命周期归 DSH 管。
 
@@ -166,20 +169,31 @@
 
 ---
 
+### 3.1 出口边界：写动作只走桥接，直连 OneBot 只有只读（2026-11-03 冻结）
+
+| 路径 | 谁在用 | 动作 | 经过的闸门 |
+| --- | --- | --- | --- |
+| 桥接 HTTP `127.0.0.1:3100` | 所有 `qq_send_*` / `qq_reply` / `qq_send_image` / … | **写** | 会话令牌 → 发送白名单 → 模式/暂停 → 发送前评审 → 敏感/身份 → 长度/条数/频率/额度/鱼群 → 审计 |
+| OneBot HTTP `127.0.0.1:3000`（MCP 直连） | `qq_status` / `qq_list_groups` / `qq_get_group_members` / `qq_get_group_history` | **只读** | 仅 `get_login_info` / `get_status` / `get_group_list` / `get_group_member_list` / `get_group_msg_history`（`src/onebot-readonly.js` 白名单，非白名单**直接抛错**） |
+
+为什么保留只读直连：桥接没起来时，模型仍能回答「QQ 在不在线 / 有哪些群」，不会表现为「QQ 工具全挂」。
+代价是这条旁路绕开桥接审计，所以把它**冻结成只读白名单 + 运行时断言**：新增动作必须同时改
+`src/onebot-readonly.js`、`scripts/test-egress-boundary.mjs` 与上表；写动作永远不能直连。
+
 ## 4. 工具守卫：fail-closed 的两段式
 
 文件：`plugins/surfcore/qq-tool-restrict.mjs`（约 500 行，**唯一权威实现**）。
 两个 preset 目录下的同名文件只是 `export * from` 的壳，避免两份实现漂移。
 
-**名单规模（实测，2026-11-01）**
+**名单规模（实测，2026-11-03；实时数字见 [CURRENT-NUMBERS.md](CURRENT-NUMBERS.md)）**
 
 | 名单 | 条数 | 内容 |
 | --- | --- | --- |
 | `OWNER_PRIVATE_TOOL_NAMES` | **10** | **仅主人私聊可用**（执行期逐次鉴权，不在 restrict 里）：`pwsh` `bash` `read` `read_image` `write` `edit` `str_replace_editor` `glob` `grep` `subagent_codex`（2026-11-01 加入：Codex 画图） |
-| `LOCAL_EXECUTION_TOOLS`（restrict 隐藏） | **39** | 其余危险能力：`load_workspace_dependencies` `subagent` `subagent_fork` `list_subagent_models` `send_message` `interrupt_agent` `list_agents` `workflow` `ralph` `cordis_inspect_*` `dsh_snapshot` `dsh_rollback` `incident_resolved` `job_*` `skill` `present` `*_goal` `list_mcp_resources` `read_mcp_resource` `subagent_claude_code` `spawn_teammate` `team_task_*` `plugin_manager` `schedule_*` `dev_mode_*` |
-| `KNOWN_DANGEROUS_GLOBAL_TOOLS` | 39 + 18 = **57** | 上面 39 个 + 18 个 `dev_*`（插件注入/打包/自测） |
-| `RESTRICTED_TOOL_NAMES`（导出给测试） | **87** | 57 个危险全局名 + 30 个 `mcp__browser__*`（只放 B站/小红书，其余平台与浏览器控制类隐藏） |
-| `SAFE_PREFIXES` | 3 | `mcp__snowluma__`、`mcp__snowluma-host__`、`mcp__web-search-safe__` |
+| `LOCAL_EXECUTION_TOOLS`（restrict 隐藏） | **51** | 原 39 个危险能力 + 2026-11-03 新增 12 个（`terminal_*` / `plugin_market` / `session_*`，均从运行中 app.asar 对账扫出） |
+| `KNOWN_DANGEROUS_GLOBAL_TOOLS` | 51 + 18 = **69** | 本地执行面 51 个 + 18 个 `dev_*`（插件注入/打包/自测） |
+| `RESTRICTED_TOOL_NAMES`（导出给测试） | **99** | 69 个危险全局名 + 30 个 `mcp__browser__*`（只放 B站/小红书，其余平台与浏览器控制类隐藏） |
+| `SAFE_PREFIXES` | 6 | `mcp__snowluma__`、`mcp__snowluma-host__`、`mcp__web-search-safe__`、`mcp__stock__`、`mcp__browser__bilibili_`、`mcp__browser__xhs_` |
 | `SAFE_EXACT` | 2 | `ask_user_question`、`todo_write` |
 | `MEMEWIKI_TOOL_NAMES` | 4 | `search_meme_wiki`、`meme_recall`、`meme_feedback`、`meme_remember`（dsh-memewiki v2，2026-10-30 放行） |
 
@@ -288,7 +302,7 @@ plugins/surfcore/presets/<preset>.patch.yml                    ← 生成物（�
         │  scripts/setup-dsh.mjs（幂等）
         ▼
 ~/.dsh/profiles/<profile>/package.json       → 注册 bundle: surfcore（link: 依赖）
-~/.dsh/profiles/<profile>/cordis.patch.yml   → 挂三个 MCP server + 两条 preset 行
+~/.dsh/profiles/<profile>/cordis.patch.yml   → 挂四个 MCP server + 两条 preset 行
 ```
 
 - **为什么需要生成器**：DSH 0.1.7 起 preset 不再是目录，而是一行 loader，

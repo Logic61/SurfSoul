@@ -42,7 +42,7 @@ SurfCore 让一个 **DeepSeek Harness（DSH）agent** 活在一个真实的人�
 ┌───────────────────────────────▼─────────────────────────────────────────────────────────────┐
 │ QQ 桥接进程（node src/bridge.js，单实例锁）                                                  │
 │   · OneBot WS 客户端  · DSH Web API 客户端  · 控制台 HTTP :3100                             │
-│   · 三个 MCP server（stdio）· 目的机制 tick · 会话映射 · 安全闸门                            │
+│   · 四个 MCP server（stdio）· 目的机制 tick · 会话映射 · 安全闸门                            │
 └──────┬───────────────────────────────┬───────────────────────────────┬──────────────────────┘
        │ OneBot v11 WS                 │ MCP (stdio)                    │ HTTP 127.0.0.1
 ┌──────▼──────────────┐   ┌────────────▼──────────────┐   ┌─────────────▼──────────────┐
@@ -56,7 +56,7 @@ SurfCore 让一个 **DeepSeek Harness（DSH）agent** 活在一个真实的人�
 | **DSH 宿主 + surfcore 插件** | 用户启动 DSH | 进程内 | 设置页、桌宠、B站调度、记忆卡全停（QQ 桥接仍运行，但 agent 回复没人接） |
 | **QQ 桥接**（`src/bridge.js`） | 插件按开关拉起 / 手动 `npm start` | HTTP+WS 到 DSH、WS 到 SnowLuma | QQ 收发全停；插件 2 分钟内自愈重启它（`plugins/surfcore/lib/index.js:2181`） |
 | **SnowLuma2** | 用户自己（EULA §5.4，本程序只探测不部署） | OneBot v11 WS | 桥接显示"未连接"，消息进不来 |
-| **三个 MCP server** | DSH 的 MCP 客户端按 profile 配置拉起（stdio） | stdio | agent 失去 QQ 工具/搜索能力（表现为"只会说话不做事"） |
+| **四个 MCP server** | DSH 的 MCP 客户端按 profile 配置拉起（stdio） | stdio | agent 失去 QQ 工具/搜索/股票能力（表现为"只会说话不做事"） |
 | **语音引擎**（本地包 / 云包） | 设置页「启动」按钮 / `run.bat` | HTTP | 合成失败 → 返回 502 → 模型改回打字（不会伪造"我发了语音"） |
 | **桌宠**（仓库外 Electron） | 用户自己 | HTTP + `x-pet-token` | 目的载体回落 QQ；对话不可用 |
 
@@ -102,7 +102,7 @@ SurfCore 让一个 **DeepSeek Harness（DSH）agent** 活在一个真实的人�
 - 插件通过 `../../../src/*.js` **相对路径**直接引用 11 个核心模块共 26 处；
   其中 `src/memory-card.js` 挂了 `?rev=` 缓存破坏后缀（同一字符串硬编码在 3 个文件里）。
   改了核心模块而没 bump rev → 热重载后插件仍在跑旧代码（PITFALLS #68）。现在有 `scripts/test-core-rev-sync.mjs` 钉一致性。
-- `src/bridge.js` 是**全仓库最大单体**（约 15,000 行），控制台 **126 条路径**（按域归约约 110 个端点）
+- `src/bridge.js` 是**全仓库最大单体**（约 1.75 万行，实时数字见 [CURRENT-NUMBERS.md](CURRENT-NUMBERS.md)），控制台 **150+ 条路径**（按域归约约 110 个端点）
   写在同一段 `if (url.pathname === …)` 链里。拆分是路线图上的事，见 `docs/RISK_REGISTER.md` 的 A1。
 
 ---
@@ -167,6 +167,11 @@ DSH agent ──► 决定用工具发言 / 或（reserved 一代）直接输出
   `reserved` 一代是"模型输出即消息"，按空格分句。
 - **上线补历史**：桥接启动或 QQ 重新上线时，用 `get_group_msg_history` / `get_friend_msg_history`
   把掉线期间白名单会话的消息补进未读（去重靠 messageId + 时间水位），可配置是否顺手醒一次。
+- **重启恢复唤醒（2026-11-03）**：桥接重启会丢掉内存补投队列，但 `social-v2.json` 里的未读还在。
+  DSH 就绪 / 切回 reserved2 后，对「有未读且完成过 bootstrap」的会话补一次 `recovery` 唤醒
+  （受正常限频/闸门，`socialV2.wake.recoveryWake` 可关）。
+- **唤醒决策流水（2026-11-03）**：每次「醒 / 跳过（哪道闸门）/ 压后 / 回合无行动」写一行
+  `state/wake-decisions.jsonl`，控制台「二代仿真 → 唤醒决策流水」聚合展示（只记决策，不含聊天正文）。
 
 ### 5.2 出站：agent 说了一句，到 QQ
 
@@ -326,7 +331,7 @@ QQ 仍读仓库根的 `config.json`，B站 仍读自己的配置，插件只是�
 | 想知道 | 看 |
 | --- | --- |
 | **总览、进程、数据流、重启矩阵** | 本文 |
-| 桥接 15,000 行里的每个功能 | [MODULE-BRIDGE.md](MODULE-BRIDGE.md) |
+| 桥接逐段里的每个功能 | [MODULE-BRIDGE.md](MODULE-BRIDGE.md) |
 | 核心引擎逐个（记忆/人格/目的/收尾/额度/计价） | [MODULE-CORE-A.md](MODULE-CORE-A.md) |
 | 核心引擎逐个（B站/内容处理/接入层/语音内核） | [MODULE-CORE-B.md](MODULE-CORE-B.md) |
 | 插件宿主（服务、调度、扩展、配置模型） | [MODULE-PLUGIN.md](MODULE-PLUGIN.md) |

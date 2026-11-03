@@ -3467,5 +3467,79 @@ return list[0] ?? pool[0];
 `npm run test:audit`。真机（19:02 重启桥接）：`[history] 记录重连窗口（2 个会话）` → `补历史完成（mode-ready:dsh-ready）`
 → `60s 后按重连窗口水位再补一次` → 60s 后 `240s 后…（retry）`，`historyCatchupWindow.attempts` 1→2 正常推进。
 
+## #97（2026-11-03）按 npm 装的旧 DSH 对账工具名：47 个真实工具被报成「假名」，6 个门禁长期红着
+
+**现象**：`test-preset-local-tools` 的「守卫名单里的每个名字都是 DSH 真实注册的工具」失败，一次列出
+`load_workspace_dependencies / subagent / workflow / team_task_* / mcp__browser__*` 等 **47 个**名字；
+`scan-dsh-tool-names.mjs` 同样报「悬空 47 个」。与此同时 `test:audit` 常年 89/95（6 个历史红没人管）。
+
+**根因**：`dshModulesDir()` 从 `~/.dsh/profiles/<profile>/package.json` 反查，落到的是 **npm 全局装的
+0.1.0-rc.6**（`C:\Users\32372\AppData\Roaming\npm\node_modules\@deepseek-ai\dsh`），而桌面版 0.2.1 的工具包
+只打包在 `resources/app.asar` 里。拿 0.1.0 的名单对账，0.2.1 真实存在的工具全被误判成假名；反过来，
+0.2.1 新增的 `terminal_*` / `plugin_market` / `session_*` **一个都没进守卫**（真的漏隐藏）。
+
+**处置**：
+- `scripts/dsh-modules.mjs` 新增 `dshAsarPath()` + `readAsarHeader()`：按 `DSH_ASAR` → `%LOCALAPPDATA%\Programs\*\resources\app.asar`
+  找运行中的安装（只读探测，找不到返回 null）。
+- `scripts/dsh-tool-names.mjs` 优先扫 app.asar（只读条目、跳过 unpacked/link），asar 命中时不再混入旧 npm 目录
+  （混入旧版本会把新工具误判成假名）；MCP 命名空间（`mcp__*`，由各 MCP server 运行时注册）与历史 bundle 名字
+  （`dsh_snapshot` 等）显式列为「对账时放行」，避免逼人删安全网。
+- 守卫补上 0.2.1 新工具：`terminal_open/close/list/read/send/signal`（另一条 shell）、`plugin_market`（装插件 =
+  任意代码执行）、`session_search/trace/event_*`（跨会话读日志）——全部进 restrict（名单 87→99）。
+
+**验证**：`node scripts/test-preset-local-tools.mjs` 7/7；`node scripts/scan-dsh-tool-names.mjs` → 悬空 0、未覆盖危险名 0；
+`node scripts/test-egress-boundary.mjs` 通过（直连 OneBot 只读白名单）。
+
+**残余**：asar 扫描约 73MB/0.5s，进 `test:audit` 可接受；`app.asar.unpacked` 里的条目（原生模块）跳过，
+工具注册代码不会放那里。DSH 升级后先跑 `npm run scan:tool-names` 复核。
+
+## #98（2026-11-03）6 个「历史红」全是测试期望漂移，不是功能坏
+
+**现象**：`test:audit` 长期 89/95，失败集合：`test-version`（README 0.6.20 vs package 0.6.22）、
+`test-self-identity` / `test-identity-guard`（期望打码值写死成真实主人 QQ 的 `328****288`，fixture 早已换成
+`1000000001`）、`test-media-search`（期望旧模型名 `deepseek-v4-flash`，代码 10-29 已改 `deepseek-flash`）、
+`test-voice-system`（期望 preset 写「语音默认关闭」，本机 preset 写「已开启」）、`test-preset-local-tools`（见 #97）。
+
+**处置**：全部按「真相源」修正或中性化，而不是删断言：
+- 版本对齐 README `0.6.22`；
+- 打码期望改 fixture 值 `100****001`（顺带清掉测试里残留的真实 QQ 打码值）；
+- 模型名期望改 `deepseek-flash`（注释写明旧名会 400）；
+- preset 语音段改成中性「出厂的语音工具默认关闭；工具面里能看到就是已开启」，测试断言同步；
+- 工具名对账按 #97 修。
+
+**验证**：`npm run test:audit` 从 89/95 → 全绿（新增 6 个脚本后 100/100）；6 个原红单独跑均 exit 0。
+
+**教训**：门禁**长期红**等于没有门禁。修完这批后，任何新增红都应该当成真回归处理。
+
+## #99（2026-11-03）桥接重启后，already-received 的未读不会补唤醒
+
+**现象**：桥接重启会丢掉内存里的 prompt 补投队列；`state/social-v2.json` 里的 unread 还在，但重启只恢复
+sleep/proactive 定时器、补历史只补「水位之后的新消息」。于是重启前已收到、还没被处理的消息要等下一个人说话
+才可能被看到（极端情况下静默几小时）。
+
+**处置**：新增 `scheduleRecoveryWakesV2(trigger)`：DSH 就绪 / 切回 reserved2 后，对「有未读且完成过 bootstrap」
+的会话补一次 `recovery` 唤醒；仍走 `scheduleWakeV2 → sendWakePromptV2` 的闸门与限频，每会话 10 分钟内只补一次，
+只补 `recoveryMaxAgeMs`（默认 24h）以内的未读；配置 `socialV2.wake.recoveryWake` 可关。
+
+**验证**：`node scripts/test-wake-decisions.mjs`（真实 bridge.js + 夹具：有未读 → 记 recovery + 排定时器；
+`recoveryWake:false` → 不排）；决策流水可在控制台「二代仿真 → 唤醒决策流水」查看。
+
+## #100（2026-11-03）`state/` 长到 7GB 且混进 DSH 会话工作区：目录规则要能被量出来
+
+**现象**：`state/` 实测 **7.2GB / 5 万文件**：`voice-packs/` 6.8GB（用户素材，合理）、`slang-agent/` 239MB
+（`work/tools/ffmpeg*` 两个 100MB 副本 + 验证视频）、`agents/` 153MB（DSH 会话工作区，含 `_research` 80MB）。
+风险台账 R13 当年按 288MB 评估「日志无界增长」的假设已经过期。
+
+**处置**：
+- 新增只读报表 `npm run state:usage`（按目录/文件排序 + 每个类别的处理建议；**不删除任何东西**）；
+- 本机 `config.json.sessionCwd` 改为仓库外 `C:/Users/32372/surfcore-workspaces`（新会话不再落进 `state/agents`；
+  旧工作区保留，清理走人工/隔离）；
+- `slang-agent`、`agents` 的清理不自动做：先 `state:usage` 看清、再人工隔离到 `_backups/`。
+
+**验证**：`node scripts/state-usage.mjs --top 10`（当前 7.04GB，voice-packs 6.65GB / slang-agent 238.7MB / agents 153MB）。
+
+**残余**：旧工作区与 ffmpeg 副本仍在（未删）；`state:usage --warn-mb` 可接定时任务做阈值告警。
+
+
 **教训**：**外部系统（SnowLuma/QQ）的数据同步不是瞬时的**。补历史这类「补齐缺口」的功能不能只在连接边沿打一枪：
 要保存缺口起点、幂等重试，而且重试时必须用保存的起点、不能用现算水位。补救窗口有上限（本轮没做手动回填）。
