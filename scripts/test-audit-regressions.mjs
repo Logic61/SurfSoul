@@ -328,7 +328,10 @@ await test('R11 mdToPlain 保留 * 列表与乘法式，且拒绝二次方退化
   const t0 = Date.now();
   mdToPlain(evil);
   const elapsed = Date.now() - t0;
-  assert.ok(elapsed < 500, `畸形 Markdown 不得卡住事件循环（实际 ${elapsed}ms）`);
+  // 阈值放宽到 2000ms（2026-11-03）：本审计在**桥接 + DSH 同时运行**的机器上跑，
+  // 实测同一份纯函数会从 ~100ms 抖到 561~671ms；旧阈值 500ms 因此常红（HANDOFF 已记过一次）。
+  // 二次方退化是秒级甚至分钟级，2000ms 仍能抓住真正的问题，又不会把 CPU 抖动当回归。
+  assert.ok(elapsed < 2000, `畸形 Markdown 不得卡住事件循环（实际 ${elapsed}ms）`);
 });
 
 // ── R12. 黑话候选扫描次数有上限 ─────────────────────────────────────────────
