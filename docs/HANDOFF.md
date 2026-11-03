@@ -5,6 +5,68 @@
 
 ---
 
+## 快照（2026-11-03 13:11–19:0x，上线补历史补不到：加「重连窗口 + 延迟重补」；token 已 staged）
+
+### 用户原话
+
+> 「surfcore，snowluma未连上的时候的消息是读不到吗」
+> 「B，然后换掉token」
+> （重启 SnowLuma 的确认里选了「先不重启，token 先 staged」）
+
+### 现象 / 根因（先看日志再改）
+
+- 11-02 22:40 SnowLuma 挂 → 11-03 12:58 才恢复（`state/bridge.log*` 全是重连）。
+- 断线期间群里 13 条消息（01:13–01:26 / 08:03–08:04 / 12:56 合并转发 / 12:57「？」），QQ 服务端历史里都在
+  （只读 `get_group_msg_history` 可验证），本地 `state/social-v2.json` 一条都没有。
+- 12:58:24 补历史 `fetched:30, incoming:0`：SnowLuma 12:58:01 才 login、12:58:02 OneBot 才 listening，
+  本地消息库还没同步完离线消息 → 历史接口返回「登录前」旧窗口，全被水位/去重过滤。
+- 补历史原来只在连接/上线边沿跑一次，没有延迟重试；等同步好（13:11 再拉就有）触发点早过了。
+- 就算重试，现算水位也不行：12:58:31 实时消息「压抑了」把 `lastIncomingAt` 推到 now 后，断线期旧消息会被整段滤掉。
+- 另一个启动路径 bug（本轮顺带修）：桥接重启时 SnowLuma 的 WS 往往先连上，`bot.on('open')` 早于 DSH 模式确定
+  （`currentMode` 还是 chat），那次补历史被 `skipped:'mode'` 跳过且永不重试 —— 实测 14:13 重启桥接时整段没补。
+
+### 做了（代码 + 测试 + 文档）
+
+- `src/bridge.js`：
+  - `beginHistoryCatchupWindow()`：上线/连接边沿记录**当时**的水位到会话状态 `historyCatchupWindow`
+    （`{watermark,startedAt,attempts}`，写 `state/social-v2.json`，跨重启保留；重连风暴只建一次）。
+  - `catchUpHistoryForConversation()`：有窗口时优先用窗口水位；每次尝试 `attempts+1`。
+  - `scheduleHistoryCatchupRetry()`：补完按 **60s / 240s / 600s** 再补（最多 4 轮，`messageId` 去重幂等），满 4 轮清窗口。
+  - `catchUpHistoryOnModeReady()`：DSH 模式就绪 / 切进 reserved2 后再补一次（修「open 早于模式确定」的启动路径）。
+- `scripts/test-history-catchup.mjs` 新增断言（窗口水位、旧窗口后保留窗口、持久化、实时消息推高水位后延迟重补仍能补回、
+  补满 4 轮结束、三条静态接线）；`scripts/audit-bridge-harness.mjs` 暴露测试入口。
+- 文档：PITFALLS #96、MODULE-BRIDGE 3.10、CHANGELOG。
+
+### 验证
+
+- `node scripts/test-history-catchup.mjs` → OK。
+- `npm run test:audit` → **89/95**；6 个失败与本轮无关（既有/环境）：`test-self-identity`、`test-identity-guard`、
+  `test-media-search`（默认模型名 `deepseek-flash` vs `deepseek-v4-flash` 漂移）、`test-voice-system`（本机没有
+  `../voice-tool/`）、`test-preset-local-tools`（DSH 注册工具名单漂移）、`test-version`（README 0.6.20 vs
+  package.json 0.6.22）。完整日志 `state/agents/audit-run.log`。
+- 真机（19:02 重启桥接，PID 47900，由 `start.bat` 守卫窗口托管）：日志出现
+  `[history] 记录重连窗口（2 个会话）` → `补历史完成（mode-ready:dsh-ready）：2 个会话，共 3 条` →
+  `60s 后按重连窗口水位再补一次` → 60s 后 `240s 后…（retry）`；`historyCatchupWindow.attempts` 从 1→2 正常推进。
+
+### token 轮换（只 staged，等 SnowLuma 重启生效）
+
+- 用户要求换掉泄露过一次的 SnowLuma accessToken。SnowLuma 的 token 在 `config/onebot_<QQ>.json` 里，
+  **改文件不会热加载**（实测：旧 token 仍 200、新 token 401）→ 需要重启 SnowLuma。
+- 已做：新 token 写进 `C:\Users\32372\SnowLuma\config\onebot_2756294428.json`（HTTP accessToken）；
+  备份 `state/agents/_backups/token-rotate-202611030606/`（含 `new-token.txt`）。
+- **当前仍是旧 token 生效**：`config.json` 里还是旧 token，运行中的 SnowLuma 也用旧 token —— 一切正常。
+- 用户选择「先不重启，token 先 staged」：**下次 SnowLuma 重启后**新 token 生效；桥接会通过
+  `healTokenIfStale()` 自动发现新 token 并写回 `config.json`（不需要手改）。重启后建议看一眼
+  `bridge.log` 有没有 `🔄 SnowLuma HTTP token 已更新`。
+- ⚠️ 项目约定：**不程序化启停 SnowLuma**（EULA §5.4），所以重启这一步只能由用户做（SnowLuma 设置页有「重启」）。
+
+### 未做 / 下一步
+
+- A（回填 11-03 漏掉的 13 条群消息）**没做**（用户只选了 B）：窗口水位已过期，手动补也补不回；
+  要补只能单独写脚本直接写 `state/social-v2.json`（需用户同意）。
+- 延迟重补的完整 600s 轮次没等到（19:07 跑第 3 轮、19:17 清窗口）；单测已覆盖「补满 4 轮清窗口」。
+- 下次 SnowLuma 重启后：验证新 token 生效 + 桥接自愈写回 `config.json`。
+
 ## 快照（2026-11-02 21:0x，看屏幕「一直不搭话」：busy 硬闸 + 降阈值）
 
 ### 用户原话

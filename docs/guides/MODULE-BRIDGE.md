@@ -310,7 +310,7 @@ await pumpMux();      // DSH 事件流主循环（永不返回）
 
 - 前提：`history.enabled`、`currentMode==='reserved2'`、`socialV2.enabled!==false`、**已拿到 selfUserId**（`src/bridge.js:13219-13228`）。没有 selfUserId 就无法区分「群友」与「自己以前发的」，宁可等下一次（`src/bridge.js:13224-13228`）。
 - 目标筛选：必须 `bootstrapSent===true`（没完成首次唤醒的会话不补）、key 格式合法、`includePrivate` 允许、`isSessionAllowedInCurrentMode`（`src/bridge.js:13017-13031`）。
-- 触发点三处：启动/连接后（`src/bridge.js:14737`）、账号上线边沿（`src/bridge.js:3617-3627`）、控制台手动（`src/bridge.js:5857-5866`）。
+- 触发点三处：启动/连接后（`bot.on('open')`）、账号上线边沿（`setAccountOnline()`）、控制台手动（`POST /api/socialV2/history-catchup`）。**2026-11-03 补第四处**：DSH 模式就绪 / 切进 reserved2 后 `catchUpHistoryOnModeReady()` —— 桥接重启时 `open` 往往早于模式确定，否则这次补历史会被 `skipped:'mode'` 静默跳过（真机实测）。
 - 节流 10 秒 + 单飞（`src/bridge.js:13006`、`src/bridge.js:13229-13234`）。
 - 水位**在 fetch 之前**算：否则 fetch 期间到来的实时消息会把 `lastIncomingAt` 推到现在，真正错过的历史被误判「太旧」（`src/bridge.js:13193-13195`）。
 - 去重靠 `messageId` + 时间水位；黑名单用户直接过滤（`src/bridge.js:13126-13132`）。
@@ -318,6 +318,10 @@ await pumpMux();      // DSH 事件流主循环（永不返回）
 - 水位按「本次看到的最新历史消息时间」推进，且**忽略未来时间**（时钟漂移/异常网关）（`src/bridge.js:13169-13177`）。
 - 补到了 `incoming > 0` 且 `history.wake !== false` → `scheduleWakeV2(key,'history')`（`src/bridge.js:13208-13211`）。
 - 接口未实现（404/405/`unsupported`）→ 记入 `historyApiUnsupported`，**按 action 分别禁**，群历史可用不代表好友历史可用（`src/bridge.js:13008-13009`、`src/bridge.js:13051-13057`）。
+- **重连窗口 + 延迟重补（2026-11-03）**：SnowLuma 刚 login 时它本地消息库还没同步完离线消息，第一次补历史会拿到「登录前」的旧窗口（`fetched:30, incoming:0`）。现在：
+  - 上线/连接边沿先 `beginHistoryCatchupWindow()` 把**当时**的水位存进会话状态 `historyCatchupWindow`（跨重启持久化；重连风暴只建一次，不重置）；
+  - `catchUpHistoryForConversation()` 有窗口时**优先用窗口水位**（否则实时消息把 `lastIncomingAt` 推到 now 后，旧消息会被现算水位整段滤掉）；
+  - `scheduleHistoryCatchupRetry()` 在每轮补完后按 60s / 240s / 600s 再补（最多 4 轮，`messageId` 去重幂等），补满结束窗口。真机案例与验证见 PITFALLS #96、`scripts/test-history-catchup.mjs`。
 
 ### 3.11 唤醒判定与投递（`sendWakePromptV2`）
 

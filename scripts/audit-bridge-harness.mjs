@@ -255,6 +255,7 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     flushQueue, retireSession,
     // 上线补历史：测试可手动触发，不依赖真实 WebSocket / QQ。
     runHistoryCatchUp, historyCatchUpConfig, appendHistoryCatchupV2, fetchOneBotHistory,
+    beginHistoryCatchupWindow, hasHistoryCatchupRetryTimer: () => historyCatchupRetryTimer !== null,
     // 目的机制：测试可只读预览 / 手动触发 / 模拟回合回执（不连真 QQ）。
     runPurpose, purposeState, notePurposeTurnEnded, notePurposeOutbound, startPurposeLoop, warmPurposeState,
     // 对话收尾判断：测试可直接调内部函数（不连真 QQ）。

@@ -3831,6 +3831,9 @@ async function main() {
             scheduleProactiveCheckV2(key);
           }
           log('桥接模式已确定为 reserved2，恢复有限睡眠定时器');
+          // 桥接启动时 SnowLuma 往往先连上（open 早于 DSH 模式确定），那次补历史会被
+          // skipped:'mode' 跳过；模式确定后补一次，保证「桥接重启期间错过的消息」也能补到。
+          catchUpHistoryOnModeReady('dsh-ready');
         }
         try { await flushQueue(); } catch (error) { log('补投队列异常:', error?.message ?? error); }
         // DSH 恢复后，把离线期间攒下的黑话学习窗口补触发
@@ -3851,6 +3854,7 @@ async function main() {
             scheduleProactiveCheckV2(key);
           }
           log('桥接模式已进入二代仿真模式，重建有限睡眠定时器');
+          catchUpHistoryOnModeReady('mode-switch');
         }
         log(`桥接模式已切换为: ${currentMode}`);
         lastMode = currentMode;
@@ -3948,6 +3952,8 @@ async function main() {
     snowlumaHealth.accountOnline = online;
     if (online && !wasOnline) {
       if (historyCatchUpConfig().enabled && currentMode === 'reserved2') {
+        // 先把「这一刻」的水位记下来再去补历史：延迟重补要用它（实时消息会把水位推晚）。
+        beginHistoryCatchupWindow();
         log(`[history] QQ 账号会话已上线（${source}），检查离线期间的历史消息`);
         void runHistoryCatchUp(`online:${source}`).catch((error) => log(`[history] 上线补历史异常：${error?.message ?? error}`));
       }
@@ -10784,6 +10790,7 @@ async function main() {
         lastHistoryMessageTime: 0,
         lastHistoryCheckedAt: 0,
         lastHistoryCatchup: null,
+        historyCatchupWindow: null,
         preSleepWaitSatisfiedAt: 0,
         preSleepWaitObservedAt: 0,
         preSleepWaitAccumMs: 0,
@@ -10868,6 +10875,20 @@ async function main() {
             lastHistoryCheckedAt: Number(val.lastHistoryCheckedAt) || 0,
             lastHistoryCatchup: (val.lastHistoryCatchup && typeof val.lastHistoryCatchup === 'object')
               ? val.lastHistoryCatchup : null,
+            // 重连窗口（2026-11-03）：断线/上线时记录的水位 + 已补次数，用于延迟重补。
+            // 只接受形状正确的对象；坏值当没有。
+            historyCatchupWindow: (() => {
+              const w = val.historyCatchupWindow;
+              if (!w || typeof w !== 'object' || Array.isArray(w)) return null;
+              const watermark = Number(w.watermark);
+              if (!Number.isFinite(watermark) || watermark <= 0) return null;
+              const attempts = Number(w.attempts);
+              return {
+                watermark,
+                startedAt: Number(w.startedAt) || 0,
+                attempts: Number.isFinite(attempts) && attempts >= 0 ? Math.floor(attempts) : 0
+              };
+            })(),
             preSleepWaitSatisfiedAt: Number(val.preSleepWaitSatisfiedAt) || 0,
             preSleepWaitObservedAt: Number(val.preSleepWaitObservedAt) || 0,
             preSleepWaitAccumMs: Number(val.preSleepWaitAccumMs) || 0,
@@ -10995,6 +11016,8 @@ async function main() {
           lastHistoryMessageTime: st.lastHistoryMessageTime || 0,
           lastHistoryCheckedAt: st.lastHistoryCheckedAt || 0,
           lastHistoryCatchup: st.lastHistoryCatchup && typeof st.lastHistoryCatchup === 'object' ? st.lastHistoryCatchup : null,
+          historyCatchupWindow: st.historyCatchupWindow && typeof st.historyCatchupWindow === 'object'
+            ? st.historyCatchupWindow : null,
           preSleepWaitSatisfiedAt: st.preSleepWaitSatisfiedAt || 0,
           preSleepWaitObservedAt: st.preSleepWaitObservedAt || 0,
           preSleepWaitAccumMs: st.preSleepWaitAccumMs || 0,
@@ -14978,6 +15001,15 @@ async function main() {
   // 去重后并入 unread（标 history=true）。只补历史、不重复走 handleIncoming，
   // 所以不会触发鱼群/黑话/唤醒触发器的二次判定（唤醒由这里单独调度一次）。
   const HISTORY_CATCHUP_THROTTLE_MS = 10_000;
+  // 延迟重补（2026-11-03）：SnowLuma 刚登录时，它本地消息库可能还没同步完离线消息，
+  // 第一次补历史会拿到「登录前」的旧窗口（实测 12:58:24 fetched=30/incoming=0，而
+  // 12:56:33 的合并转发、12:57:14 的「？」几分钟后才进 SnowLuma 的历史接口）。
+  // 修法：上线/连接边沿先记「重连窗口」水位，补完不立刻清，按 60s/240s/600s 再补几次
+  // （幂等，messageId 去重）。关键：重补必须用窗口里**当时**的水位 —— 实时消息会把
+  // lastIncomingAt 推到 now，那时现算水位会把断线期间的旧消息整段挡掉（PITFALLS #96）。
+  const HISTORY_CATCHUP_RETRY_DELAYS_MS = [60_000, 240_000, 600_000];
+  const HISTORY_CATCHUP_MAX_ATTEMPTS = HISTORY_CATCHUP_RETRY_DELAYS_MS.length + 1;
+  let historyCatchupRetryTimer = null;
   const historyFetchErrorAt = new Map();
   // 按 action 记录「这个运行时没实现」：群历史可用但好友历史不可用时，不能一起关掉。
   const historyApiUnsupported = new Set();
@@ -15002,6 +15034,36 @@ async function main() {
       targets.push({ key, kind, id: match[2] });
     }
     return targets;
+  }
+
+  /**
+   * 记下「本轮重连窗口」的水位。
+   *
+   * 只在窗口不存在时记录：断线重连风暴里 open/online 会反复触发，如果每次都把水位
+   * 往后推，窗口会越推越晚 —— 第一次没补到的消息就永远补不到了。
+   */
+  function beginHistoryCatchupWindow() {
+    const conf = historyCatchUpConfig();
+    if (!conf.enabled) return;
+    if (currentMode !== 'reserved2' || cfg.socialV2?.enabled === false) return;
+    const now = Date.now();
+    const maxAgeMs = conf.maxAgeMinutes * 60_000;
+    let count = 0;
+    for (const target of historyCatchUpTargets(conf)) {
+      const st = getSocialV2State(target.key);
+      if (st.historyCatchupWindow) continue;
+      st.historyCatchupWindow = {
+        // 与正常补历史同一套口径（含 5 秒容差 / 时间窗），不是裸 lastIncomingAt。
+        watermark: historyWatermark(st, { now, maxAgeMs }),
+        startedAt: now,
+        attempts: 0
+      };
+      count += 1;
+    }
+    if (count > 0) {
+      saveSocialV2State();
+      log(`[history] 记录重连窗口（${count} 个会话）：补历史后按 60s/240s/600s 延迟再补（防 SnowLuma 刚上线时消息库还没同步完）`);
+    }
   }
 
   async function fetchOneBotHistory(kind, id, count) {
@@ -15166,7 +15228,18 @@ async function main() {
     const maxAgeMs = conf.maxAgeMinutes * 60_000;
     // 水位必须在 fetch 之前算：fetch 期间可能来实时消息，把 lastIncomingAt 推到现在；
     // 如果 fetch 后再算，会把真正错过的历史消息误判成“太旧”而丢掉。
-    const watermark = historyWatermark(st, { now: Date.now(), maxAgeMs });
+    //
+    // 重连窗口存在时**优先用窗口里保存的水位**：等到 60s 后的延迟重补时，实时消息
+    // 早已把 lastIncomingAt 推到现在，现算水位会把断线期间的旧消息整段滤掉。
+    const win = st.historyCatchupWindow;
+    const watermark = win && Number(win.watermark) > 0
+      ? Number(win.watermark)
+      : historyWatermark(st, { now: Date.now(), maxAgeMs });
+    if (win) {
+      // 先记一次尝试（哪怕 fetch 失败 / 窗口还是旧的），避免延迟重补无限重试。
+      win.attempts = (Number(win.attempts) || 0) + 1;
+      saveSocialV2State();
+    }
     const raw = await fetchOneBotHistory(kind, id, conf.limit);
     if (!raw) return { key, ok: false };
     const candidates = [];
@@ -15225,9 +15298,60 @@ async function main() {
       if (summary.total > 0) {
         log(`[history] 上线补历史完成（${trigger}）：${results.filter((item) => Number(item?.total) > 0).length} 个会话，共 ${summary.total} 条`);
       }
+      scheduleHistoryCatchupRetry(trigger);
       return { ok: true, trigger, targets: targets.length, results, ...summary };
     })().finally(() => { historyCatchUpRunning = null; });
     return historyCatchUpRunning;
+  }
+
+  /**
+   * 一轮补历史结束后：按「重连窗口」里已补次数决定下一次延迟重补；补满上限就结束窗口。
+   *
+   * 为什么需要：SnowLuma 刚登录时它本地消息库还没同步完离线消息，第一次补历史会拿到
+   * 登录前的旧窗口（fetched 正常、incoming=0）。这时候不能立刻清掉窗口 —— 过一会儿消息库
+   * 同步好了还要再补一次（2026-11-03 实测 13 条群消息就是这么漏的，PITFALLS #96）。
+   */
+  function scheduleHistoryCatchupRetry(trigger) {
+    if (historyCatchupRetryTimer) {
+      clearTimeout(historyCatchupRetryTimer);
+      historyCatchupRetryTimer = null;
+    }
+    let delay = null;
+    for (const [, st] of socialV2.conversations) {
+      const win = st && st.historyCatchupWindow;
+      if (!win) continue;
+      const attempts = Number(win.attempts) || 0;
+      // attempts=0：本轮没补到它（会话已不在补历史目标里）→ 直接结束窗口，避免无限重试。
+      if (attempts <= 0 || attempts >= HISTORY_CATCHUP_MAX_ATTEMPTS) {
+        st.historyCatchupWindow = null;
+        continue;
+      }
+      const next = HISTORY_CATCHUP_RETRY_DELAYS_MS[Math.max(0, attempts - 1)];
+      if (Number.isFinite(next)) delay = delay === null ? next : Math.min(delay, next);
+    }
+    saveSocialV2State();
+    if (delay === null) return;
+    historyCatchupRetryTimer = setTimeout(() => {
+      historyCatchupRetryTimer = null;
+      void runHistoryCatchUp('retry', { force: true })
+        .catch((error) => log(`[history] 延迟重补异常：${error?.message ?? error}`));
+    }, delay);
+    historyCatchupRetryTimer.unref?.();
+    log(`[history] ${Math.round(delay / 1000)}s 后按重连窗口水位再补一次（${trigger}）`);
+  }
+
+  /**
+   * DSH 模式确定 / 切进二代模式后再补一次历史。
+   *
+   * 背景（2026-11-03 实测）：桥接重启时 SnowLuma 的 WebSocket 往往先连上，`bot.on('open')`
+   * 早于 DSH 模式确定（此时 `currentMode` 还是默认的 chat），那次补历史会被
+   * `skipped:'mode'` 直接跳过 —— 表现为「重启桥接后不会补历史」。模式确定时再触发一次即可。
+   */
+  function catchUpHistoryOnModeReady(source) {
+    if (currentMode !== 'reserved2') return;
+    beginHistoryCatchupWindow();
+    void runHistoryCatchUp(`mode-ready:${source}`)
+      .catch((error) => log(`[history] 模式就绪后补历史异常：${error?.message ?? error}`));
   }
 
   function setupSleepTimerV2(key) {
@@ -16723,6 +16847,9 @@ async function main() {
     // 用实际连接地址（自愈后可能与 config 里的初值不同，别打印过期的那个）
     const connectedUrl = bot.url ?? cfg.snowluma.wsUrl;
     snowlumaHealth.connected = true;
+    // 重连窗口：先把水位记下来（此时实时消息还没进来）。第一次补历史如果拿到的是
+    // SnowLuma 登录前的旧窗口，60s/240s/600s 的延迟重补要按这个水位挑消息。
+    beginHistoryCatchupWindow();
     log(`SnowLuma 已连接：${connectedUrl}`);
     // 「已连接」只说明与 SnowLuma 的 WebSocket 通了，**不说明 QQ 侧收得到消息** ——
     // 这个区别见 startSnowlumaWatch 的说明。这里顺手把上游健康快照刷一次。

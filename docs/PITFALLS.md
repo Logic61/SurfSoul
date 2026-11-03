@@ -3436,3 +3436,36 @@ return list[0] ?? pool[0];
 - **验证**：`node plugins/surfcore/scripts/test-screen-watch.mjs`；重启后对比
   `[pet-purpose] 看屏幕后暂不出发` 条数与 `[pet-screen] 自动看一眼` 的可打扰度分布。
 - **回滚**：config 三项改回 + 代码三处回退 + 重启 DSH。
+
+## #96（2026-11-03）SnowLuma 长时间掉线后，上线补历史补不到：第一次拉到的还是「登录前」的旧窗口
+
+**现象**：11-02 22:40 SnowLuma 挂了，直到 11-03 12:58 才恢复（桥接一直重连）。这期间群里发了 13 条消息
+（01:13–01:26、08:03–08:04、12:56 合并转发、12:57「？」）。12:58:24 桥接上线补历史：`fetched:30, incoming:0`
+—— 一条没补回来；这些消息在 QQ 服务端历史里明明都在（只读 `get_group_msg_history` 事后还能拉到原文）。
+
+**根因**：
+- 补历史在 SnowLuma **刚 login detected 一秒后**就跑了（日志：12:58:01 login、12:58:02 OneBot listening、
+  12:58:15 报上线、12:58:24 补历史）。它本地消息库还没同步完离线消息，历史接口返回的是「登录前」的
+  30 条旧消息 → 全被水位/去重过滤。
+- 只有一次机会：补历史只在连接/上线边沿跑一次，没有延迟重试；等消息库同步好（约 13:11 再拉就有）触发点早过了。
+- 更糟的是水位：补完后来实时消息（12:58:31「压抑了」）会把 `lastIncomingAt` 推到现在；之后再补时现算水位，
+  断线期间那批旧消息会被整段滤掉 —— 等于永久错过。
+
+**修法**（`src/bridge.js`）：
+- 上线/连接边沿先 `beginHistoryCatchupWindow()`：把**当时**的水位存进会话状态 `historyCatchupWindow`
+  （`{watermark, startedAt, attempts}`，写进 `state/social-v2.json`，跨重启保留）。重连风暴里窗口只建一次，
+  不会把水位越推越晚。
+- `catchUpHistoryForConversation()`：有窗口时**优先用窗口里保存的水位**（不现算），每次尝试 `attempts+1`。
+- 每轮补完 `scheduleHistoryCatchupRetry()`：窗口未满就按 60s / 240s / 600s 再补（`messageId` 去重保证幂等），
+  满 4 轮结束窗口。
+- **另一个启动路径 bug（顺带修）**：桥接重启时 SnowLuma 的 WS 往往先连上，`bot.on('open')` 早于 DSH 模式确定
+  （此时 `currentMode` 还是默认的 `chat`），那次补历史会返回 `skipped:'mode'` 且**永不重试** —— 实测 14:13
+  重启桥接时补历史整段被跳过。现在 DSH 模式就绪 / 切进 reserved2 后调 `catchUpHistoryOnModeReady()` 再补一次。
+
+**验证**：`node scripts/test-history-catchup.mjs`（新增：窗口水位=最近入站-5s、直接拉旧窗口 incoming=0 后窗口保留、
+模拟实时消息推高水位后延迟重补仍能补回 9201、窗口持久化、补满 4 轮结束、`bot.on('open')`/上线边沿/模式就绪的静态接线）；
+`npm run test:audit`。真机（19:02 重启桥接）：`[history] 记录重连窗口（2 个会话）` → `补历史完成（mode-ready:dsh-ready）`
+→ `60s 后按重连窗口水位再补一次` → 60s 后 `240s 后…（retry）`，`historyCatchupWindow.attempts` 1→2 正常推进。
+
+**教训**：**外部系统（SnowLuma/QQ）的数据同步不是瞬时的**。补历史这类「补齐缺口」的功能不能只在连接边沿打一枪：
+要保存缺口起点、幂等重试，而且重试时必须用保存的起点、不能用现算水位。补救窗口有上限（本轮没做手动回填）。

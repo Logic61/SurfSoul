@@ -11,6 +11,7 @@
  */
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import path from 'node:path';
 import {
   DEFAULT_HISTORY_CATCHUP, buildHistoryCatchupLine, historyWatermark,
   normalizeHistoryConfig, selectMissedHistory, summarizeHistoryCatchup,
@@ -235,5 +236,93 @@ assert.match(bridgeSource, /\/api\/socialV2\/history-catchup/, '控制台必须�
 assert.match(bridgeSource, /adminOnlyV2Paths[\s\S]{0,400}\/api\/socialV2\/history-catchup/, '补历史接口不得暴露给 agent token');
 const example = JSON.parse(fs.readFileSync(new URL('../config.example.json', import.meta.url), 'utf8'));
 assert.equal(example.socialV2?.history?.enabled, true, 'config.example.json 默认必须勾选打开');
+
+// ── 延迟重补：重连窗口必须用「当时」的水位，不能被实时消息挡住 ──────────────
+// 2026-11-03 实测：SnowLuma 刚登录时历史接口返回的是登录前的旧窗口（fetched=30/incoming=0），
+// 几分钟后消息库才同步完；而那时实时消息已经把 lastIncomingAt 推到 now，现算水位会把
+// 断线期间的旧消息整段滤掉。修法见 beginHistoryCatchupWindow / scheduleHistoryCatchupRetry。
+const retryGroup = 'group:456';
+const retryWatermarkAt = now - 3600_000;
+const retrySavedState = {
+  paused: false,
+  conversations: {
+    [retryGroup]: {
+      agentToken: 'fixture-agent-token',
+      bootstrapSent: true,
+      wakeConfig: {
+        mode: 'diving', infinite: true,
+        triggers: { atMention: true, nameMention: true, question: true, poke: true, probability: 0 },
+      },
+      recentMessages: [{ seq: 1, messageId: '8999', sender: '旧消息', text: '旧消息', time: now - 2 * 3600_000, isSelf: false }],
+      unread: [],
+      lastIncomingAt: retryWatermarkAt,
+      lastUnreadSeq: 1,
+      lastReadThroughSeq: 1,
+    },
+  },
+};
+const retryHistory = {
+  [retryGroup]: [fixture(9200, now - 2 * 3600_000, '2001', '停机前就有的旧消息')],
+};
+const h3 = await bridgeHarness({
+  config: {
+    ownerQQ: '123', allow: { private: ['123'], groups: ['456'] },
+    deny: { users: [], private: [], groups: [] },
+    socialV2: { history: { enabled: true, limit: 30, maxAgeMinutes: 720, wake: true, includePrivate: true } },
+  },
+  files: { 'state/social-v2.json': retrySavedState },
+  history: retryHistory,
+});
+try {
+  h3.setMode('reserved2');
+  h3.setSelfIdentity('示例小肥鱼', SELF_ID);
+
+  h3.beginHistoryCatchupWindow();
+  const st3 = h3.getSocialV2State(retryGroup);
+  assert.ok(st3.historyCatchupWindow, '上线边沿必须记录重连窗口');
+  assert.equal(st3.historyCatchupWindow.watermark, retryWatermarkAt - 5000, '窗口水位 = 最近入站时间 - 5s 容差');
+  assert.equal(st3.historyCatchupWindow.attempts, 0);
+
+  // 第一次补历史：SnowLuma 还没同步完 → 返回登录前的旧窗口，什么也没补到。
+  const stale = await h3.runHistoryCatchUp('connect', { force: true });
+  assert.equal(stale.incoming, 0, '旧窗口补不到消息');
+  assert.equal(st3.historyCatchupWindow.attempts, 1, '第一次补完窗口保留并记一次尝试');
+  assert.equal(h3.hasHistoryCatchupRetryTimer(), true, '必须安排延迟重补');
+  // 窗口要落盘（跨桥接重启保留，重启后还能接着补）。
+  const persisted = JSON.parse(fs.readFileSync(path.join(h3.temp, 'state/social-v2.json'), 'utf8'));
+  assert.equal(persisted.conversations[retryGroup].historyCatchupWindow.attempts, 1, '重连窗口必须持久化');
+
+  // 实时消息先到（今天的「压抑了」），把 lastIncomingAt 推到现在 —— 这正是 11-03 的现场。
+  st3.lastIncomingAt = Date.now();
+  // 几分钟后 SnowLuma 的消息库同步完，掉线期间的消息出现在历史接口里。
+  retryHistory[retryGroup].push(fixture(9201, now - 30 * 60_000, '2002', '掉线期间的新消息'));
+  assert.ok(
+    historyWatermark(st3, { now: Date.now(), maxAgeMs: 720 * 60_000 }) > now - 30 * 60_000,
+    '实时消息已把现算水位推高：重补若不用窗口水位，这条会被整段滤掉',
+  );
+  const late = await h3.runHistoryCatchUp('retry', { force: true });
+  assert.equal(late.incoming, 1, '延迟重补必须补回同步晚到的离线消息');
+  assert.equal(st3.unread.some((m) => m.messageId === '9201' && m.history === true), true, '补回的消息要标 history=true 进未读');
+  assert.equal(st3.historyCatchupWindow.attempts, 2);
+  assert.equal(h3.hasHistoryCatchupRetryTimer(), true, '还有下一次延迟重补');
+
+  // 补满上限后窗口结束，不无限重试。
+  await h3.runHistoryCatchUp('retry', { force: true });
+  assert.equal(st3.historyCatchupWindow.attempts, 3);
+  await h3.runHistoryCatchUp('retry', { force: true });
+  assert.equal(st3.historyCatchupWindow, null, '补满上限后重连窗口必须结束');
+  assert.equal(h3.hasHistoryCatchupRetryTimer(), false, '窗口结束后不得再排重补');
+} finally {
+  await h3.close();
+}
+
+// 源码级接线（夹具在 bot.on('open') 之前就 return，自动路径只能静态钉住）。
+assert.match(bridgeSource, /beginHistoryCatchupWindow\(\);[\s\S]{0,2500}runHistoryCatchUp\('connect'\)/, '连接成功后必须先记录重连窗口再补历史');
+assert.match(bridgeSource, /if \(historyCatchUpConfig\(\)\.enabled && currentMode === 'reserved2'\) \{[\s\S]{0,500}beginHistoryCatchupWindow\(\)/, '账号上线边沿必须先记录重连窗口');
+assert.match(bridgeSource, /runHistoryCatchUp\('retry'/, '必须有延迟重补入口');
+assert.match(bridgeSource, /historyCatchupWindow/, '重连窗口必须进状态文件');
+assert.match(bridgeSource, /catchUpHistoryOnModeReady\('dsh-ready'\)/, '模式就绪后必须补一次历史（桥接启动时 open 早于模式确定）');
+assert.match(bridgeSource, /catchUpHistoryOnModeReady\('mode-switch'\)/, '切进二代模式后也要补一次历史');
+
 
 console.log('history catch-up tests OK');
