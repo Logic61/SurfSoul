@@ -190,6 +190,21 @@ const tests = [
   // 群名片。桥接用「管理员最近在群里发言」的时间窗硬鉴权（只认真实 sender QQ，群友/
   // 群主/其他管理员都不算）；本机工具仍只在主人私聊。真实 bridge.js + 夹具网关。
   'test-group-admin-tools.mjs',
+  // 唤醒决策流水（2026-11-03）：为什么醒/为什么没醒/为什么跳过，落 JSONL + 只读接口 +
+  // 控制台「决策流水」；含重启恢复唤醒与「无行动且没静置」统计。真实 bridge.js + 夹具网关。
+  'test-wake-decisions.mjs',
+  // 安全姿态一屏（2026-11-03）：把「哪些硬闸关着 + 令牌是否 staged + state ACL 是否收紧」
+  // 聚合到访问与安全页，橙色项要求人工确认（避免「关着却没人知道」）。
+  'test-security-posture.mjs',
+  // 出口边界（2026-11-03）：QQ 写动作只走桥接；MCP 直连 OneBot 只有 5 个只读动作，
+  // 且 onebot() 入口有运行时闸门。防止有人把「发消息」顺手加进直连路径、绕过全部发送闸门。
+  'test-egress-boundary.mjs',
+  // 模式矩阵（2026-11-03）：reserved2 / chat / reserved / closed-agent 的准入与 preset 选择；
+  // 一代模式冻结后，矩阵行为必须保持稳定（改桥接模式逻辑时先看它）。
+  'test-mode-matrix.mjs',
+  // 文档数字防漂移（2026-11-03）：docs/guides/CURRENT-NUMBERS.md 由脚本生成并与代码比对；
+  // 手写文档不得再自称「三个 MCP server / 约 15,000 行」。
+  'test-doc-numbers.mjs',
 ];
 let failed = 0;
 for (const test of tests) {

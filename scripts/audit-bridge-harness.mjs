@@ -38,6 +38,8 @@ import * as sceneScope from '../src/scene-scope.js';
 import * as memoryDocs from '../src/memory-docs.js';
 // selfNote 自我认知层（2026-11-02）：按角色共享、只在 bootstrap 注入
 import * as selfNotes from '../src/self-notes.js';
+// 唤醒决策流水（2026-11-03）：桥接用它记「为什么醒/为什么没醒」，测试里也断言它被接线。
+import * as wakeDecisions from '../src/wake-decisions.js';
 import { fetchVideoInfo } from '../src/bili-api.js';
 import * as stateAcl from '../src/state-acl.mjs';
 import { createBiliMemory } from '../src/bili-memory.js';
@@ -236,7 +238,7 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     currentRoleHint, currentRoleHintV2, adminPromptLine, ownerMessageTag,
     memoryCardPromptBlock, recordMemoryInboxEvent, recordSelfMemoryEvent,
     formatMemoryV2, formatSharedMemoryV2, appendMemoryV2, styleNotesBlock, groupNameForSceneV2,
-    refreshMode, modeAllowed, trackTurnEvent, replayPendingWakeReasonsV2,
+    refreshMode, modeAllowed, modePreset, trackTurnEvent, replayPendingWakeReasonsV2,
     // 人的黑名单（deny.users）：入站按发送者拦截，见 test-blacklist.mjs
     senderBlocked, handlePokeNotice,
     collectors, setupSleepTimerV2,
@@ -256,6 +258,8 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     // 上线补历史：测试可手动触发，不依赖真实 WebSocket / QQ。
     runHistoryCatchUp, historyCatchUpConfig, appendHistoryCatchupV2, fetchOneBotHistory,
     beginHistoryCatchupWindow, hasHistoryCatchupRetryTimer: () => historyCatchupRetryTimer !== null,
+    // 唤醒决策流水（2026-11-03）：测试可读日志文件、手动触发恢复唤醒。
+    wakeDecisionLog, noteWakeDecision, scheduleRecoveryWakesV2,
     // 目的机制：测试可只读预览 / 手动触发 / 模拟回合回执（不连真 QQ）。
     runPurpose, purposeState, notePurposeTurnEnded, notePurposeOutbound, startPurposeLoop, warmPurposeState,
     // 对话收尾判断：测试可直接调内部函数（不连真 QQ）。
@@ -304,6 +308,8 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     ...memoryDocs,
     // selfNote 自我认知层（2026-11-02）：按角色共享、只在 bootstrap 注入一次
     ...selfNotes,
+    // 唤醒决策流水（2026-11-03）：写失败不影响主流程；测试会断言决策点真的被记录。
+    ...wakeDecisions,
     // 角色系统在 fixture 里等价于「没有角色」：当前角色 null，记忆卡指向 temp/dsh/surfcore/memory。
     // 不能直接用真实 character-store 的 DSH_HOME（它在主进程 import 时已固定）。
     readCurrentCharacter: () => null,

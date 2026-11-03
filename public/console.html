@@ -2423,6 +2423,23 @@ button:active:not(:disabled) {
       <div class="meta" style="margin-top:4px">修改上面任意推荐/默认参数后，必须点这个按钮才会持久化；保存后会自动应用到仍使用默认唤醒配置的会话，重启后仍然保留。</div>
 
       </div></section>
+<section id="section-wake-decisions" data-page="social-v2" class="card span-all">
+      <h2>唤醒决策流水（最近 6 小时～7 天）</h2>
+      <div class="meta">只记决策、不含聊天正文：醒 / 跳过（哪道闸门）/ 压后重试 / 回合结束有没有行动、有没有先静置。排查「她怎么又不搭话」先看这里，再去翻 bridge.log。</div>
+      <div class="row" style="margin-top:8px">
+        <select id="wdHours" style="width:100px">
+          <option value="6">6 小时</option>
+          <option value="24" selected>24 小时</option>
+          <option value="72">3 天</option>
+          <option value="168">7 天</option>
+        </select>
+        <input id="wdKey" placeholder="按会话过滤（group:123 / private:456，可留空）" style="flex:1">
+        <button id="wdRefresh" class="small">刷新</button>
+        <span class="meta" id="wdMsg"></span>
+      </div>
+      <div id="wdStats" class="meta" style="margin:8px 0">加载中…</div>
+      <div class="tool-log-table" id="wdTable">（加载中…）</div>
+    </section>
 <section id="section-slang" data-page="slang" class="card span-all">
       <h2>群聊黑话 / 网络用语库</h2>
       <div class="meta">DSH 会从群聊中自动提取疑似黑话候选；二代仿真模式下 AI 也可用 <code>qq_slang_submit</code> 主动提交陌生词。候选可批量送 DSH 深度联网研究，研究结果回到控制台由你删改修正后转正；确认后的词条会写入“黑话提示词”，注入一代/二代 AI 的聊天上下文，成为 AI 可查询和使用的记忆。</div>
@@ -2618,6 +2635,16 @@ button:active:not(:disabled) {
         <div class="meta" id="snowlumaWarnDiag">最近一个上游事件包：<b id="snowlumaWarnPkt">unknown</b>；SnowLuma 自评接收链路 good=<b id="snowlumaWarnGood">unknown</b>。</div>
         <div class="meta" style="margin:4px 0">这是 <b>SnowLuma 自己那边</b>的问题：它的 <code>[Hook]</code> 没能从 QQ 客户端取到数据，所以桥接的 WebSocket 连上了却始终没有内容可收。桥接没有原生 / 注入组件，也不改 SnowLuma，一条上游事件包都不会替你凭空造出来。</div>
         <div class="meta">排查：打开 SnowLuma 的 <code>logs/snowluma-*.log</code>，搜 <code>[Hook]</code>，看有没有 <code>receive path stale</code> / <code>process enumeration timed out</code> 这类行；顺带考虑<b>升级 SnowLuma</b>（新版运行时对 hook 的兜底更好）。桥接这边不用重启。</div>
+      </div>
+    </section>
+<section id="section-posture" data-page="access" class="card span-all">
+      <h2>安全姿态（一屏）</h2>
+      <div class="meta">把「哪些硬闸开着 / 关着、令牌与 state/ 权限是否正常」聚合成一屏。橙色项不是一定错，但需要你确认是<b>有意关掉</b>的，而不是漏配。</div>
+      <div id="postureAlerts" class="meta" style="margin:8px 0">加载中…</div>
+      <div class="tool-log-table" id="postureTable">（加载中…）</div>
+      <div class="row" style="margin-top:8px">
+        <button id="postureRefresh" class="small">刷新</button>
+        <span class="meta" id="postureMsg"></span>
       </div>
     </section>
 <section id="section-token" data-page="access" class="card">
@@ -4608,6 +4635,82 @@ function loadSecurity() {
     }
   }).catch(() => {});
 }
+function loadPosture() {
+  return api('/api/security-posture').then(r => {
+    const alerts = document.getElementById('postureAlerts');
+    const table = document.getElementById('postureTable');
+    if (!r || !r.ok) {
+      alerts.textContent = '加载失败';
+      table.innerHTML = '<span class="meta">加载失败</span>';
+      return;
+    }
+    const warns = r.alerts || [];
+    alerts.innerHTML = warns.length
+      ? warns.map(a => `<div>⚠️ ${esc(a.text)}</div>`).join('')
+      : '<span class="meta">✅ 没有需要确认的关闭项</span>';
+    let html = '<table><tr><th>检查项</th><th>当前值</th><th>说明</th></tr>';
+    for (const item of (r.items || [])) {
+      const style = item.level === 'warn' ? ' style="color:var(--warn,#d08700);font-weight:600"' : '';
+      html += `<tr><td>${esc(item.label)}</td><td${style}>${esc(item.value)}</td><td class="meta">${esc(item.note || '')}</td></tr>`;
+    }
+    html += '</table>';
+    table.innerHTML = html;
+  }).catch(() => {
+    document.getElementById('postureTable').innerHTML = '<span class="meta">加载失败</span>';
+  });
+}
+document.getElementById('postureRefresh').addEventListener('click', loadPosture);
+
+function loadWakeDecisions() {
+  const hours = document.getElementById('wdHours').value || '24';
+  const key = document.getElementById('wdKey').value.trim();
+  const url = '/api/wake-decisions?hours=' + encodeURIComponent(hours)
+    + (key ? '&key=' + encodeURIComponent(key) : '');
+  document.getElementById('wdMsg').textContent = '读取中…';
+  return api(url).then(r => {
+    document.getElementById('wdMsg').textContent = '';
+    const statsEl = document.getElementById('wdStats');
+    const table = document.getElementById('wdTable');
+    if (!r || !r.ok) {
+      statsEl.textContent = '加载失败';
+      table.innerHTML = '<span class="meta">加载失败</span>';
+      return;
+    }
+    const s = r.stats || {};
+    const byEvent = s.byEvent || {};
+    const gateLabel = r.labels?.gates || {};
+    const eventLabel = r.labels?.events || {};
+    const gates = (s.byGate || []).map(([k, v]) => `${gateLabel[k] || k}×${v}`).join(' · ');
+    statsEl.textContent = `共 ${s.total || 0} 条 · 已投递 ${byEvent.delivered || 0} · 跳过 ${byEvent.skip || 0}`
+      + ` · 压后 ${byEvent.deferred || 0} · 失败 ${byEvent.failed || 0} · 回合 ${s.turns || 0}`
+      + `（无行动 ${s.silentTurns || 0}，其中没静置 ${s.silentWithoutWait || 0}）`
+      + (gates ? ` ｜ 闸门：${gates}` : '');
+    const list = r.entries || [];
+    if (!list.length) { table.innerHTML = '<span class="meta">（空）</span>'; return; }
+    let html = '<table><tr><th>时间</th><th>会话</th><th>事件</th><th>闸门 / 原因</th><th>未读</th><th>细节</th></tr>';
+    for (const e of [...list].reverse()) {
+      const time = e.t ? new Date(e.t).toLocaleString() : '-';
+      const event = eventLabel[e.event] || e.event || '-';
+      const gate = e.gate ? (gateLabel[e.gate] || e.gate) : '';
+      const reason = e.reason || '';
+      const detail = e.event === 'turn'
+        ? `action=${e.action || '-'} · wait=${e.waitSatisfied ? 'yes' : 'no'} · noAction=${e.noActionCount ?? '-'}`
+        : [e.error, e.retryAfterMs ? `retry ${Math.round(e.retryAfterMs / 1000)}s` : '', e.trigger ? `trigger=${e.trigger}` : '']
+          .filter(Boolean).join(' · ');
+      html += `<tr><td>${esc(time)}</td><td>${esc(e.key || '')}</td><td>${esc(event)}</td>`
+        + `<td>${esc(gate + (gate && reason ? ' / ' : '') + reason)}</td><td>${Number(e.unread) || 0}</td>`
+        + `<td class="meta">${esc(detail)}</td></tr>`;
+    }
+    html += '</table>';
+    table.innerHTML = html;
+  }).catch(() => {
+    document.getElementById('wdMsg').textContent = '';
+    document.getElementById('wdTable').innerHTML = '<span class="meta">加载失败</span>';
+  });
+}
+document.getElementById('wdRefresh').addEventListener('click', loadWakeDecisions);
+document.getElementById('wdHours').addEventListener('change', loadWakeDecisions);
+
 document.getElementById('secSave').addEventListener('click', async () => {
   const r = await api('/api/security', 'POST', { interceptNotify: document.getElementById('secInterceptNotify').checked });
   const msg = document.getElementById('secMsg');
@@ -4688,6 +4791,9 @@ function setConsolePage(page, { updateHash = true, focus = false, target = '' } 
   closeConsoleSearch();
   // 语音库按需加载：进入二代仿真页时才探测（避免每次开控制台都压网关）。
   if (page === 'social-v2' && typeof loadVoiceLibrary === 'function') loadVoiceLibrary();
+  // 决策流水 / 安全姿态：进入页面时拉一次，避免每次开控制台都多打两个接口。
+  if (page === 'social-v2' && typeof loadWakeDecisions === 'function') loadWakeDecisions();
+  if (page === 'access' && typeof loadPosture === 'function') loadPosture();
   if (focus) {
     document.getElementById('mainContent').focus({ preventScroll: true });
     document.getElementById(target || 'mainContent')?.scrollIntoView({ block: 'start', behavior: 'instant' });
@@ -5273,7 +5379,7 @@ document.getElementById('usageClear').addEventListener('click', async () => {
 
 setConsolePage(location.hash.slice(1), { updateHash:false });
 
-refresh(); refreshRoles(); refreshWhitelist(); refreshSessions(); refreshPending(); refreshPresets(); loadSocialForm(); loadV2Config(); refreshV2Activity(); loadV2ToolLog(); loadV2SessionOptions(); refreshSocialStatus(); refreshSlang(); loadSlangConfig(); loadSecurity(); refreshSimPrompt(); refreshDshModel(); refreshUsage(); refreshUsageChart(); refreshUsageRecent();
+refresh(); refreshRoles(); refreshWhitelist(); refreshSessions(); refreshPending(); refreshPresets(); loadSocialForm(); loadV2Config(); refreshV2Activity(); loadV2ToolLog(); loadV2SessionOptions(); refreshSocialStatus(); refreshSlang(); loadSlangConfig(); loadSecurity(); loadPosture(); loadWakeDecisions(); refreshSimPrompt(); refreshDshModel(); refreshUsage(); refreshUsageChart(); refreshUsageRecent();
 setInterval(() => { refresh(); refreshSessions(); refreshPending(); refreshSocialStatus(); refreshSlang(); }, 3000);
 // 用量看板只在本页可见时轮询：既保证「实时」，又不让其它页白白多打两份接口。
 setInterval(() => { if (currentConsolePage !== 'usage') return; refreshUsage(); refreshUsageChart(); refreshUsageRecent(); }, 3000);

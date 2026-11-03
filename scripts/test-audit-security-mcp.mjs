@@ -117,6 +117,9 @@ function loadSnowlumaTools(fetchImpl, fixtureConfig = null, httpImpl = null) {
     // mcp-snowluma-safe.js 的表情工具用 z.enum(EMOTION_LABELS) 做中文枚举；
     // 这个 vm 会把 import 行整段删掉，所以枚举要显式塞进上下文（与 SENSITIVE_RE 同一套路）。
     EMOTION_LABELS,
+    // 直连 OneBot 的只读闸门（2026-11-03）同样是 import 进来的：VM 里给等价桩；
+    // 真实闸门的独立测试见 scripts/test-egress-boundary.mjs。
+    assertReadonlyOneBotAction: (action) => action,
   });
   return async (name, arguments_ = {}) => {
     const tool = tools.get(name);

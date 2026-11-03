@@ -18,6 +18,7 @@ import { z } from 'zod';
 // 这里 import 只用于「出站审计口径一致」的说明，不在 MCP 内做拦截——
 // 在 MCP 里拦会连「安全拒绝理由」都拿不到，反而让模型无法把话说清楚。
 import { SENSITIVE_RE } from './sensitive.js';
+import { assertReadonlyOneBotAction } from './onebot-readonly.js';
 import { serializeModelData } from './qq-model-view.js';
 import { EMOTION_LABELS } from './sticker-semantics.js';
 
@@ -86,6 +87,9 @@ function unquoteJsonString(value) {
 // 这里直接删除，避免以后有人以为 MCP 侧还有一道 CQ 转义而放松桥接那一层。
 
 async function onebot(action, params = {}) {
+  // 直连 OneBot 的边界（2026-11-03）：只有 src/onebot-readonly.js 里的只读动作能走这条路；
+  // 任何写动作都必须经桥接（白名单/审计/频率闸都在桥接里）。
+  assertReadonlyOneBotAction(action);
   const { httpUrl, token } = getOneBotConfig();
   const res = await fetch(`${httpUrl}/${action}`, {
     method: 'POST',

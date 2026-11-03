@@ -34,7 +34,7 @@ import {
 import { discoverDshBaseUrl, isLoopbackBaseUrl, probeDshBaseUrl } from './dsh-port.js';
 import { AUDIO_EXTS, cleanupTemp, describeAudio, inspectAudio, listAudioFiles, parseTargetKey, processAudioVolume, resolveAudioProcessing, resolveAudioSource, safeJoinLibrary } from './send-voice-lib.js';
 import { createVoicePacks } from './voice-packs.js';
-import { discoverSnowLumaConnection, persistSnowLumaEndpoint, persistToken } from './snowluma-conn.js';
+import { discoverSnowLumaConnection, persistSnowLumaEndpoint, persistToken, readOneBotTokens, snowLumaHomeCandidates } from './snowluma-conn.js';
 import { synthesizeToFile } from './voice-tts.js';
 import { hardenDir, manualDirCommand } from './state-acl.mjs';
 import { extractForwardIds, forwardIdFromData, sanitizeForwardId, formatForwardResponse } from './forward.js';
@@ -125,10 +125,16 @@ import {
   ensureStickerIndex,
   rankStickers
 } from './sticker-semantics.js';
+import {
+  createWakeDecisionLog, summarizeWakeDecisions, WAKE_EVENT_LABELS, WAKE_GATE_LABELS
+} from './wake-decisions.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
 const STATE_DIR = path.join(ROOT, 'state');
+// 唤醒决策流水（2026-11-03）：排查「她为什么醒/为什么没醒/为什么没回」用。
+// 只 append 一行 JSONL，写失败自动退回（绝不影响唤醒主流程）。
+const wakeDecisionLog = createWakeDecisionLog(path.join(STATE_DIR, 'wake-decisions.jsonl'));
 const STATE_FILE = path.join(STATE_DIR, 'sessions.json');
 const ROLE_STATE_FILE = path.join(STATE_DIR, 'current-role.json');
 const SLANG_FILE = path.join(STATE_DIR, 'slang.json');
@@ -982,6 +988,10 @@ function loadConfig() {
         defaultMode: 'diving',
         preSleepWaitEnabled: true,      // 沉睡前强制观察窗口开关：防止 AI 聊两句就潜水
         preSleepWaitMs: 300000,          // 默认沉睡前至少等待/观察 5 分钟（后台可调）
+        // 重启恢复唤醒（2026-11-03）：桥接重启会丢掉补投队列，但 social-v2.json 里的未读还在。
+        // true = DSH 就绪/切回 reserved2 后，对「有未读且完成过 bootstrap」的会话补一次唤醒。
+        recoveryWake: true,
+        recoveryMaxAgeMs: 86400000,      // 只补 24h 内收到的未读；更旧的当作已过期，不叫醒
         recommendedDefaultInfinite: true, // 默认下一次唤醒是否无限期（true=永久潜水等条件；false=有限时长）
         sleepMinMs: 60000,
         sleepMaxMs: 0,
@@ -5238,6 +5248,117 @@ async function main() {
           });
           return;
         }
+        // 安全姿态一屏（2026-11-03）：把「哪些硬闸开着/关着 + 令牌与 state/ 权限」聚合成
+        // 一屏给操作者确认，避免把有意关掉的闸门和漏配混为一谈。只读，不改任何配置。
+        if (req.method === 'GET' && url.pathname === '/api/security-posture') {
+          const sendCfg = cfg.socialV2?.send ?? {};
+          const maxPerMinute = Number(sendCfg.maxSendPerMinute) || 0;
+          const maxPerHour = Number(sendCfg.maxSendPerHour) || 0;
+          const allowGroups = Array.isArray(cfg.allow?.groups) ? cfg.allow.groups : [];
+          const allowPrivate = Array.isArray(cfg.allow?.private) ? cfg.allow.private : [];
+          const adminActions = cfg.socialV2?.adminActions ?? {};
+          const tools = cfg.socialV2?.tools ?? {};
+          const disabledTools = Object.keys(tools).filter((k) => tools[k] === false);
+          // 令牌是否「staged」（SnowLuma 那边已有新 token，而 config.json 还没换）：
+          // 到 SnowLuma 的 per-account 配置里读一遍候选 token 对比。读不到就只报「homeDir 未配」。
+          const tokenInfo = (() => {
+            const current = String(cfg.snowluma?.accessToken ?? '');
+            const homes = snowLumaHomeCandidates({ cfg });
+            const found = [];
+            for (const home of homes) {
+              for (const entry of readOneBotTokens(home)) {
+                if (entry.http?.token) found.push(entry.http.token);
+                if (entry.ws?.token) found.push(entry.ws.token);
+              }
+            }
+            const homeDirConfigured = Boolean(String(cfg.snowluma?.homeDir ?? '').trim()
+              || String(cfg.snowluma?.launcherPath ?? '').trim());
+            return {
+              configured: Boolean(current),
+              homeDirConfigured,
+              onDiskCandidates: found.length,
+              staged: Boolean(current && found.length > 0 && !found.includes(current)),
+            };
+          })();
+          const items = [
+            {
+              key: 'mode', label: '运行模式', value: currentMode, level: 'info',
+              note: currentMode === 'reserved2' ? '一切皆工具：文本不自动转发' : '非二代仿真模式，注意行为差异',
+            },
+            {
+              key: 'paused', label: 'AI 活动', value: socialV2.paused ? '已暂停' : '运行中',
+              level: socialV2.paused ? 'warn' : 'ok', note: socialV2.paused ? '暂停时不会唤醒/发送' : '',
+            },
+            {
+              key: 'stateAcl', label: 'state/ 权限',
+              value: stateDirHardened === true ? '已收紧' : (stateDirHardened === false ? '未收紧' : '未检测'),
+              level: stateDirHardened === true ? 'ok' : 'warn',
+              note: stateDirHardened === true ? '' : '控制台令牌/聊天记录对本机其它用户可读；用管理员终端重跑收紧命令',
+            },
+            {
+              key: 'snowlumaToken', label: 'SnowLuma token',
+              value: tokenInfo.staged ? '已 staged（待 SnowLuma 重启）'
+                : (tokenInfo.configured ? '已配置' : '缺失'),
+              level: tokenInfo.configured && !tokenInfo.staged ? 'ok' : 'warn',
+              note: tokenInfo.homeDirConfigured
+                ? `SnowLuma 配置里发现 ${tokenInfo.onDiskCandidates} 个候选 token`
+                : '未配置 snowluma.homeDir/launcherPath：换账号后无法自动发现新 token',
+            },
+            {
+              key: 'fishGuard', label: '鱼群保护', value: cfg.fishGuard?.enabled === true ? '开' : '关',
+              level: cfg.fishGuard?.enabled === true ? 'ok' : 'warn',
+              note: cfg.fishGuard?.enabled === true ? '' : '关闭后群聊刷屏/围攻不再拦截（人格层仍有效，但不是硬闸）',
+            },
+            {
+              key: 'tokenGuard', label: '唤醒/花费防爆破',
+              value: cfg.socialV2?.tokenGuard?.enabled === true ? '开' : '关',
+              level: cfg.socialV2?.tokenGuard?.enabled === true ? 'ok' : 'warn',
+              note: cfg.socialV2?.tokenGuard?.enabled === true ? '' : '关闭后没有每日唤醒次数/花费上限（仍受每日 token 额度页约束）',
+            },
+            {
+              key: 'sendRate', label: '发送频率上限',
+              value: `${maxPerMinute > 0 ? maxPerMinute : '不限'} 条/分 · ${maxPerHour > 0 ? maxPerHour : '不限'} 条/时`,
+              level: (maxPerMinute > 0 || maxPerHour > 0) ? 'ok' : 'warn',
+              note: (maxPerMinute > 0 || maxPerHour > 0) ? '' : '0=不限（仍受每回合最多 8 条硬上限）',
+            },
+            {
+              key: 'review', label: '发送前评审',
+              value: cfg.socialV2?.review?.enabled !== false ? `开（阈值 ${Number(cfg.socialV2?.review?.threshold) || 80}）` : '关',
+              level: cfg.socialV2?.review?.enabled !== false ? 'ok' : 'warn',
+              note: cfg.socialV2?.review?.enabled !== false ? '' : '模型原稿不经过独立评审直接发送',
+            },
+            {
+              key: 'crossScene', label: '跨场合投递',
+              value: cfg.socialV2?.crossSceneSend?.enabled === true ? '开' : '关',
+              level: 'info',
+              note: cfg.socialV2?.crossSceneSend?.enabled === true
+                ? `目标白名单 ${(cfg.socialV2?.crossSceneSend?.allowTargets ?? []).length} 个群`
+                : '默认关：发言只能回到当前会话',
+            },
+            {
+              key: 'allow', label: '会话白名单',
+              value: `${allowGroups.length} 群 / ${allowPrivate.length} 人`,
+              level: (allowGroups.length || allowPrivate.length || cfg.allowAllWhenEmpty) ? 'ok' : 'warn',
+              note: cfg.allowAllWhenEmpty === true ? '⚠️ allowAllWhenEmpty=true：空白名单时对所有会话放行' : '空白名单 = 谁都不响应',
+            },
+            {
+              key: 'adminActions', label: '群管理授权窗口',
+              value: `${Math.round((Number(adminActions.windowMs) || 600000) / 60000)} 分钟内 / 每小时 ${Number(adminActions.maxPerHour) || 20} 次`,
+              level: 'info',
+              note: '只认 ownerQQ 本人在群里最近一次发言；工具开关 setGroupBan',
+            },
+            {
+              key: 'disabledTools', label: '关闭的工具',
+              value: disabledTools.length ? disabledTools.join(', ') : '（全部开启）',
+              level: 'info', note: disabledTools.length ? '这些工具不会出现在模型工具面里' : '',
+            },
+          ];
+          const alerts = items
+            .filter((item) => item.level === 'warn')
+            .map((item) => ({ key: item.key, text: `${item.label}：${item.value}${item.note ? `（${item.note}）` : ''}` }));
+          sendJson({ ok: true, generatedAt: Date.now(), items, alerts, disabledTools });
+          return;
+        }
         if (req.method === 'POST' && url.pathname === '/api/security') {
           const body = await readBody();
           // 支持从控制台**重试**收紧 state/ 权限（用户在管理员终端里配好了权限/换了启动方式后）。
@@ -6254,6 +6375,26 @@ async function main() {
           const agentToken = String(getSocialV2State(key)?.agentToken ?? '');
           if (agentToken) prompt = prompt.split(agentToken).join('***');
           sendJson({ ok: true, key, reason, chars: prompt.length, prompt });
+          return;
+        }
+        // 唤醒决策流水（2026-11-03）：只读最近 N 条 + 聚合，用于排查「她为什么没醒/没回」。
+        if (req.method === 'GET' && url.pathname === '/api/wake-decisions') {
+          const limit = Math.max(1, Math.min(1000, Number(url.searchParams.get('limit')) || 200));
+          const key = String(url.searchParams.get('key') ?? '').trim();
+          const hours = Math.max(1, Math.min(24 * 7, Number(url.searchParams.get('hours')) || 24));
+          const windowMs = hours * 3600 * 1000;
+          const entries = wakeDecisionLog.read({
+            limit,
+            key: key || undefined,
+            since: Date.now() - windowMs,
+          });
+          sendJson({
+            ok: true,
+            windowMs,
+            entries,
+            stats: summarizeWakeDecisions(entries, { windowMs }),
+            labels: { gates: WAKE_GATE_LABELS, events: WAKE_EVENT_LABELS },
+          });
           return;
         }
         if (req.method === 'POST' && url.pathname === '/api/socialV2/wake') {
@@ -10574,6 +10715,27 @@ async function main() {
     paused: false, // 控制台可暂停整个二代 AI 活动（停止唤醒/等待）
   };
 
+  /**
+   * 记一条唤醒决策流水（2026-11-03）。
+   *
+   * 为什么单独一个函数：决策点散在 scheduleWakeV2 / sendWakePromptV2 / 回合结束，
+   * 统一在这里补上会话上下文（未读数、当前模式），调用点只写事件与闸门。
+   * 任何异常都吞掉——流水是观测设施，不能反过来影响唤醒。
+   */
+  function noteWakeDecision(key, event, reason, extra = {}) {
+    try {
+      const st = socialV2.conversations.get(key);
+      wakeDecisionLog.record({
+        key: String(key ?? ''),
+        event,
+        reason: reason == null ? '' : String(reason),
+        unread: Array.isArray(st?.unread) ? st.unread.length : 0,
+        mode: currentMode,
+        ...extra,
+      });
+    } catch { /* 观测设施不参与决策 */ }
+  }
+
   // 一代/普通模式的图片/表情元数据存储：key -> Map<messageId/seq, media[]>
   // 二代模式则直接存在 socialV2 会话的 recentMessages/unread 消息对象上。
   const messageMediaStore = new Map();
@@ -14624,6 +14786,9 @@ async function main() {
       }
       return `${base}【主动机会】${key}\n原因：群里已经安静了一段时间，这是一次你可以主动冒泡的机会。\n优先主动开个话题、追问上次没聊完的事、分享一个刚想到的想法；如果一时想不到，可以用 mcp__web-search-safe__web_search 搜一下当前热点/时事/网络热梗，再结合记忆里的群友兴趣挑一个自然角度。只要内容自然，就大胆开口；如果实在没话想说，再安静收尾（qq_mark_read 或 qq_set_wake_config）。`;
     }
+    if (reason === 'recovery') {
+      return `${base}【恢复唤醒】${key}\n原因：桥接刚重启/恢复，之前已经收到、但还没处理的消息还留在未读里（不是新发生的事）。\n先把未读扫一遍判断有没有需要接的；这些消息可能已经隔了一段时间，除非仍然相关，不要当成刚刚发生。处理完用 qq_mark_read / qq_set_wake_config 收尾，或者直接 qq_close_conversation 自然结束。`;
+    }
     if (reason === 'history') {
       return `${base}【上线补历史】${key}\n原因：你刚上线，桥接用 QQ 历史记录把离线期间错过的消息补进了未读（消息带 history=true；若本次快照没内联，可调用 qq_get_unread_messages 查看）。\n先快速扫一遍补上下文；这些是已经发生的旧消息，除非仍然相关，不要逐条回复或引用，也不要当成刚刚发生。看完可以用 qq_mark_read 或 qq_set_wake_config 安静收尾。`;
     }
@@ -14647,10 +14812,14 @@ async function main() {
   }
 
   async function sendWakePromptV2(key, reason) {
-    if (cfg.socialV2?.enabled === false) return;
-    if (currentMode !== 'reserved2' || socialV2.paused) return;
+    if (cfg.socialV2?.enabled === false) { noteWakeDecision(key, 'skip', reason, { gate: 'disabled', stage: 'send' }); return; }
+    if (currentMode !== 'reserved2' || socialV2.paused) {
+      noteWakeDecision(key, 'skip', reason, { gate: socialV2.paused ? 'paused' : 'mode', stage: 'send' });
+      return;
+    }
     if (!isSessionAllowedInCurrentMode(key)) {
       log(`[reserved2] 跳过唤醒 ${key}（${reason}）：会话已不在当前模式允许范围内`);
+      noteWakeDecision(key, 'skip', reason, { gate: 'session', stage: 'send' });
       return;
     }
     const st = getSocialV2State(key);
@@ -14664,6 +14833,7 @@ async function main() {
     });
     if (fishWake.blocked) {
       log(`[鱼群保护] 跳过唤醒 ${key}（${reason}）：${fishGuardReasonText(fishWake) || '保护冷却中'}`);
+      noteWakeDecision(key, 'skip', reason, { gate: 'fish', stage: 'send' });
       return;
     }
     // Token 防爆破：鱼群守则之后、真正投递之前。被拦时消息保留在未读，不烧模型回合。
@@ -14671,6 +14841,9 @@ async function main() {
     const tokenWake = tokenGuardWakeBlock(key, st, { direct: directWake });
     if (tokenWake) {
       log(`[token-guard] 跳过唤醒 ${key}（${reason}）：${tokenWake.error}`);
+      noteWakeDecision(key, 'skip', reason, {
+        gate: 'tokenGuard', stage: 'send', retryAfterMs: Math.max(0, Math.round(Number(tokenWake.retryAfterMs) || 0)),
+      });
       if (tokenWake.retryAfterMs > 0 && !st.tokenRetryTimer) {
         const waitMs = Math.min(60000, Math.max(1000, Math.round(tokenWake.retryAfterMs)));
         st.tokenRetryTimer = setTimeout(() => {
@@ -14693,6 +14866,7 @@ async function main() {
         if (st.pendingWakeReasons.length > 20) st.pendingWakeReasons.splice(0, st.pendingWakeReasons.length - 20);
       }
       log(`[reserved2] 会话繁忙，暂存唤醒原因 ${key}（${reason}@seq${seq}，原因=${busyReasonV2(key, st)}）`);
+      noteWakeDecision(key, 'deferred', reason, { gate: 'busy', stage: 'send', seq });
       return;
     }
     // 唤醒频率硬限制：超限则**延后重试**，不能直接丢弃。直接 return 的后果：
@@ -14735,6 +14909,7 @@ async function main() {
         st.rateLimitRetryTimer.unref?.();
       }
       log(`[reserved2] 唤醒频率超限，${Math.round(waitMs / 1000)}s 后重试 ${key}（${reason}）`);
+      noteWakeDecision(key, 'deferred', reason, { gate: 'rateLimit', stage: 'send', retryAfterMs: Math.round(waitMs) });
       return;
     }
     // Only a real new wake resets observation; skipped/busy candidates must
@@ -14784,10 +14959,14 @@ async function main() {
         rollbackWakeTime();
         restoreFiniteSleep();
         log(`[reserved2] 唤醒投递被拒 ${key}: ${result.error || '未知错误'}`);
+        noteWakeDecision(key, 'failed', reason, { gate: 'deliver', stage: 'send', error: String(result.error ?? '投递被拒') });
       } else if (result && result.queued === true) {
         // 入队而非真正在途：保留 pendingWakeKeys，等 DSH 恢复后真正投递的 turn/end 再触发收尾保护；
         // 不能在这里删除，否则补投的唤醒回合会丢失“未设置唤醒配置”的安全兜底。
         log(`[reserved2] 唤醒已入队 ${key}（${reason}），等待 DSH 恢复后补投`);
+        noteWakeDecision(key, 'queued', reason, { gate: 'dshOffline', stage: 'send' });
+      } else {
+        noteWakeDecision(key, 'delivered', reason, { stage: 'send' });
       }
     } catch (error) {
       pendingWakeKeys.delete(key);
@@ -14800,7 +14979,40 @@ async function main() {
         setupSleepTimerV2(key);
       }
       log(`[reserved2] 唤醒投递失败 ${key}: ${error?.message ?? error}`);
+      noteWakeDecision(key, 'failed', reason, { gate: 'exception', stage: 'send', error: String(error?.message ?? error) });
     }
+  }
+
+  /**
+   * 重启恢复唤醒（2026-11-03）：桥接重启会丢掉内存里的补投队列，但已经收进
+   * `social-v2.json` 的未读还在。过去这些消息要等下一个人说话才会被看到
+   * （sleep/proactive 定时器会恢复、补历史只补「水位之后的新消息」）。
+   * 这里在 DSH 就绪 / 切回 reserved2 后，对「有未读且完成过 bootstrap」的会话补一次唤醒；
+   * 仍走 scheduleWakeV2 → sendWakePromptV2 的闸门与限频；每次启动每会话最多补一次。
+   */
+  function scheduleRecoveryWakesV2(trigger) {
+    if (cfg.socialV2?.enabled === false || socialV2.paused || currentMode !== 'reserved2') return;
+    if (cfg.socialV2?.wake?.recoveryWake === false) return;
+    const maxAgeMs = Math.max(60_000, Number(cfg.socialV2?.wake?.recoveryMaxAgeMs) || 24 * 3600 * 1000);
+    const now = Date.now();
+    let scheduled = 0;
+    for (const [key, st] of socialV2.conversations) {
+      if (!st || !st.bootstrapSent) continue;
+      if (!isSessionAllowedInCurrentMode(key)) continue;
+      const unread = Array.isArray(st.unread) ? st.unread : [];
+      if (!unread.length) continue;
+      const lastAt = Number(st.lastIncomingAt) || 0;
+      if (lastAt && now - lastAt > maxAgeMs) continue;
+      // 已经有待唤醒 / 回复检查 / 限频重试 / DSH 补投在排队：不重复补。
+      if (st.pendingWakeTimer || st.replyCheckTimer || st.rateLimitRetryTimer || st.tokenRetryTimer || st.sleepTimer) continue;
+      if (now - (Number(st.recoveryWakeAt) || 0) < 10 * 60 * 1000) continue;
+      st.recoveryWakeAt = now;
+      scheduled += 1;
+      log(`[reserved2] 恢复唤醒 ${key}（${trigger}）：${unread.length} 条未读还没处理`);
+      noteWakeDecision(key, 'recovery', 'recovery', { stage: 'schedule', trigger });
+      try { scheduleWakeV2(key, 'recovery'); } catch (error) { log(`[reserved2] 恢复唤醒异常 ${key}: ${error?.message ?? error}`); }
+    }
+    if (scheduled > 0) log(`[reserved2] 恢复唤醒：${scheduled} 个会话有未读，各补一次唤醒（${trigger}）`);
   }
 
   function cancelReplyCheckV2(key) {
@@ -14904,10 +15116,11 @@ async function main() {
   }
 
   function scheduleWakeV2(key, reason) {
-    if (cfg.socialV2?.enabled === false) return;
-    if (socialV2.paused) return;
+    if (cfg.socialV2?.enabled === false) { noteWakeDecision(key, 'skip', reason, { gate: 'disabled', stage: 'schedule' }); return; }
+    if (socialV2.paused) { noteWakeDecision(key, 'skip', reason, { gate: 'paused', stage: 'schedule' }); return; }
     if (!isSessionAllowedInCurrentMode(key)) {
       log(`[reserved2] 跳过计划唤醒 ${key}（${reason}）：会话已不在当前模式允许范围内`);
+      noteWakeDecision(key, 'skip', reason, { gate: 'session', stage: 'schedule' });
       return;
     }
     const st = getSocialV2State(key);
@@ -14918,6 +15131,7 @@ async function main() {
         st.pendingWakeReason = reason;
         log(`[reserved2] 合并窗口内升级唤醒原因 ${key}: ${cur} -> ${reason}`);
       }
+      noteWakeDecision(key, 'deferred', reason, { gate: 'merged', stage: 'schedule', mergedInto: cur });
       return;
     }
     if (isConversationBusyV2(key, st)) {
@@ -14929,6 +15143,7 @@ async function main() {
         if (st.pendingWakeReasons.length > 20) st.pendingWakeReasons.splice(0, st.pendingWakeReasons.length - 20);
       }
       log(`[reserved2] 会话繁忙，暂存唤醒原因 ${key}（${reason}@seq${seq}，原因=${busyReasonV2(key, st)}）`);
+      noteWakeDecision(key, 'deferred', reason, { gate: 'busy', stage: 'schedule', seq });
       return;
     }
     cancelReplyCheckV2(key); // 真实唤醒已接管，取消普通回复检查，避免 30s 后再补一刀
@@ -15351,7 +15566,14 @@ async function main() {
     if (currentMode !== 'reserved2') return;
     beginHistoryCatchupWindow();
     void runHistoryCatchUp(`mode-ready:${source}`)
-      .catch((error) => log(`[history] 模式就绪后补历史异常：${error?.message ?? error}`));
+      .catch((error) => log(`[history] 模式就绪后补历史异常：${error?.message ?? error}`))
+      // 2026-11-03：补历史之后再补「重启前就已收到、但还没来得及处理的未读」。
+      // 放在 finally 里是为了让 history 补进来的旧消息也进入本次恢复唤醒的快照。
+      .finally(() => {
+        try { scheduleRecoveryWakesV2(`mode-ready:${source}`); } catch (error) {
+          log(`[reserved2] 恢复唤醒调度异常：${error?.message ?? error}`);
+        }
+      });
   }
 
   function setupSleepTimerV2(key) {
@@ -16395,9 +16617,20 @@ async function main() {
                       st.wakeConfig.noActionCount = 0;
                     }
                   }
+                  // 「这一轮到底有没有行动 / 有没有先静置」——排查「她怎么又不理人」的第一手数据。
+                  noteWakeDecision(key, 'turn', st.lastWakeReason, {
+                    action: actionTaken ? 'acted' : 'none',
+                    waitSatisfied: Boolean(st.preSleepWaitSatisfiedAt),
+                    noActionCount: st.wakeConfig.noActionCount || 0,
+                  });
                   saveSocialV2State();
                 } else {
                   log(`[reserved2] ${key} 回合结束但缺少 turn/start（重连补发），跳过无行动计数`);
+                  noteWakeDecision(key, 'turn', st.lastWakeReason, {
+                    action: 'unknown',
+                    waitSatisfied: Boolean(st.preSleepWaitSatisfiedAt),
+                    turnStartMissing: true,
+                  });
                 }
               }
               v2TurnStartAt.delete(frame.sessionId);

@@ -254,6 +254,8 @@
       "defaultMode": "diving",
       "preSleepWaitEnabled": true,
       "preSleepWaitMs": 300000,
+      "recoveryWake": true,
+      "recoveryMaxAgeMs": 86400000,
       "recommendedDefaultInfinite": true,
       "sleepMinMs": 60000,
       "sleepMaxMs": 0,
