@@ -284,6 +284,14 @@ const LOCAL_EXECUTION_TOOLS = [
   'schedule_create', 'schedule_list', 'schedule_update', 'schedule_delete',
   // 已装但当前未进 bundles 的插件（一旦加回就是新口子）
   'dev_mode_set', 'dev_mode_status', 'dev_mode_subagent',
+  // ── DSH 0.2.1 新增工具（2026-11-03 从运行中的 app.asar 对账扫出来的）──────
+  // 之前只按磁盘上的 npm 包（0.1.0-rc.6）对账，这一批名字根本没被看见。
+  //   · dsh-tool-terminal：开/读/写本机终端 = 另一条 shell 路径 ⇒ 必须隐藏
+  //   · dsh-plugin-market：插件市场（安装/卸载插件 = 任意代码执行）
+  //   · dsh-tool-session-query：跨会话检索/读取会话日志 ⇒ QQ 群不应有这种可见性
+  'terminal_open', 'terminal_close', 'terminal_list', 'terminal_read', 'terminal_send', 'terminal_signal',
+  'plugin_market',
+  'session_search', 'session_trace', 'session_event_read', 'session_event_search', 'session_event_trace',
 ]
 
 const KNOWN_DANGEROUS_GLOBAL_TOOLS = [

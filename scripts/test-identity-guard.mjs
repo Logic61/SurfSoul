@@ -58,7 +58,7 @@ test('错误信息里的号码是打码的（错误本身也可能被贴进日�
   const hits = findIdentityLeaks('主人QQ 1000000001', { ids: IDS });
   const message = formatIdentityLeakError(hits, 'B站 评论');
   assert.match(message, /B站 评论/);
-  assert.match(message, /328\*\*\*\*288/, message);
+  assert.match(message, /100\*\*\*\*001/, message);
   assert.ok(!message.includes('1000000001'), '错误信息里不能出现完整号码');
   assert.match(message, /只用来认自己|不许外传/);
   assert.equal(maskLeakValue('123456789'), '123****789');

@@ -24,7 +24,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { pathToFileURL } from 'node:url';
-import { collectDshToolNames as collectDshToolNamesShared } from './dsh-tool-names.mjs';
+import { collectDshToolNames as collectDshToolNamesShared, isExternalMcpToolName, LEGACY_UNREGISTERED_TOOL_NAMES } from './dsh-tool-names.mjs';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const PRESETS_DIR = path.join(ROOT, 'dsh', 'agent-presets');
@@ -84,6 +84,11 @@ const RESTRICTED_LOCAL_TOOLS = [
   'spawn_teammate', 'team_task_create', 'team_task_get', 'team_task_list', 'team_task_update',
   'plugin_manager',
   'schedule_create', 'schedule_list', 'schedule_update', 'schedule_delete',
+  // DSH 0.2.1 新增（2026-11-03 从运行中的 app.asar 对账扫出来的）：
+  // 终端控制 = 另一条 shell；插件市场 = 装插件（任意代码执行）；会话检索 = 跨会话读日志。
+  'terminal_open', 'terminal_close', 'terminal_list', 'terminal_read', 'terminal_send', 'terminal_signal',
+  'plugin_market',
+  'session_search', 'session_trace', 'session_event_read', 'session_event_search', 'session_event_trace',
 ];
 
 /**
@@ -98,12 +103,12 @@ const RESTRICTED_LOCAL_TOOLS = [
  * 现在只保留一条实现，两边不可能再漂移。
  */
 function collectDshToolNames() {
-  // 优先用本仓库 node_modules 里已安装的 DSH 包（离线回归不保证 profile 能反查到
-  // DSH 安装目录；仓库依赖里就带着同一批 @deepseek-ai 包）。
-  const localPackages = path.join(ROOT, 'node_modules', '@deepseek-ai');
+  // 2026-11-03：抽取器现在优先扫**运行中 DSH 的 app.asar**（0.2.x 桌面版工具包
+  // 只在这里面；磁盘 node_modules 是 npm 装的旧版本，拿它对账会误报 47 个假名）。
+  // 找不到 app.asar 时自动回退到磁盘包目录，headless/npm 安装仍可用。
   let result;
   try {
-    result = collectDshToolNamesShared(fs.existsSync(localPackages) ? { packagesDir: localPackages } : {});
+    result = collectDshToolNamesShared();
   } catch {
     return null;
   }
@@ -112,6 +117,18 @@ function collectDshToolNames() {
 }
 /** 允许出现在名单里、但不属于"本地执行"语义的名字（开发/注入器）。 */
 const DEV_TOOL_PREFIX = /^dev_/;
+
+/**
+ * 允许出现在 restrict 名单里、但**不该被当成拼写错误**的工具名（2026-11-03 对账）。
+ * 见 `dsh-tool-names.mjs` 的 `LEGACY_UNREGISTERED_TOOL_NAMES`：
+ *   · `mcp__*`：MCP server 运行时注册，抽取器扫不到 DSH 安装包；
+ *   · 历史 bundle 名字：守卫保留是零成本纵深，当前安装包抽不到属预期。
+ */
+function isAllowedUnregisteredName(name) {
+  return DEV_TOOL_PREFIX.test(name)
+    || isExternalMcpToolName(name)
+    || LEGACY_UNREGISTERED_TOOL_NAMES.has(name);
+}
 
 /** 允许出现的 MCP 命名空间前缀（QQ 动作面）。 */
 const EXPECTED_SAFE_PREFIXES = [
@@ -247,14 +264,15 @@ test('守卫名单里的每个名字都是 DSH 真实注册的工具（防拼错
   // 让整批限制悄悄少生效，而套件当时全绿。
   const dshNames = collectDshToolNames();
   if (dshNames === null) {
-    console.log('  ⏭  跳过：未找到 DSH 工具包（设 DSH_TOOL_PACKAGES 指向 @deepseek-ai 目录即可启用）');
+    console.log('  ⏭  跳过：未找到 DSH 工具包（设 DSH_TOOL_PACKAGES 指向 @deepseek-ai 目录，'
+      + '或 DSH_ASAR 指向 resources/app.asar 即可启用）');
     return;
   }
   for (const id of SIMULATION_PRESETS) {
     const { dir } = readPreset(id);
     const mod = await import(pathToFileURL(path.join(dir, 'qq-tool-restrict.mjs')).href);
     const fabricated = mod.RESTRICTED_TOOL_NAMES
-      .filter((n) => !DEV_TOOL_PREFIX.test(n) && !dshNames.has(n));
+      .filter((n) => !isAllowedUnregisteredName(n) && !dshNames.has(n));
     assert.deepEqual(fabricated, [],
       `${id}: 以下名字在 DSH 已安装的工具包里找不到 ⇒ restrict 会抛错并被吞掉，`
       + `限制静默失效：${fabricated.join(', ')}`);

@@ -7,7 +7,7 @@
 
 | | |
 | --- | --- |
-| 版本 | `0.6.20` |
+| 版本 | `0.6.22` |
 | 目标 DSH | `0.2.1-rc.2 或更新（rc.3 已能安装，功能未完整回归）`（`npm run verify:adaptation` 可逐项复核） |
 | 平台 | Windows（沙箱 ACL / SnowLuma / 启动脚本都与它绑定） |
 | 许可 | MIT（SnowLuma 是第三方专有运行时，**不随本仓库分发**） |
@@ -123,7 +123,7 @@ npm install
 #    Windows CMD: copy config.example.json config.json
 cp config.example.json config.json
 
-# 4) 装进 DSH（preset + 三个 MCP server + surfcore bundle，幂等，可重复跑）
+# 4) 装进 DSH（preset + 四个 MCP server + surfcore bundle，幂等，可重复跑）
 node scripts/setup-dsh.mjs
 
 # 5) 重启 DSH → 设置里出现 SurfCore →
@@ -133,7 +133,7 @@ node scripts/setup-dsh.mjs
 `setup-dsh.mjs` 做三件事：
 
 1. 把 `qq-chat` / `qq-chat-v2` 两条 **agent preset** 插进 DSH profile（DSH 0.1.7 起的 bundle patch 机制）；
-2. 在 profile 的 `cordis.patch.yml` 挂 **三个 MCP server**（QQ 工具 / SnowLuma 探活 / 只读联网搜索）；
+2. 在 profile 的 `cordis.patch.yml` 挂 **四个 MCP server**（QQ 工具 / SnowLuma 探活 / 只读联网搜索 / 股票行情只读）；
 3. 在 profile `package.json` 注册唯一一个 bundle：`surfcore`。
 
 > 需要装到别的 profile：`node scripts/setup-dsh.mjs <profile名>`（默认 `web`）。
@@ -272,7 +272,7 @@ node scripts/verify-dsh-020-adaptation.mjs      # 对本机 DSH 版本逐项复�
 | **语音** | 语音库发送、本地/云端 TTS 现场合成、语音包安装启停、音量/响度、频率上限；`qq_send_voice` / `qq_list_voices`（**AI 发语音默认关闭**） | [SUBSYSTEM-VOICE.md](docs/guides/SUBSYSTEM-VOICE.md) |
 | **桌宠** | 文本/语音对话、气泡与回复按钮、专注模式、目的载体、断线重连 | [SUBSYSTEM-PET.md](docs/guides/SUBSYSTEM-PET.md) |
 | **额度** | 每日 token 额度（QQ/B站/其他/总额，双单位，80% 提醒、100% 停）、消费看板 | [DATA-AND-CONFIG.md](docs/guides/DATA-AND-CONFIG.md) |
-| **工具面** | 39 个 `qq_*` 工具、三个 MCP server、两代 preset、fail-closed 工具守卫 | [AGENT-TOOLS-AND-PRESETS.md](docs/guides/AGENT-TOOLS-AND-PRESETS.md) |
+| **工具面** | 47 个 `qq_*` 工具、四个 MCP server、两代 preset、fail-closed 工具守卫 | [AGENT-TOOLS-AND-PRESETS.md](docs/guides/AGENT-TOOLS-AND-PRESETS.md) |
 | **界面** | 设置页 14 个标签、控制台 10 个页面 | [UI-AND-CONSOLE.md](docs/guides/UI-AND-CONSOLE.md) |
 
 ---
@@ -290,7 +290,7 @@ node scripts/verify-dsh-020-adaptation.mjs      # 对本机 DSH 版本逐项复�
        │ HTTP（会话 Cookie） + 子进程管理
 ┌──────▼───────────────────────────────────────────────────────┐
 │ QQ 桥接进程（node src/bridge.js，单实例）                       │
-│   OneBot WS · DSH 客户端 · 控制台 :3100 · 三个 MCP server       │
+│   OneBot WS · DSH 客户端 · 控制台 :3100 · 四个 MCP server       │
 └──┬────────────┬──────────────┬───────────────────────────────┘
    │ WS         │ stdio        │ HTTP
 ┌──▼────────┐ ┌─▼──────────┐ ┌─▼─────────────────┐
@@ -330,7 +330,7 @@ node scripts/verify-dsh-020-adaptation.mjs      # 对本机 DSH 版本逐项复�
 | 9 | [SUBSYSTEM-VOICE.md](docs/guides/SUBSYSTEM-VOICE.md) | 855 | 语音三条链路 |
 | 10 | [SUBSYSTEM-PET.md](docs/guides/SUBSYSTEM-PET.md) | 904 | 桌宠全链路 |
 | 11 | [SUBSYSTEM-BILI.md](docs/guides/SUBSYSTEM-BILI.md) | 981 | B站 34 命令 / 23 库 |
-| 12 | [AGENT-TOOLS-AND-PRESETS.md](docs/guides/AGENT-TOOLS-AND-PRESETS.md) | 233 | 39 个工具、守卫、两代 preset |
+| 12 | [AGENT-TOOLS-AND-PRESETS.md](docs/guides/AGENT-TOOLS-AND-PRESETS.md) | 233 | 47 个工具、守卫、两代 preset |
 
 其它：DSH 装配 [DSH_SETUP.md](docs/guides/DSH_SETUP.md) · 安全基线 [SECURITY_BASELINE.md](docs/guides/SECURITY_BASELINE.md) ·
 踩坑 [PITFALLS.md](docs/PITFALLS.md) · 风险台账 [RISK_REGISTER.md](docs/RISK_REGISTER.md) · 全部索引 [docs/README.md](docs/README.md)。

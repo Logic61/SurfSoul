@@ -20,29 +20,43 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   collectDshToolNames, dshPackagesDir, DANGER_TOOL_RE, SAFE_MODEL_TOOLS, TOOL_NAME_RE,
+  isExternalMcpToolName, LEGACY_UNREGISTERED_TOOL_NAMES,
 } from './dsh-tool-names.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
-const { names, packages } = collectDshToolNames();
+const { names, packages, asarPath } = collectDshToolNames();
 const guardPath = path.join(ROOT, 'plugins', 'surfcore', 'qq-tool-restrict.mjs');
 const guard = await import(pathToFileURL(guardPath).href);
 const guarded = new Set(guard.RESTRICTED_TOOL_NAMES);
+// 「仅主人私聊」的本地工具故意**不**进 restrict（模型要在私聊里看得见它们），
+// 所以安装包里存在、守卫名单里没有属预期，不能报成「漏隐藏」。
+const ownerPrivate = new Set(guard.OWNER_PRIVATE_TOOL_NAMES ?? []);
 
 const sorted = [...names.keys()].sort();
 const onlyFlag = process.argv.includes('--missing');
 
-console.log(`DSH 包目录：${dshPackagesDir()}`);
+if (asarPath) console.log(`DSH 安装：${asarPath}（app.asar）`);
+else {
+  try { console.log(`DSH 包目录：${dshPackagesDir()}`); } catch { console.log('DSH 包目录：未找到（只扫了插件目录）'); }
+}
 console.log(`扫描包数：${packages.length}；抽到工具名候选：${sorted.length}\n`);
 
 /** ① 守卫名单里的名字必须真实存在，否则 restrict 抛错被吞、限制静默失效。 */
 const fabricated = [...guarded]
-  .filter((n) => TOOL_NAME_RE.test(n) && !n.startsWith('dev_') && !names.has(n));
+  .filter((n) => TOOL_NAME_RE.test(n)
+    && !n.startsWith('dev_')
+    && !isExternalMcpToolName(n)
+    && !LEGACY_UNREGISTERED_TOOL_NAMES.has(n)
+    && !names.has(n));
 console.log('=== ① 守卫名单里、但安装包中找不到的名字（restrict 会抛错并静默失效） ===');
 console.log(fabricated.length ? fabricated.map((n) => `  ${n}`).join('\n') : '  (无)');
 
 /** ② 安装包里有、守卫没覆盖的危险语义名字（可能是新版本新增的能力）。 */
-const missing = sorted.filter((n) => DANGER_TOOL_RE.test(n) && !guarded.has(n) && !SAFE_MODEL_TOOLS.has(n));
+const missing = sorted.filter((n) => DANGER_TOOL_RE.test(n)
+  && !guarded.has(n)
+  && !ownerPrivate.has(n)
+  && !SAFE_MODEL_TOOLS.has(n));
 console.log('\n=== ② 安装包里有、守卫名单里没有的「危险语义」名字（可能漏隐藏） ===');
 console.log(missing.length ? missing.map((n) => `  ${n}  ← ${[...names.get(n)].join(', ')}`).join('\n') : '  (无)');
 

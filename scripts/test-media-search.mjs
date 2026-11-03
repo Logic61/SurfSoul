@@ -216,7 +216,7 @@ await test('loadSearchConfig 默认值与越界收敛', async () => {
     assert.equal(cfg.maxUses, 5, 'maxUses 上限 5');
     assert.equal(cfg.timeoutMs, 5000, 'timeoutMs 下限 5s');
     assert.equal(cfg.apiKeyEnv, 'MY_KEY');
-    assert.equal(cfg.model, 'deepseek-v4-flash');
+    assert.equal(cfg.model, 'deepseek-flash', '默认模型必须是接口实际接受的 deepseek-flash（旧名 deepseek-v4-flash 已 400）');
 
     fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({ webSearch: { provider: 'nonsense' } }));
     assert.equal(loadSearchConfig(dir).provider, 'auto', '未知 provider 回退 auto');
