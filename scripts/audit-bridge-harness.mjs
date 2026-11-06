@@ -40,6 +40,8 @@ import * as memoryDocs from '../src/memory-docs.js';
 import * as selfNotes from '../src/self-notes.js';
 // 唤醒决策流水（2026-11-03）：桥接用它记「为什么醒/为什么没醒」，测试里也断言它被接线。
 import * as wakeDecisions from '../src/wake-decisions.js';
+// 好友申请（2026-11-06）：事件规范化/合并/TTL 是纯函数，桥接里 import 后用；VM 里要注入同名绑定。
+import * as friendRequests from '../src/friend-requests.js';
 import { fetchVideoInfo } from '../src/bili-api.js';
 import * as stateAcl from '../src/state-acl.mjs';
 import { createBiliMemory } from '../src/bili-memory.js';
@@ -183,6 +185,13 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     callUnary: async (method, params) => { calls.cancelled.push({ method, params }); return success({ accepted: true }); },
   };
   class FakeBot {
+    // 事件订阅（2026-11-06）：桥接用 bot.onRequest('friend', …) 接收好友申请。
+    // 夹具保存 handler，测试用 h.emitRequest(event) 模拟 SnowLuma 推送。
+    requestHandlers = [];
+    onRequest(type, handler) {
+      this.requestHandlers.push({ type: String(type), handler });
+      return () => {};
+    }
     // 桥接里所有 OneBot 动作都走 bot.raw(action, params)（真实 SDK 的 ApiClient.raw 会
     // 发 HTTP 并把 data 直接返回）。夹具里必须实现同名方法：否则 set_group_card /
     // set_self_longnick / send_qzone_msg 这些「裸动作」路由在测试里直接 ReferenceError，
@@ -260,6 +269,14 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     beginHistoryCatchupWindow, hasHistoryCatchupRetryTimer: () => historyCatchupRetryTimer !== null,
     // 唤醒决策流水（2026-11-03）：测试可读日志文件、手动触发恢复唤醒。
     wakeDecisionLog, noteWakeDecision, scheduleRecoveryWakesV2,
+    // 好友申请（2026-11-06）：测试可直接灌事件/读缓存（不连真 QQ）。
+    // emitRequest 走桥接真实注册的 bot.onRequest handler，等于覆盖「事件 → 落盘」接线。
+    recordFriendRequestV2, pendingFriendRequests, friendRequests,
+    emitRequest(event) {
+      for (const { type, handler } of bot.requestHandlers) {
+        if (type === String(event?.request_type ?? '')) handler(event);
+      }
+    },
     // 目的机制：测试可只读预览 / 手动触发 / 模拟回合回执（不连真 QQ）。
     runPurpose, purposeState, notePurposeTurnEnded, notePurposeOutbound, startPurposeLoop, warmPurposeState,
     // 对话收尾判断：测试可直接调内部函数（不连真 QQ）。
@@ -310,6 +327,8 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     ...selfNotes,
     // 唤醒决策流水（2026-11-03）：写失败不影响主流程；测试会断言决策点真的被记录。
     ...wakeDecisions,
+    // 好友申请（2026-11-06）：纯函数（事件规范化/合并/TTL/handled），桥接 import 后直接用。
+    ...friendRequests,
     // 角色系统在 fixture 里等价于「没有角色」：当前角色 null，记忆卡指向 temp/dsh/surfcore/memory。
     // 不能直接用真实 character-store 的 DSH_HOME（它在主进程 import 时已固定）。
     readCurrentCharacter: () => null,

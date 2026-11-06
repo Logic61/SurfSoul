@@ -190,6 +190,10 @@ const tests = [
   // 群名片。桥接用「管理员最近在群里发言」的时间窗硬鉴权（只认真实 sender QQ，群友/
   // 群主/其他管理员都不算）；本机工具仍只在主人私聊。真实 bridge.js + 夹具网关。
   'test-group-admin-tools.mjs',
+  // 好友申请（2026-11-06 用户要求）：SnowLuma 只推 request 事件、没有「列出普通待处理好友申请」
+  // 的接口（PITFALLS #102），桥接自己落盘缓存；列表/处理只在主人私聊，处理动作有授权窗口
+  // 与每小时上限，普通申请与被过滤可疑申请分走两个 OneBot 动作。真实 bridge.js + 夹具网关。
+  'test-friend-requests.mjs',
   // 唤醒决策流水（2026-11-03）：为什么醒/为什么没醒/为什么跳过，落 JSONL + 只读接口 +
   // 控制台「决策流水」；含重启恢复唤醒与「无行动且没静置」统计。真实 bridge.js + 夹具网关。
   'test-wake-decisions.mjs',

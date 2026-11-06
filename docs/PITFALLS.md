@@ -3577,3 +3577,58 @@ accessToken，随便连），紧接着 `[history] get_friend_msg_history 失败�
 返回 200（旧 token 401）。
 
 **影响面**：只影响「桥接进程内还揣着旧 token」这一种状态；入站/补历史/媒体等其它 HTTP 调用同源同伤。
+
+## #102（2026-11-06）SnowLuma 没有「列出普通待处理好友申请」的接口：事件不落盘就永久丢
+
+**现象**
+
+- 想给 QQ 部分加「看谁在加我 / 同意好友申请」，查遍 SnowLuma 1.14.5 的 OneBot 动作目录，好友申请只有：
+  ① `request` / `request_type='friend'` **事件**（`flag`=申请人 uid、`comment`=验证留言、`user_id` 可能缺失/为 0）；
+  ② 动作 `set_friend_add_request {flag, approve}`（同意/拒绝）；
+  ③ 动作 `get_doubt_friends_add_request {count}` / `set_doubt_friends_add_request {flag, approve}`。
+  **没有** `get_friend_add_request` 之类「列出普通待处理好友申请」的接口（NapCat 也没有，OneBot v11 标准本身也没有）。
+- 把 `get_doubt_friends_add_request` 当「待处理列表」用会错：它返回的是 QQ 系统**被过滤/可疑好友申请**
+  （NapCat 文档标题就是「获取被过滤好友请求」），普通待处理申请不在里面（1.14.5 实测返回项形状
+  `{uid, nick, source, msg, reqTime}`，没有 `user_id`/`reason`/`group_code`，别依赖别的字段）。
+- 桥接若不在收到事件时落盘：桥接一重启、或 AI 被别的消息唤醒/换会话，这条申请就再也看不到了。
+
+**根因**
+
+1. **协议缺口**：OneBot 侧只有「事件推送」一种方式知道普通申请，「查询列表」这一档干脆不存在；
+   `get_doubt_friends_add_request` 是扩展动作且语义是另一档（被过滤的）。
+2. **`flag` 不是 QQ 号**：它是网关给的申请人 uid（形如 `u_...` 的字符串，也可能是纯数字），
+   `set_friend_add_request` 要的正是这个 uid——不能自己拼、不能拿 `user_id` 替代（事件里 `user_id` 还可能缺失）；
+   两档申请的处理动作也不同（普通申请 `set_friend_add_request`、被过滤申请 `set_doubt_friends_add_request`），
+   混用会被网关拒绝或处理错对象。
+
+**处置（2026-11-06 落地）**
+
+- 桥接订阅 `request`/`friend` 事件 → 规范化后落 `state/friend-requests.json`（跨重启保留：pending TTL 7 天、
+  最多 50 条；handled 已处理标记 24 小时内去重、最多 100 条）。**收到事件只落盘 + 记日志，不主动发 QQ、不唤醒**
+  ——申请留言是陌生人可控内容，自动唤醒等于把提示注入面直接放进模型回合；等主人下次开口时在唤醒提示里告知。
+- 列表 = 事件缓存（普通申请）+ 网关现拉的 `get_doubt_friends_add_request`（被过滤申请）合并，每项带
+  `kind`（`request`/`filtered`）与 `untrusted: true`；网关拉取失败仍返回 200（`gateway.ok=false` + 可读原因），
+  不因为上游抖动把已知缓存也弄丢。
+- 处理按 `kind` 分派到两个动作；`kind=request` 的 `flag` 还必须在事件缓存里真实存在（否则 400），
+  防止模型编造 flag / 重复同意已处理或已过期的申请。
+- 账号级动作硬闸（与群管理动作同一条思路）：仅主人私聊 + 主人最近一次在私聊里说话在
+  `socialV2.adminActions.windowMs`（默认 10 分钟）内 + 每小时 ≤ `maxPerHour`（与群管理动作共用计数）。
+- 纯函数全部集中在 `src/friend-requests.js`（规范化 / TTL / 上限 / 合并 / 提示词文案），方便单测；
+  落盘与权限闸门在 `src/bridge.js`；MCP 工具 `qq_list_friend_requests` / `qq_handle_friend_request`
+  （开关 `socialV2.tools.friendRequests`）。
+
+**验证**
+
+- `node scripts/test-friend-requests.mjs`（纯函数 + 真实 `src/bridge.js` + 夹具网关，不连真 QQ）：事件/网关项
+  规范化、去重/TTL/上限、`kind` 分派到两个不同 OneBot 动作、仅主人私聊 / 无授权窗口 / 超频率的 403/429、
+  flag 校验、事件缓存未命中 400。
+- 真机：有人发好友申请后 `state/friend-requests.json` 出现 `pending`；`qq_list_friend_requests` 能同时看到
+  `kind=request`（普通）与 `kind=filtered`（被过滤）；重启桥接后 7 天内的 pending 仍在。
+- ⚠️ **真实好友申请尚未真机验证**（写这段时还没有自然人发来申请；等一次自然申请，或经主人同意后让朋友发一条）。
+
+**影响面**
+
+- 只影响好友申请这一块能力；消息收发、群管理、补历史等主链路不受影响（事件订阅失败也只记日志）。
+- 如果以后的 SnowLuma/NapCat 补了「普通待处理申请列表」动作，事件缓存仍应保留：列表接口大概率也给不出
+  已被处理/已过期申请的留言，而「谁什么时候申请过」只有事件里才有。
+

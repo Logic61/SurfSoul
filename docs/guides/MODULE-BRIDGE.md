@@ -184,6 +184,7 @@ await pumpMux();      // DSH 事件流主循环（永不返回）
 - 私聊：过滤掉自己发的（字符串比较，网关 number/string 混用），再 `handleIncoming('private', user_id, ...)`（`src/bridge.js:14657-14662`）。
 - 群聊：同样过滤自己发的（两个字段都查），再 `handleIncoming('group', group_id, ...)`（`src/bridge.js:14663-14667`）。
 - 拍一拍：`onNotice('notify')` → `handlePokeNotice`（`src/bridge.js:14668-14670`、`src/bridge.js:14030`）。
+- 好友申请：`onRequest('friend')` → `recordFriendRequestV2` 规范化后落 `state/friend-requests.json`——**只记录，不主动发 QQ、不唤醒**（留言是陌生人可控内容；等主人开口时在唤醒提示里告知，见 §6.10、PITFALLS #102）。订阅失败只记日志，不影响主链路。
 - 三处 handler 都包了 `try/catch`，异常只记日志，不会中断 WS 读循环。
 
 ### 3.1 白名单 / 黑名单 / 模式（三道闸，顺序不可换）
@@ -436,15 +437,16 @@ await pumpMux();      // DSH 事件流主循环（永不返回）
 
 ## 5. 会话与状态
 
-### 5.1 三份持久化文件
+### 5.1 四份持久化文件
 
 | 文件 | 内容 | 上限/裁剪 | 位置 |
 |---|---|---|---|
 | `state/sessions.json` | `{sessions:{key→sessionId}, sessionPolicies:{key→签名}}` | 无（按 key 数） | `src/bridge.js:111`、`src/bridge.js:1245-1291` |
 | `state/social-v2.json` | 每会话 wakeConfig / recent / unread / agentToken / 水位 / 记忆（话题/想法/印象/**规矩 rules**）/ 鱼群 / 收尾 / 跨场合投递次数（`crossSendTimes`） | recent ≤200、unread ≤100、wakeTimes ≤200、sendTimes ≤500、activeTopics/pendingThoughts ≤50、impressions ≤50、rules ≤50、fishGuardLog ≤30、seenForwardIds ≤1000 | `src/bridge.js:114`、`src/bridge.js:9628-9670` |
 | `state/initial-prompts.json` | 操作者预写的每会话「环境介绍」 | 单条 ≤ `initialPromptMaxChars`（100~8000，默认 2000） | `src/bridge.js:117`、`src/bridge.js:9681-9801` |
+| `state/friend-requests.json` | **好友申请事件缓存**（2026-11-06）：`pending`（普通申请：`kind/flag/userId/nick/comment/source/receivedAt`）+ `handled`（已处理标记，防网关延迟消失导致重复处理） | pending TTL 7 天、≤50 条；handled TTL 24 小时、≤100 条 | `src/bridge.js:170`、`src/friend-requests.js`（纯函数） |
 
-三份都是「**读坏就只读降级**」：`stateWritable` / `initialPromptsWritable` / `slangStoreWritable` / `stickerStoreWritable`。原则一致——宁可这一轮不写，也不能用内存里的空数据覆盖磁盘（`src/bridge.js:1247-1251`、`src/bridge.js:9698-9702`、`src/bridge.js:1770-1772`、`src/bridge.js:1790-1801`）。
+四份都是「**读坏就只读降级**」：`stateWritable` / `initialPromptsWritable` / `slangStoreWritable` / `stickerStoreWritable`。好友申请缓存是「读失败/文件不存在 → 当作空缓存；写失败 → 只记日志，不影响收发（内存里照常处理）」——它只是事件缓存，不参与消息主链路。原则一致——宁可这一轮不写，也不能用内存里的空数据覆盖磁盘（`src/bridge.js:1247-1251`、`src/bridge.js:9698-9702`、`src/bridge.js:1770-1772`、`src/bridge.js:1790-1801`）。
 
 `social-v2.json` 还多一层保护：加载前后取文件指纹（`size:mtimeMs`），变了就**跳过回写**，防两个实例互相覆盖（`src/bridge.js:9476-9488`、`src/bridge.js:9606-9621`）。
 
@@ -641,7 +643,7 @@ await pumpMux();      // DSH 事件流主循环（永不返回）
 | 方法 | 路径 | 工具开关 | 说明 |
 |---|---|---|---|
 | GET | `/api/socialV2/state` | `socialState` | 唤醒配置 + 水位 + 收尾状态 | `src/bridge.js:5422-5446` |
-| GET | `/api/socialV2/prompt` | `getPrompt` | 角色/工具清单/推荐值/记忆/表情/收尾/语音库摘要 | `src/bridge.js:5447-5553` |
+| GET | `/api/socialV2/prompt` | `getPrompt` | 角色/工具清单/推荐值/记忆/表情/收尾/语音库摘要；**主人私聊**额外带 `friendRequests`（待处理条数 + 前几条，群聊/别人私聊为 `null`） | `src/bridge.js:5447-5553` |
 | GET | `/api/socialV2/unread` | `getUnread` | 支持 `afterSeq` 游标；带表情匹配 | `src/bridge.js:5555-5578` |
 | GET | `/api/socialV2/recent` | `getRecent` | 支持 `offset` | `src/bridge.js:5579-5594` |
 | GET | `/api/socialV2/my-recent` | `getMyRecent` | 自己发过的 | `src/bridge.js:7414` |
@@ -657,8 +659,9 @@ await pumpMux();      // DSH 事件流主循环（永不返回）
 | GET | `/api/socialV2/self-image` | `getSelfImage` | 读 `assets/deepseek娘.png` | `src/bridge.js:6347-6363` |
 | GET | `/api/socialV2/tool-log` | — `A!`（GET 也是） | 工具调用日志 | `src/bridge.js:7359` |
 | GET | `/api/socialV2/feedback` | — `A!` | 反馈列表 | `src/bridge.js:7372` |
+| GET | `/api/socialV2/friend-requests` | `friendRequests` | **好友申请列表（仅主人私聊）**：`pending` = 事件缓存的普通申请（`kind=request`）+ 网关现拉的被过滤/可疑申请（`kind=filtered`），`kind`/`flag` 是处理入参、留言/昵称标 `untrusted:true`；另有 `counts`、`gateway`（拉取失败仍 200，`ok:false` 给原因）、`hint`。群聊/别人私聊 403；控制台（不带 `x-agent-token`）可调 | `src/bridge.js` 同段（2026-11-06 好友申请） |
 
-`/api/socialV2/prompt` 的 `toolMap`（34 项 flag→工具名；2026-11-02 补 `setGroupCard` / `setGroupBan`）决定了模型看到哪些工具（`src/bridge.js` 同段），`sticker` 全局开关会连带隐藏 6 个表情工具。
+`/api/socialV2/prompt` 的 `toolMap`（35 项 flag→工具名；2026-11-02 补 `setGroupCard` / `setGroupBan`，2026-11-06 补 `friendRequests`）决定了模型看到哪些工具（`src/bridge.js` 同段），`sticker` 全局开关会连带隐藏 6 个表情工具。
 
 ### 6.11 二代写接口（`A`）
 
@@ -675,6 +678,7 @@ await pumpMux();      // DSH 事件流主循环（永不返回）
 | POST | `/api/socialV2/send-cross` | `crossSceneSend` | **受控跨场合投递**（主人私聊 → 显式白名单群；默认关；桥接代投，不向模型发目标 token） | `src/bridge.js` 同段（2026-10-31 路线 A） |
 | POST | `/api/socialV2/set-group-ban` | `setGroupBan` | **群管理：禁言/解禁**（仅 `group:` 会话；只认 ownerQQ 本人且要求他最近在群里说过话 —— `socialV2.adminActions.windowMs`；目标必须是本群成员、不能是她自己/管理员/群主/其他管理员；`durationSeconds=0` 解禁，最长 30 天；每小时上限 `maxPerHour`） | `src/bridge.js` 同段（2026-11-02 群管理动作） |
 | GET | `/api/socialV2/group-members` | —（只读，带会话令牌） | **群成员名单（reserved2）**：群成员 QQ 号/昵称/群名片/role；群聊只能查本群、主人私聊可查白名单群；给「禁言/改名片」按昵称解析 QQ 号用 | `src/bridge.js` 同段（2026-11-02 群管理动作） |
+| POST | `/api/socialV2/handle-friend-request` | `friendRequests` | **好友申请：同意/拒绝**（`approve=true` 真会生效的账号级动作）。硬闸：仅主人私聊（`private:<ownerQQ>`）+ 主人**最近一次在私聊里说话**在 `socialV2.adminActions.windowMs`（默认 10 分钟）内 + 每小时 ≤ `maxPerHour`（与群管理动作共用 `adminActionTimes`）；`kind` 只能 `request`/`filtered`，`flag` 走 `^[A-Za-z0-9_\-+/=.:]{1,200}$` 且必须来自列表（普通申请还要命中事件缓存，否则 400）；`approve=true/false` 缺省 true、非布尔 400；`request`→`set_friend_add_request`、`filtered`→`set_doubt_friends_add_request`；网关失败 502「处理好友申请失败：…」；成功后从缓存删除并记 `handled` | `src/bridge.js` 同段（2026-11-06 好友申请） |
 | GET/POST | `/api/socialV2/style-notes` | —（控制台/管理端） | 说话习惯：POST 可选 `scope`（global/private/group/group:<id>）；GET `?key=` 返回按场合过滤后的注入块 | `src/bridge.js` 同段（2026-10-31 路线 A） |
 | POST | `/api/socialV2/send-poke` | `sendPoke` | **发 QQ**（拍一拍） | `src/bridge.js:6203-6310` |
 | POST | `/api/socialV2/send-voice` | `sendVoice` | **发 QQ**（语音） | `src/bridge.js:6654-6752` |

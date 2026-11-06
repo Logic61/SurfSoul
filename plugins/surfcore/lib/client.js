@@ -980,6 +980,8 @@ F("sessionCwd", "会话工作目录", "留空用 surfcore 根目录", "text", { 
       sendImage: "发图片", imageGen: "快速画图（Agnes）",
       // 群管理动作（2026-11-02）：禁言/解禁、改别人群名片（仅管理员本人在群里要求时有效）
       setGroupCard: "改群名片", setGroupBan: "禁言/解禁",
+      // 好友申请（2026-11-06）：账号级信息/动作，只在主人私聊里可用
+      friendRequests: "好友申请",
     };
 
     // B站 → QQ 自动分享（写根 config.json 的 biliBridge；保存后重启桥接生效）。

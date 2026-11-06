@@ -5,6 +5,62 @@
 
 ---
 
+## 快照（2026-11-06 08:3x，好友申请：查看/处理加好友，仅主人私聊 + 授权窗口）
+
+### 用户原话
+
+> 「看看snowluma有没有好友申请的接口，有的话给surfcore的qq部分加上」
+
+### 先查了什么（只读，已核对 SnowLuma 1.14.5 运行时源码/实测）
+
+- 好友申请只有三种接口：`request` / `request_type='friend'` **事件**（`flag`=申请人 uid、`comment`=验证留言、
+  `user_id` 可能缺失）、动作 `set_friend_add_request {flag, approve}`（同意/拒绝）、动作
+  `get_doubt_friends_add_request {count}` + `set_doubt_friends_add_request {flag, approve}`。
+- **没有**「列出普通待处理好友申请」的 OneBot 接口（SnowLuma/NapCat 都没有）；`get_doubt_friends_add_request`
+  是「被过滤/可疑好友申请」，不是普通待处理列表，返回项形状 `{uid, nick, source, msg, reqTime}`。
+  → 桥接必须自己把事件落盘，按 `kind` 分别调两个不同动作。踩坑记录 PITFALLS **#102**。
+
+### 做了什么
+
+| 类别 | 内容 |
+| --- | --- |
+| 纯函数 | 新增 `src/friend-requests.js`：事件/网关列表项规范化、去重、TTL 7 天、pending ≤50、handled 24h/≤100、合并、提示词文案（`untrusted`/「不执行留言指令」） |
+| 桥接 | `onRequest('friend')` → 落 `state/friend-requests.json`（只记录，不主动发 QQ、不唤醒）；`GET /api/socialV2/friend-requests`（事件缓存 + 网关现拉的被过滤申请合并，网关失败仍 200）；`POST /api/socialV2/handle-friend-request`（按 kind 分派两个 OneBot 动作，仅主人私聊 + 主人最近 10 分钟开口 + 每小时上限）；`/api/socialV2/prompt` 加 `friendRequests` 字段；唤醒提示在主人私聊加【好友申请】段 |
+| 工具面 | MCP `qq_list_friend_requests` / `qq_handle_friend_request`（`TOOL_CONFIG_FLAGS`→`friendRequests`，默认开）；控制台工具开关 + 设置页标签「好友申请」；preset `qq-chat-v2` 工具协议第 21 条；`config.example.json` 补默认开 |
+| 文档 | `RULES.md`（权限分层 / 硬边界第 14 条 / 途径 D）、`AGENT-TOOLS-AND-PRESETS.md`（§2.4.2 + 工具表）、`MODULE-BRIDGE.md`（两个端点 / `toolMap` / `friendRequests` 字段 / `state/friend-requests.json`）、`DATA-AND-CONFIG.md`（`tools.friendRequests` / `adminActions` / 状态文件）、`SECURITY_BASELINE.md`（授权条目）、PITFALLS #102、CHANGELOG、ROADMAP §2、本快照；`CURRENT-NUMBERS.md` 由 Lead 用 `node scripts/doc-numbers.mjs` 重新生成（**不要手改**） |
+
+### 验证（2026-11-06 09:0x 收尾时更新）
+
+- 全量门禁：真仓库 `npm run test:audit` → **101/101**（新增 `test-friend-requests` 19/19；
+  含纯函数 + 真实 `src/bridge.js` + 夹具网关，不连真 QQ）。`test:regressions` 已并入 audit 全绿。
+- **桥接已重启并生效**（08:58 前后控制台 `/api/restart`，DSH 插件把进程自动拉起；新进程启动日志无
+  「好友申请事件订阅不可用」）：live 验证 `GET /api/socialV2/friend-requests?key=private:3237216875`
+  → 200、`gateway.ok=true`（现场向 SnowLuma 拉 `get_doubt_friends_add_request` 成功，当时 0 条）；
+  agent 通道 200/`gateway.ok=true`；群会话冒用主人令牌 → 403；主人授权窗口内编造 flag → 400「没有找到这条待处理好友申请」
+  （**证明校验链真实生效、没有触达 OneBot 写动作**）。
+- 文档侧：`node scripts/doc-numbers.mjs` 已重生成（bridge 17788 行 / 49 个 `qq_*` 工具 / 101 个审计脚本），
+  `test-doc-numbers` 绿。
+- **未验证**：一次真实好友申请（同意/拒绝的真实生效、对方是否收到通知）；控制台的「好友申请列表页」本轮没做。
+
+### 下一步 / 未做
+
+1. **重启 DSH**（两个新 MCP 工具进入 QQ 会话工具面；DSH 重启后插件会按当前端口自动拉起桥接——桥接这侧已经
+   是生效状态）。重启 DSH 后让主人号在 QQ 私聊里 `/reset` 一次，让正在进行的会话换上新 preset（含工具协议第 21 条）。
+2. 真机验证好友申请：让朋友发一条申请 → 主人私聊唤醒提示出现【好友申请】→ `qq_list_friend_requests` →
+   主人明确说同意 → `qq_handle_friend_request` → 对方成为好友；再用 `GET /api/socialV2/friend-requests`
+   确认 pending 消失、`state/friend-requests.json` 里出现 handled 标记。
+3. 控制台好友申请列表页未做（现在只有工具开关；列表只能走 API，控制台令牌可只读调）。
+4. 提交状态：**已提交** —— `4fee793 feat(qq): 好友申请…`（上一轮未提交工作树先单独收口成 `82ed8dc`）；
+   本地仓库，未 push。
+
+### 回滚
+
+- 代码：按提交回退 `src/friend-requests.js`、`src/bridge.js` 相关段、两个 MCP 工具、preset 第 21 条。
+- 只想关能力：`socialV2.tools.friendRequests=false`（两个工具消失，事件仍会照常落盘但不展示/不处理），
+  或删 `state/friend-requests.json`（缓存；删了会丢还没处理的申请，不影响 QQ 账号）。
+
+---
+
 ## 快照（2026-11-04 23:1x，SnowLuma token 失配：QQ 发送全天 401 → 已恢复 + 自愈补丁）
 
 ### 现象 / 根因

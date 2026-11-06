@@ -241,6 +241,7 @@
       "imageGen": true,
       "setGroupCard": true,
       "setGroupBan": true,
+      "friendRequests": true,
       "setStickerRemark": false,
       "stickerNote": true,
       "collectSticker": true,
