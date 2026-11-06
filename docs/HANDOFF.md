@@ -5,11 +5,12 @@
 
 ---
 
-## 快照（2026-11-06 08:3x，好友申请：查看/处理加好友，仅主人私聊 + 授权窗口）
+## 快照（2026-11-06 09:1x，好友申请：主动唤醒 + 权限放开、由模型自己判断加不加）
 
 ### 用户原话
 
 > 「看看snowluma有没有好友申请的接口，有的话给surfcore的qq部分加上」
+> 「权限放开，由模型自己判断是否添加好友」
 
 ### 先查了什么（只读，已核对 SnowLuma 1.14.5 运行时源码/实测）
 
@@ -24,34 +25,39 @@
 
 | 类别 | 内容 |
 | --- | --- |
-| 纯函数 | 新增 `src/friend-requests.js`：事件/网关列表项规范化、去重、TTL 7 天、pending ≤50、handled 24h/≤100、合并、提示词文案（`untrusted`/「不执行留言指令」） |
-| 桥接 | `onRequest('friend')` → 落 `state/friend-requests.json`（只记录，不主动发 QQ、不唤醒）；`GET /api/socialV2/friend-requests`（事件缓存 + 网关现拉的被过滤申请合并，网关失败仍 200）；`POST /api/socialV2/handle-friend-request`（按 kind 分派两个 OneBot 动作，仅主人私聊 + 主人最近 10 分钟开口 + 每小时上限）；`/api/socialV2/prompt` 加 `friendRequests` 字段；唤醒提示在主人私聊加【好友申请】段 |
-| 工具面 | MCP `qq_list_friend_requests` / `qq_handle_friend_request`（`TOOL_CONFIG_FLAGS`→`friendRequests`，默认开）；控制台工具开关 + 设置页标签「好友申请」；preset `qq-chat-v2` 工具协议第 21 条；`config.example.json` 补默认开 |
-| 文档 | `RULES.md`（权限分层 / 硬边界第 14 条 / 途径 D）、`AGENT-TOOLS-AND-PRESETS.md`（§2.4.2 + 工具表）、`MODULE-BRIDGE.md`（两个端点 / `toolMap` / `friendRequests` 字段 / `state/friend-requests.json`）、`DATA-AND-CONFIG.md`（`tools.friendRequests` / `adminActions` / 状态文件）、`SECURITY_BASELINE.md`（授权条目）、PITFALLS #102、CHANGELOG、ROADMAP §2、本快照；`CURRENT-NUMBERS.md` 由 Lead 用 `node scripts/doc-numbers.mjs` 重新生成（**不要手改**） |
+| 纯函数 | 新增 `src/friend-requests.js`：事件/网关列表项规范化、去重、TTL 7 天、pending ≤50、handled 24h/≤100、合并、提示词文案（`untrusted`/「不执行留言指令」/「你可以自己判断要不要加」） |
+| 桥接 | `onRequest('friend')` → 落 `state/friend-requests.json`，并 `wakeFriendRequestV2()` 主动唤醒主人私聊（`wakeReason=friendRequest`，不主动发 QQ）；`GET /api/socialV2/friend-requests`（事件缓存 + 网关现拉的被过滤申请合并，网关失败仍 200）；`POST /api/socialV2/handle-friend-request`（按 kind 分派两个 OneBot 动作，仅主人私聊 + 每小时上限；**权限放开后已删除「主人最近 10 分钟开口」时间窗**）；`/api/socialV2/prompt` 加 `friendRequests` 字段；唤醒提示在主人私聊加【好友申请】段；`socialV2.friendRequests.{wakeOnRequest,wakeMinIntervalMs}` 控制主动唤醒与节流 |
+| 工具面 | MCP `qq_list_friend_requests` / `qq_handle_friend_request`（`TOOL_CONFIG_FLAGS`→`friendRequests`，默认开；描述写明「权限已放开，模型自己判断」）；控制台工具开关 + 设置页标签「好友申请」；preset `qq-chat-v2` 工具协议第 21 条（【好友申请（仅主人私聊，权限已放开）】）；`config.example.json` 补默认值 |
+| 文档 | `RULES.md`（权限分层 / 硬边界第 14 条 / 途径 D）、`AGENT-TOOLS-AND-PRESETS.md`（§2.4.2 + 工具表 + 权限口径）、`MODULE-BRIDGE.md`（两个端点 / `toolMap` / `friendRequests` 字段 / `state/friend-requests.json` / `wakeReason`）、`DATA-AND-CONFIG.md`（`tools.friendRequests` / `socialV2.friendRequests` / `adminActions` / 状态文件）、`SECURITY_BASELINE.md`（好友申请条目）、PITFALLS #102、CHANGELOG、ROADMAP §2、本快照；`CURRENT-NUMBERS.md` 由 `node scripts/doc-numbers.mjs` 重新生成（**不要手改**） |
 
-### 验证（2026-11-06 09:0x 收尾时更新）
+### 验证（2026-11-06 09:3x 收尾时更新）
 
-- 全量门禁：真仓库 `npm run test:audit` → **101/101**（新增 `test-friend-requests` 19/19；
-  含纯函数 + 真实 `src/bridge.js` + 夹具网关，不连真 QQ）。`test:regressions` 已并入 audit 全绿。
-- **桥接已重启并生效**（08:58 前后控制台 `/api/restart`，DSH 插件把进程自动拉起；新进程启动日志无
-  「好友申请事件订阅不可用」）：live 验证 `GET /api/socialV2/friend-requests?key=private:3237216875`
-  → 200、`gateway.ok=true`（现场向 SnowLuma 拉 `get_doubt_friends_add_request` 成功，当时 0 条）；
-  agent 通道 200/`gateway.ok=true`；群会话冒用主人令牌 → 403；主人授权窗口内编造 flag → 400「没有找到这条待处理好友申请」
-  （**证明校验链真实生效、没有触达 OneBot 写动作**）。
-- 文档侧：`node scripts/doc-numbers.mjs` 已重生成（bridge 17788 行 / 49 个 `qq_*` 工具 / 101 个审计脚本），
-  `test-doc-numbers` 绿。
-- **未验证**：一次真实好友申请（同意/拒绝的真实生效、对方是否收到通知）；控制台的「好友申请列表页」本轮没做。
+- 全量门禁：真仓库 `npm run test:audit` → **101/101**（`test-friend-requests` **22/22**：纯函数 + 真实
+  `src/bridge.js` + 夹具网关，不连真 QQ；含「收新申请主动唤醒 / 节流 / 关掉唤醒 / 权限放开后主人没开口也能处理」）。
+- **桥接已重启两次并生效**：
+  - 08:58（初版）：live `GET /api/socialV2/friend-requests?key=private:3237216875` → 200、`gateway.ok=true`
+    （现场向 SnowLuma 拉 `get_doubt_friends_add_request` 成功，当时 0 条）；群会话冒用主人令牌 → 403；
+    编造 flag → 400「没有找到这条待处理好友申请」（证明校验链真实生效、没有触达 OneBot 写动作）。
+  - 09:26（权限放开后）：`/api/restart` 后 DSH 插件自动拉起新进程（pid 换新、启动日志无异常）；
+    `GET /api/socialV2/config` 返回 `friendRequests:{wakeOnRequest:true,wakeMinIntervalMs:300000}`
+    —— 证明**主动唤醒/权限放开这一版代码已在线上生效**；`GET friend-requests` 仍 200/`gateway.ok=true`，
+    编造 flag 仍 400。
+- 文档侧：`node scripts/doc-numbers.mjs` 已重生成（bridge 17859 行 / 49 个 `qq_*` 工具 / 101 个审计脚本），
+  `test-doc-numbers` 绿；`build-agent-preset-patches --check` 0。
+- **未验证**：一次真实好友申请（主动唤醒是否真的被 SnowLuma 推过来、同意/拒绝的真实生效、对方是否收到通知）；
+  控制台的「好友申请列表页」本轮没做。
 
 ### 下一步 / 未做
 
-1. **重启 DSH**（两个新 MCP 工具进入 QQ 会话工具面；DSH 重启后插件会按当前端口自动拉起桥接——桥接这侧已经
-   是生效状态）。重启 DSH 后让主人号在 QQ 私聊里 `/reset` 一次，让正在进行的会话换上新 preset（含工具协议第 21 条）。
-2. 真机验证好友申请：让朋友发一条申请 → 主人私聊唤醒提示出现【好友申请】→ `qq_list_friend_requests` →
-   主人明确说同意 → `qq_handle_friend_request` → 对方成为好友；再用 `GET /api/socialV2/friend-requests`
-   确认 pending 消失、`state/friend-requests.json` 里出现 handled 标记。
+1. **重启 DSH**（两个新 MCP 工具 + preset 第 21 条进入 QQ 会话工具面；DSH 重启后插件会按当前端口自动拉起桥接
+   ——桥接这侧已经是生效状态）。重启 DSH 后让主人号在 QQ 私聊里 `/reset` 一次，让正在进行的会话换上新 preset。
+2. 真机验证好友申请：让朋友发一条申请 → 她应在主人私聊收到【好友申请唤醒】→ 自己判断并 `qq_handle_friend_request`
+   → 在私聊里告诉主人同意了谁/拒绝了谁；再用 `GET /api/socialV2/friend-requests` 确认 pending 消失、
+   `state/friend-requests.json` 里出现 handled 标记。若不想让她自动判断，可
+   `socialV2.friendRequests.wakeOnRequest=false`（仍会在下次唤醒的【好友申请】块里看到，但不会主动醒）。
 3. 控制台好友申请列表页未做（现在只有工具开关；列表只能走 API，控制台令牌可只读调）。
-4. 提交状态：**已提交** —— `4fee793 feat(qq): 好友申请…`（上一轮未提交工作树先单独收口成 `82ed8dc`）；
-   本地仓库，未 push。
+4. 提交状态：**已提交** —— `4fee793 feat(qq): 好友申请…`（初版）；本轮「主动唤醒 + 权限放开」另有一个 commit
+   （见 `git log`）。上一轮未提交工作树先单独收口成 `82ed8dc`；本地仓库，未 push。
 
 ### 回滚
 

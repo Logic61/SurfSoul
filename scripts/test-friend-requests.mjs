@@ -5,7 +5,8 @@
 // 所以这个功能的核心不是"调一个接口"，而是：
 //   ① 事件到达时可靠落盘（桥接重启后还在）；
 //   ② 只在主人私聊里给 AI 看/处理（账号级信息 + 陌生人可控留言，不能进群聊上下文）；
-//   ③ 处理动作有硬闸：主人最近开口的时间窗 + 每小时上限 + 工具开关；
+//   ③ 收到新申请主动唤醒**主人私聊**会话，让她自己判断要不要加（2026-11-06 用户要求
+//      「权限放开，由模型自己判断是否添加好友」；醒来后仍受工具开关/每小时上限/仅主人私聊约束）；
 //   ④ 普通申请必须命中缓存里真实存在的那一条，按 kind 分头调两个不同 OneBot 动作。
 //
 // 覆盖：
@@ -13,9 +14,10 @@
 //   2. 事件 → 缓存 → GET /api/socialV2/friend-requests（普通 + 被过滤两档合并）；
 //   3. GET 权限：群会话/别人私聊/错误令牌/工具关闭/非 reserved2 一律拒绝；
 //   4. POST 处理：同意/拒绝两条 OneBot 动作、缓存清理、handled、频率计数、重复处理拒绝；
-//   5. POST 授权：主人没开口/窗口过期/群会话/非法参数/频率上限；
+//   5. 权限放开：主人没开口也能处理（旧 10 分钟窗口已删除）；群会话/非法参数/频率上限仍拒绝；
+//   5.5 收到新申请主动唤醒：wakeOnRequest 开关、wakeMinIntervalMs 节流、prompt 带「自己判断」口径；
 //   6. 唤醒提示与 qq_get_prompt：只在主人私聊出现【好友申请】和两个工具名；
-//   7. 静态接线：MCP 两个工具、桥接端点/默认开关、控制台开关、示例配置、预设第 21 条、文档。
+//   7. 静态接线：MCP 两个工具、桥接端点/默认开关/主动唤醒、控制台开关、示例配置、预设第 21 条、文档。
 //
 // 运行：node scripts/test-friend-requests.mjs
 import assert from 'node:assert/strict';
@@ -91,16 +93,29 @@ async function closeServers() {
   ACTIVE_SERVERS.clear();
 }
 
+// 默认关掉「收到申请主动唤醒」：绝大多数用例只测端点/缓存，不想多出一轮异步唤醒；
+// 专测唤醒的用例显式打开（并可用 wakeMinIntervalMs: 0 关掉节流）。
 const baseConfig = (socialV2 = {}) => ({
   ownerQQ: Number(OWNER_QQ),
   allow: { private: [OWNER_QQ], groups: ['456'] },
-  socialV2
+  socialV2: { friendRequests: { wakeOnRequest: false }, ...socialV2 }
 });
 
-/** 模拟「主人刚在私聊里说了一句话」——真实路径是 handleIncoming 调 appendSocialV2Message。 */
-function ownerSpoke(h, text = '同意那个好友申请') {
-  h.appendSocialV2Message(OWNER, '主人', text, text, false, true, null, [], OWNER_QQ, []);
+/** 等到条件成立（异步唤醒没有 await 返回值，用轮询收口，最多 timeoutMs）。 */
+async function waitFor(cond, timeoutMs = 1500, stepMs = 20) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (cond()) return true;
+    await new Promise((resolve) => setTimeout(resolve, stepMs));
+  }
+  return Boolean(cond());
 }
+
+function promptTexts(h) {
+  return h.calls.prompts
+    .map((params) => (Array.isArray(params?.content) ? params.content : []).map((part) => part?.text || '').join('\n'));
+}
+
 
 /** 夹具网关：get_doubt_friends_add_request 返回给定列表；其它动作交回默认 fakeFetch。 */
 function fixtureGateway(h, filtered = []) {
@@ -393,8 +408,9 @@ test('同意普通申请：调 set_friend_add_request(flag, approve=true)，清�
     const port = await withServer(h);
     const st = h.getSocialV2State(OWNER);
     h.emitRequest(FRIEND_EVENT);
-    ownerSpoke(h);
-    assert.ok(st.lastIncomingAt > 0, '主人发言要刷新 lastIncomingAt（授权窗口用）');
+    // 2026-11-06 用户要求「权限放开，由模型自己判断是否添加好友」：
+    // 这里**故意不让主人先开口**，验证旧的「10 分钟授权窗口」已经不再拦处理动作。
+    assert.equal(Number(st.lastIncomingAt) || 0, 0, '本用例模拟主人没开口');
 
     const res = await post(port, 'handle-friend-request', {
       key: OWNER,
@@ -428,7 +444,6 @@ test('拒绝被过滤申请：调 set_doubt_friends_add_request(flag, approve=fa
     const port = await withServer(h);
     const st = h.getSocialV2State(OWNER);
     fixtureGateway(h, [{ uid: 'u_filtered_9', nick: '可疑', source: '群聊', msg: '你好', reqTime: Math.floor(Date.now() / 1000) }]);
-    ownerSpoke(h);
 
     const res = await post(port, 'handle-friend-request', {
       key: OWNER,
@@ -446,7 +461,7 @@ test('拒绝被过滤申请：调 set_doubt_friends_add_request(flag, approve=fa
   }
 });
 
-test('POST 授权：主人没开口 / 窗口过期 / 群会话 → 403；参数非法 → 400', async () => {
+test('POST 权限：仅主人私聊 + 参数校验；不再要求主人先开口（权限放开）', async () => {
   const h = await bridgeHarness({ config: baseConfig() });
   try {
     h.setMode('reserved2');
@@ -455,26 +470,13 @@ test('POST 授权：主人没开口 / 窗口过期 / 群会话 → 403；参数�
     const groupSt = h.getSocialV2State(GROUP);
     h.emitRequest(FRIEND_EVENT);
 
-    // 桥接没有主人发言记录（比如定时器唤醒）→ 拒绝
-    const noOwner = await post(port, 'handle-friend-request', { key: OWNER, kind: 'request', flag: 'u_abc123', approve: true }, { token: st.agentToken });
-    assert.equal(noOwner.status, 403, noOwner.raw);
-    assert.match(noOwner.data.error, /主人/);
-
-    // 窗口过期
-    ownerSpoke(h);
-    st.lastIncomingAt = Date.now() - 11 * 60 * 1000;
-    const expired = await post(port, 'handle-friend-request', { key: OWNER, kind: 'request', flag: 'u_abc123', approve: true }, { token: st.agentToken });
-    assert.equal(expired.status, 403, expired.raw);
-    assert.match(expired.data.error, /分钟/);
-
-    // 群会话不能处理（哪怕有 owner 发言记录）
+    // 群会话不能处理（账号级动作，群聊/别人私聊一律 403）
     h.appendSocialV2Message(GROUP, '管理员', '同意一下', '同意一下', false, true, null, [], OWNER_QQ, []);
     const asGroup = await post(port, 'handle-friend-request', { key: GROUP, kind: 'request', flag: 'u_abc123', approve: true }, { token: groupSt.agentToken });
     assert.equal(asGroup.status, 403, asGroup.raw);
     assert.match(asGroup.data.error, /主人私聊/);
 
-    // 参数校验（此时窗口重新有效）
-    st.lastIncomingAt = Date.now();
+    // 参数校验
     for (const body of [
       { key: OWNER, kind: 'nope', flag: 'u_abc123', approve: true },
       { key: OWNER, kind: 'request', flag: 'bad flag', approve: true },
@@ -486,6 +488,12 @@ test('POST 授权：主人没开口 / 窗口过期 / 群会话 → 403；参数�
     // 编造的 flag（缓存里没有）也拒绝
     const unknown = await post(port, 'handle-friend-request', { key: OWNER, kind: 'request', flag: 'u_made_up', approve: true }, { token: st.agentToken });
     assert.equal(unknown.status, 400, unknown.raw);
+
+    // 主人没开口也能处理（旧的授权窗口已删除；模型自己判断）
+    assert.equal(Number(st.lastIncomingAt) || 0, 0, '还没记录到主人发言');
+    const ok = await post(port, 'handle-friend-request', { key: OWNER, kind: 'request', flag: 'u_abc123', approve: false }, { token: st.agentToken });
+    assert.equal(ok.status, 200, ok.raw);
+    assert.equal(ok.data.action, 'reject');
   } finally {
     await closeServers();
     await h.close();
@@ -499,7 +507,6 @@ test('POST 频率上限：超过 adminActions.maxPerHour → 429', async () => {
     const port = await withServer(h);
     const st = h.getSocialV2State(OWNER);
     h.emitRequest(FRIEND_EVENT);
-    ownerSpoke(h);
     st.adminActionTimes = [Date.now() - 1000, Date.now() - 2000];
     const res = await post(port, 'handle-friend-request', { key: OWNER, kind: 'request', flag: 'u_abc123', approve: true }, { token: st.agentToken });
     assert.equal(res.status, 429, res.raw);
@@ -518,11 +525,67 @@ test('工具关闭时 POST 也拒绝（控制台开关能整条关掉）', async
     const port = await withServer(h);
     const st = h.getSocialV2State(OWNER);
     h.emitRequest(FRIEND_EVENT);
-    ownerSpoke(h);
     const res = await post(port, 'handle-friend-request', { key: OWNER, kind: 'request', flag: 'u_abc123', approve: true }, { token: st.agentToken });
     assert.equal(res.status, 403, res.raw);
     assert.match(res.data.error, /工具未启用/);
     assert.equal(onebotBodies(h, 'set_friend_add_request').length, 0);
+  } finally {
+    await closeServers();
+    await h.close();
+  }
+});
+
+// ── 5.5 收到新申请 → 主动唤醒她自己判断（2026-11-06 权限放开）────────────────
+test('收到新申请：主动唤醒主人私聊会话，她自己判断（不需要主人先开口）', async () => {
+  const h = await bridgeHarness({ config: baseConfig({ friendRequests: { wakeOnRequest: true, wakeMinIntervalMs: 0 } }) });
+  try {
+    h.setMode('reserved2');
+    h.getSocialV2State(OWNER);
+    h.emitRequest(FRIEND_EVENT);
+    const got = await waitFor(() => h.calls.prompts.length > 0);
+    assert.equal(got, true, '收到好友申请事件后必须主动投递一次唤醒');
+    const text = promptTexts(h).find((t) => t.includes('【好友申请唤醒】')) || '';
+    assert.ok(text.includes('【好友申请唤醒】'), `唤醒原因要写明是好友申请：${text.slice(0, 200)}`);
+    assert.ok(text.includes('【好友申请】'), '唤醒提示里要带待处理申请块（申请人/留言/flag）');
+    assert.ok(text.includes('你可以自己判断'), '要明确告诉模型可以自己判断要不要加');
+    assert.ok(text.includes('qq_handle_friend_request'), '要告诉她处理工具');
+    assert.ok(text.includes('陌生人可控内容'), '留言不可信的警告不能丢');
+  } finally {
+    await closeServers();
+    await h.close();
+  }
+});
+
+test('申请唤醒有最小间隔：wakeMinIntervalMs 内的新申请只缓存不重复烧 token', async () => {
+  const h = await bridgeHarness({ config: baseConfig({ friendRequests: { wakeOnRequest: true, wakeMinIntervalMs: 300000 } }) });
+  try {
+    h.setMode('reserved2');
+    h.getSocialV2State(OWNER);
+    h.emitRequest(FRIEND_EVENT);
+    const first = await waitFor(() => h.calls.prompts.length > 0);
+    assert.equal(first, true, '第一条申请要唤醒');
+    const countAfterFirst = h.calls.prompts.length;
+
+    h.emitRequest({ ...FRIEND_EVENT, flag: 'u_abc999', comment: '再来一条' });
+    // 给异步唤醒留出足够执行时间：节流命中时应该一条新 prompt 都不产生
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    assert.equal(h.calls.prompts.length, countAfterFirst, '间隔内不应再唤醒（申请已落缓存）');
+    assert.equal(h.pendingFriendRequests().length, 2, '第二条申请仍要落缓存，不能丢');
+  } finally {
+    await closeServers();
+    await h.close();
+  }
+});
+
+test('wakeOnRequest=false：事件只落缓存、不唤醒（控制台可关）', async () => {
+  const h = await bridgeHarness({ config: baseConfig({ friendRequests: { wakeOnRequest: false } }) });
+  try {
+    h.setMode('reserved2');
+    h.getSocialV2State(OWNER);
+    h.emitRequest(FRIEND_EVENT);
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    assert.equal(h.calls.prompts.length, 0, '关掉主动唤醒后不能投递 prompt');
+    assert.equal(h.pendingFriendRequests().length, 1, '申请仍要落缓存，等下次唤醒时在提示词里出现');
   } finally {
     await closeServers();
     await h.close();
@@ -590,23 +653,35 @@ test('静态接线：MCP 工具、桥接端点/默认开关、控制台开关、
   assert.match(bridge, /bot\.onRequest\('friend'/, '好友申请事件必须订阅');
   assert.match(bridge, /friendRequests: true/, '桥接默认工具开关必须开');
   assert.match(bridge, /formatFriendRequestBlock\(pendingFriendRequests\(\)/, '唤醒提示块必须接线');
+  // 2026-11-06 权限放开：新申请主动唤醒 + 模型自己判断，两者都要在代码里
+  assert.match(bridge, /wakeFriendRequestV2/, '收到新申请必须能主动唤醒她自己判断');
+  assert.match(bridge, /sendWakePromptV2\(key, 'friendRequest'\)/, '申请唤醒要带独立的 wakeReason（提示词/决策流水靠它）');
+  assert.match(bridge, /【好友申请唤醒】/, '要有专门的申请唤醒提示词分支（告诉模型可以自己判断）');
+  assert.match(bridge, /wakeOnRequest/, '主动唤醒开关要可配置');
 
   assert.match(read('public/console.html'), /data-v2-tool="friendRequests"/, '控制台「工具开关」必须能开关它');
 
   const example = JSON.parse(read('config.example.json'));
   assert.equal(example.socialV2.tools.friendRequests, true, '示例配置要含 friendRequests');
+  assert.equal(example.socialV2.friendRequests?.wakeOnRequest, true, '示例配置要含 friendRequests 行为配置（主动唤醒）');
 
   const preset = read('dsh/agent-presets/qq-chat-v2/agent.cordis.yml');
   assert.match(preset, /qq_list_friend_requests/, '仿真预设要告诉模型有列表工具');
   assert.match(preset, /qq_handle_friend_request/, '仿真预设要告诉模型有处理工具');
-  assert.match(preset, /【好友申请（仅主人私聊）】/, '仿真预设要有好友申请工具协议条目');
+  assert.match(preset, /【好友申请（仅主人私聊/, '仿真预设要有好友申请工具协议条目');
+  assert.match(preset, /你可以自己判断/, '仿真预设要写明权限放开、模型自己判断');
 
   const rules = read('RULES.md');
   assert.ok(rules.includes('qq_handle_friend_request'), 'RULES.md 要写清好友申请的能力与硬边界');
+  assert.ok(rules.includes('自己判断'), 'RULES.md 要写清权限放开、由模型自己判断');
   const toolsDoc = read('docs/guides/AGENT-TOOLS-AND-PRESETS.md');
   assert.ok(toolsDoc.includes('qq_list_friend_requests') && toolsDoc.includes('qq_handle_friend_request'), '工具文档要登记两个新工具');
+  assert.ok(toolsDoc.includes('wakeMinIntervalMs'), '工具文档要说明主动唤醒的开关与节流');
   const bridgeDoc = read('docs/guides/MODULE-BRIDGE.md');
   assert.ok(bridgeDoc.includes('/api/socialV2/friend-requests'), '桥接文档要登记新端点');
-  assert.ok(read('CHANGELOG.md').includes('好友申请'), 'CHANGELOG 要记录这个功能');
+  assert.ok(bridgeDoc.includes('wakeReason=friendRequest'), '桥接文档要登记申请唤醒原因');
+  const changelog = read('CHANGELOG.md');
+  assert.ok(changelog.includes('好友申请'), 'CHANGELOG 要记录这个功能');
+  assert.ok(changelog.includes('权限放开'), 'CHANGELOG 要记录权限放开的最终口径');
   assert.ok(read('docs/HANDOFF.md').includes('好友申请'), 'HANDOFF 要写下当前状态');
 });

@@ -271,7 +271,7 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     wakeDecisionLog, noteWakeDecision, scheduleRecoveryWakesV2,
     // 好友申请（2026-11-06）：测试可直接灌事件/读缓存（不连真 QQ）。
     // emitRequest 走桥接真实注册的 bot.onRequest handler，等于覆盖「事件 → 落盘」接线。
-    recordFriendRequestV2, pendingFriendRequests, friendRequests,
+    recordFriendRequestV2, pendingFriendRequests, friendRequests, wakeFriendRequestV2,
     emitRequest(event) {
       for (const { type, handler } of bot.requestHandlers) {
         if (type === String(event?.request_type ?? '')) handler(event);

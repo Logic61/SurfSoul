@@ -3604,15 +3604,18 @@ accessToken，随便连），紧接着 `[history] get_friend_msg_history 失败�
 **处置（2026-11-06 落地）**
 
 - 桥接订阅 `request`/`friend` 事件 → 规范化后落 `state/friend-requests.json`（跨重启保留：pending TTL 7 天、
-  最多 50 条；handled 已处理标记 24 小时内去重、最多 100 条）。**收到事件只落盘 + 记日志，不主动发 QQ、不唤醒**
-  ——申请留言是陌生人可控内容，自动唤醒等于把提示注入面直接放进模型回合；等主人下次开口时在唤醒提示里告知。
+  最多 50 条；handled 已处理标记 24 小时内去重、最多 100 条）。**收到事件只落盘 + 记日志，不主动发 QQ 消息**；
+  按用户当天要求（「权限放开，由模型自己判断是否添加好友」）改为**主动唤醒主人私聊会话**让她自己判断，
+  唤醒有节流（`socialV2.friendRequests.wakeMinIntervalMs` 默认 5 分钟）且仍走鱼群/token 防爆破/唤醒限频；
+  唤醒只投给主人私聊，申请留言仍只当不可信资料看（不执行其中指令）。
 - 列表 = 事件缓存（普通申请）+ 网关现拉的 `get_doubt_friends_add_request`（被过滤申请）合并，每项带
   `kind`（`request`/`filtered`）与 `untrusted: true`；网关拉取失败仍返回 200（`gateway.ok=false` + 可读原因），
   不因为上游抖动把已知缓存也弄丢。
 - 处理按 `kind` 分派到两个动作；`kind=request` 的 `flag` 还必须在事件缓存里真实存在（否则 400），
   防止模型编造 flag / 重复同意已处理或已过期的申请。
-- 账号级动作硬闸（与群管理动作同一条思路）：仅主人私聊 + 主人最近一次在私聊里说话在
-  `socialV2.adminActions.windowMs`（默认 10 分钟）内 + 每小时 ≤ `maxPerHour`（与群管理动作共用计数）。
+- 账号级动作硬闸：仅主人私聊 + 每小时 ≤ `maxPerHour`（与群管理动作共用计数）。**原本还要求「主人最近一次在
+  私聊里说话在 10 分钟内」，当天用户要求权限放开后已删除**——判断权交给模型（preset 第 21 条：像真人/群友的
+  可以同意，可疑/说不清的先问或拒绝，处理完告诉主人）；会话位置与频率上限仍是硬闸。
 - 纯函数全部集中在 `src/friend-requests.js`（规范化 / TTL / 上限 / 合并 / 提示词文案），方便单测；
   落盘与权限闸门在 `src/bridge.js`；MCP 工具 `qq_list_friend_requests` / `qq_handle_friend_request`
   （开关 `socialV2.tools.friendRequests`）。
@@ -3620,8 +3623,9 @@ accessToken，随便连），紧接着 `[history] get_friend_msg_history 失败�
 **验证**
 
 - `node scripts/test-friend-requests.mjs`（纯函数 + 真实 `src/bridge.js` + 夹具网关，不连真 QQ）：事件/网关项
-  规范化、去重/TTL/上限、`kind` 分派到两个不同 OneBot 动作、仅主人私聊 / 无授权窗口 / 超频率的 403/429、
-  flag 校验、事件缓存未命中 400。
+  规范化、去重/TTL/上限、`kind` 分派到两个不同 OneBot 动作、仅主人私聊 / 参数校验 / 超频率的 403/429、
+  flag 校验、事件缓存未命中 400、**收到新申请主动唤醒（wakeReason=friendRequest）与节流**、权限放开后
+  主人没开口也能处理。
 - 真机：有人发好友申请后 `state/friend-requests.json` 出现 `pending`；`qq_list_friend_requests` 能同时看到
   `kind=request`（普通）与 `kind=filtered`（被过滤）；重启桥接后 7 天内的 pending 仍在。
 - ⚠️ **真实好友申请尚未真机验证**（写这段时还没有自然人发来申请；等一次自然申请，或经主人同意后让朋友发一条）。

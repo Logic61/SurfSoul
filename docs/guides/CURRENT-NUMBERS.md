@@ -6,7 +6,7 @@
 | 指标 | 值 | 来源 |
 | --- | --- | --- |
 | 版本（根/插件） | 0.6.22 / 0.6.22 | `package.json × 2` |
-| bridge.js 行数 | 17788 | `src/bridge.js` |
+| bridge.js 行数 | 17859 | `src/bridge.js` |
 | qq_* MCP 工具数 | 49 | `src/mcp-snowluma-safe.js` |
 | MCP server 数 | 4 | `host-server / snowluma-safe / stock-safe / web-search-safe` |
 | restrict 名单条数 | 99 | `plugins/surfcore/qq-tool-restrict.mjs` |

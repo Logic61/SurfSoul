@@ -184,7 +184,10 @@ await pumpMux();      // DSH 事件流主循环（永不返回）
 - 私聊：过滤掉自己发的（字符串比较，网关 number/string 混用），再 `handleIncoming('private', user_id, ...)`（`src/bridge.js:14657-14662`）。
 - 群聊：同样过滤自己发的（两个字段都查），再 `handleIncoming('group', group_id, ...)`（`src/bridge.js:14663-14667`）。
 - 拍一拍：`onNotice('notify')` → `handlePokeNotice`（`src/bridge.js:14668-14670`、`src/bridge.js:14030`）。
-- 好友申请：`onRequest('friend')` → `recordFriendRequestV2` 规范化后落 `state/friend-requests.json`——**只记录，不主动发 QQ、不唤醒**（留言是陌生人可控内容；等主人开口时在唤醒提示里告知，见 §6.10、PITFALLS #102）。订阅失败只记日志，不影响主链路。
+- 好友申请：`onRequest('friend')` → `recordFriendRequestV2` 规范化后落 `state/friend-requests.json`，并调用
+  `wakeFriendRequestV2()` **主动唤醒主人私聊会话**让她自己判断加不加（2026-11-06 用户要求「权限放开，由模型自己判断是否添加好友」；
+  唤醒受 `socialV2.friendRequests.{wakeOnRequest,wakeMinIntervalMs}` 与全套唤醒闸门控制，见 §6.10、PITFALLS #102）。
+  订阅失败只记日志，不影响主链路。
 - 三处 handler 都包了 `try/catch`，异常只记日志，不会中断 WS 读循环。
 
 ### 3.1 白名单 / 黑名单 / 模式（三道闸，顺序不可换）
@@ -340,7 +343,7 @@ await pumpMux();      // DSH 事件流主循环（永不返回）
 
 `buildWakePromptV2`（`src/bridge.js:12523-12640`）按固定顺序拼：
 
-角色名 → 身份（昵称+QQ号，`src/bridge.js:12486-12500`）→ 来源归属（哪个平台的内容，`buildProvenanceBlock`）→ **【场合】卡（2026-10-31：场合档位 + 当前群/私聊 + 私聊边界守卫）** → 管理员规则（compact）→ B站简报 → 记忆卡（按当前场合过滤 audience 标记）→ **会话令牌** → 初始提示词（**仅 bootstrap**）→ 反AI味 → 积极性 → 对话收尾判断 → 表情策略+表情库摘要 → 表情匹配推荐 → 首回复节奏 → 此刻状态 → 当前唤醒配置 → 记忆（话题/想法/印象/**按场合生效的规矩**）→ 跨会话记忆（含跨场合 global 规矩）→ 受控跨场合投递提示（仅主人私聊且开启时）→ 参与度参考 → 鱼群保护 → Token 防爆破 → 沉睡前强制等待，最后按 `reason` 追加一段（bootstrap / timeout / replyCheck / proactiveCheck / history / poke / 默认）。
+角色名 → 身份（昵称+QQ号，`src/bridge.js:12486-12500`）→ 来源归属（哪个平台的内容，`buildProvenanceBlock`）→ **【场合】卡（2026-10-31：场合档位 + 当前群/私聊 + 私聊边界守卫）** → 管理员规则（compact）→ B站简报 → 记忆卡（按当前场合过滤 audience 标记）→ **会话令牌** → 初始提示词（**仅 bootstrap**）→ 反AI味 → 积极性 → 对话收尾判断 → 表情策略+表情库摘要 → 表情匹配推荐 → 首回复节奏 → 此刻状态 → 当前唤醒配置 → 记忆（话题/想法/印象/**按场合生效的规矩**）→ 跨会话记忆（含跨场合 global 规矩）→ 受控跨场合投递提示（仅主人私聊且开启时）→ 参与度参考 → 鱼群保护 → Token 防爆破 → 沉睡前强制等待，最后按 `reason` 追加一段（bootstrap / timeout / replyCheck / proactiveCheck / history / poke / friendRequest / 默认）。
 
 `deliverPromptNow` 还会在最外层包 `withSlangContext`（时间+黑话）与 `withAlignmentContext`（群聊身份对齐，置顶）（`src/bridge.js:11251`），并在 `wakeReason` 存在时追加【本次消息快照】JSON 与 `history=true` 的说明（`src/bridge.js:11234-11249`）。
 
@@ -659,7 +662,7 @@ await pumpMux();      // DSH 事件流主循环（永不返回）
 | GET | `/api/socialV2/self-image` | `getSelfImage` | 读 `assets/deepseek娘.png` | `src/bridge.js:6347-6363` |
 | GET | `/api/socialV2/tool-log` | — `A!`（GET 也是） | 工具调用日志 | `src/bridge.js:7359` |
 | GET | `/api/socialV2/feedback` | — `A!` | 反馈列表 | `src/bridge.js:7372` |
-| GET | `/api/socialV2/friend-requests` | `friendRequests` | **好友申请列表（仅主人私聊）**：`pending` = 事件缓存的普通申请（`kind=request`）+ 网关现拉的被过滤/可疑申请（`kind=filtered`），`kind`/`flag` 是处理入参、留言/昵称标 `untrusted:true`；另有 `counts`、`gateway`（拉取失败仍 200，`ok:false` 给原因）、`hint`。群聊/别人私聊 403；控制台（不带 `x-agent-token`）可调 | `src/bridge.js` 同段（2026-11-06 好友申请） |
+| GET | `/api/socialV2/friend-requests` | `friendRequests` | **好友申请列表（仅主人私聊）**：`pending` = 事件缓存的普通申请（`kind=request`）+ 网关现拉的被过滤/可疑申请（`kind=filtered`），`kind`/`flag` 是处理入参、留言/昵称标 `untrusted:true`；另有 `counts`、`gateway`（拉取失败仍 200，`ok:false` 给原因）、`hint`。群聊/别人私聊 403；控制台（不带 `x-agent-token`）可调。**收到新普通申请时桥接会主动唤醒主人私聊会话（`wakeReason=friendRequest`）**，让她自己判断（`socialV2.friendRequests` 控制开关与节流） | `src/bridge.js` 同段（2026-11-06 好友申请） |
 
 `/api/socialV2/prompt` 的 `toolMap`（35 项 flag→工具名；2026-11-02 补 `setGroupCard` / `setGroupBan`，2026-11-06 补 `friendRequests`）决定了模型看到哪些工具（`src/bridge.js` 同段），`sticker` 全局开关会连带隐藏 6 个表情工具。
 
@@ -678,7 +681,7 @@ await pumpMux();      // DSH 事件流主循环（永不返回）
 | POST | `/api/socialV2/send-cross` | `crossSceneSend` | **受控跨场合投递**（主人私聊 → 显式白名单群；默认关；桥接代投，不向模型发目标 token） | `src/bridge.js` 同段（2026-10-31 路线 A） |
 | POST | `/api/socialV2/set-group-ban` | `setGroupBan` | **群管理：禁言/解禁**（仅 `group:` 会话；只认 ownerQQ 本人且要求他最近在群里说过话 —— `socialV2.adminActions.windowMs`；目标必须是本群成员、不能是她自己/管理员/群主/其他管理员；`durationSeconds=0` 解禁，最长 30 天；每小时上限 `maxPerHour`） | `src/bridge.js` 同段（2026-11-02 群管理动作） |
 | GET | `/api/socialV2/group-members` | —（只读，带会话令牌） | **群成员名单（reserved2）**：群成员 QQ 号/昵称/群名片/role；群聊只能查本群、主人私聊可查白名单群；给「禁言/改名片」按昵称解析 QQ 号用 | `src/bridge.js` 同段（2026-11-02 群管理动作） |
-| POST | `/api/socialV2/handle-friend-request` | `friendRequests` | **好友申请：同意/拒绝**（`approve=true` 真会生效的账号级动作）。硬闸：仅主人私聊（`private:<ownerQQ>`）+ 主人**最近一次在私聊里说话**在 `socialV2.adminActions.windowMs`（默认 10 分钟）内 + 每小时 ≤ `maxPerHour`（与群管理动作共用 `adminActionTimes`）；`kind` 只能 `request`/`filtered`，`flag` 走 `^[A-Za-z0-9_\-+/=.:]{1,200}$` 且必须来自列表（普通申请还要命中事件缓存，否则 400）；`approve=true/false` 缺省 true、非布尔 400；`request`→`set_friend_add_request`、`filtered`→`set_doubt_friends_add_request`；网关失败 502「处理好友申请失败：…」；成功后从缓存删除并记 `handled` | `src/bridge.js` 同段（2026-11-06 好友申请） |
+| POST | `/api/socialV2/handle-friend-request` | `friendRequests` | **好友申请：同意/拒绝**（`approve=true` 真会生效的账号级动作）。硬闸：仅主人私聊（`private:<ownerQQ>`）+ 每小时 ≤ `maxPerHour`（与群管理动作共用 `adminActionTimes`）；**2026-11-06 用户要求「权限放开，由模型自己判断是否添加好友」，已删除「主人最近开口 10 分钟」时间窗**，判断权在模型（preset 第 21 条），处理完由模型在私聊里告知主人；`kind` 只能 `request`/`filtered`，`flag` 走 `^[A-Za-z0-9_\-+/=.:]{1,200}$` 且必须来自列表（普通申请还要命中事件缓存，否则 400）；`approve=true/false` 缺省 true、非布尔 400；`request`→`set_friend_add_request`、`filtered`→`set_doubt_friends_add_request`；网关失败 502「处理好友申请失败：…」；成功后从缓存删除并记 `handled`；`wakeReason=friendRequest` 的唤醒提示会带「你可以自己判断」口径 | `src/bridge.js` 同段（2026-11-06 好友申请） |
 | GET/POST | `/api/socialV2/style-notes` | —（控制台/管理端） | 说话习惯：POST 可选 `scope`（global/private/group/group:<id>）；GET `?key=` 返回按场合过滤后的注入块 | `src/bridge.js` 同段（2026-10-31 路线 A） |
 | POST | `/api/socialV2/send-poke` | `sendPoke` | **发 QQ**（拍一拍） | `src/bridge.js:6203-6310` |
 | POST | `/api/socialV2/send-voice` | `sendVoice` | **发 QQ**（语音） | `src/bridge.js:6654-6752` |

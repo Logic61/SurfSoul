@@ -443,6 +443,10 @@
       "windowMs": 600000,
       "maxPerHour": 20
     },
+    "friendRequests": {
+      "wakeOnRequest": true,
+      "wakeMinIntervalMs": 300000
+    },
     "scenes": {
       "defaultPrivate": {
         "label": "私聊",

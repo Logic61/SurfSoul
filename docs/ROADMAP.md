@@ -62,16 +62,18 @@
 ## 2. 当前版本与里程碑
 
 - 当前版本：`0.1.0`（SurfCore 合体版），目标 DSH `0.2.1-rc.2`。
-- 已完成（2026-11-06 08:3x–）：**好友申请路线（查看/处理加好友：仅主人私聊 + 授权窗口）**——用户原话
-  「看看snowluma有没有好友申请的接口，有的话给surfcore的qq部分加上」。只读盘点确认：SnowLuma 1.14.5 只有
-  `request`/`friend` 事件 + `set_friend_add_request` + `get_doubt_friends_add_request` /
-  `set_doubt_friends_add_request`，**没有「列出普通待处理申请」的接口**，且 `get_doubt_friends_add_request`
-  是「被过滤/可疑申请」不是普通列表（PITFALLS #102）→ 桥接自己落盘 `state/friend-requests.json`
-  （TTL 7 天 / pending ≤50 / handled 24h 去重），新增两个 MCP 工具 `qq_list_friend_requests` /
-  `qq_handle_friend_request` + 两个端点；账号级动作硬闸 = 仅主人私聊 + 主人最近 10 分钟在私聊开口
-  （`socialV2.adminActions`，与群管理共用每小时上限）+ flag 必须来自列表；留言/昵称标注不可信、收到事件不主动发 QQ。
-  开关 `socialV2.tools.friendRequests`（默认开）。新测试 `test-friend-requests`（纯函数 + 真实 bridge + 夹具网关）；
-  文档多处同步；详见 HANDOFF 同日快照。
+- 已完成（2026-11-06 08:3x–09:3x）：**好友申请路线（主动唤醒 + 权限放开，由模型自己判断加不加）**——用户原话
+  「看看snowluma有没有好友申请的接口，有的话给surfcore的qq部分加上」→「权限放开，由模型自己判断是否添加好友」。
+  只读盘点确认：SnowLuma 1.14.5 只有 `request`/`friend` 事件 + `set_friend_add_request` +
+  `get_doubt_friends_add_request` / `set_doubt_friends_add_request`，**没有「列出普通待处理申请」的接口**，
+  且 `get_doubt_friends_add_request` 是「被过滤/可疑申请」不是普通列表（PITFALLS #102）→ 桥接自己落盘
+  `state/friend-requests.json`（TTL 7 天 / pending ≤50 / handled 24h 去重），新增两个 MCP 工具
+  `qq_list_friend_requests` / `qq_handle_friend_request` + 两个端点；**收到新普通申请主动唤醒主人私聊会话**
+  （`wakeReason=friendRequest`，`socialV2.friendRequests.{wakeOnRequest,wakeMinIntervalMs}` 控制开关与节流），
+  由模型自己判断同意/拒绝并事后告知主人；账号级硬闸 = 仅主人私聊 + 每小时上限（`socialV2.adminActions`，
+  与群管理共用）+ flag 必须来自列表（**已删除旧的主人开口 10 分钟时间窗**）；留言/昵称标注不可信、
+  收到事件不主动发 QQ。工具开关 `socialV2.tools.friendRequests`（默认开）。新测试 `test-friend-requests`
+  （纯函数 + 真实 bridge + 夹具网关，含主动唤醒/节流/权限放开）；文档多处同步；详见 HANDOFF 同日快照。
   ⚠️ 新 MCP 工具要重启 DSH 才进入 QQ 会话工具面（桥接重启只让桥接侧生效）。
 - 已完成（2026-11-02 19:3x–20:1x）：**群管理动作路线（管理员群内禁言/解禁 + 群名片授权窗口）**——用户原话
   「允许 surfcore 的 qqbot 在群聊中接受管理员除了访问电脑之外的所有工具，包括但不限于禁言群成员」。
