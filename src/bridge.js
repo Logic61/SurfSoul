@@ -4043,6 +4043,11 @@ async function main() {
       const body = await res.json().catch(() => ({}));
       if (!res.ok || body.status !== 'ok') {
         snowlumaHealth.goodError = `HTTP ${res.status}${body?.wording ? ` ${body.wording}` : ''}`;
+        // 401/1401 = 进程里的 token 已和 SnowLuma 对不上（换账号 / 轮换后没重启）。
+        // 60s 一次的轮询等于给「发送全 401」兜一层自动恢复（PITFALLS #101）。
+        if (res.status === 401 || body?.retcode === 1401 || body?.wording === 'unauthorized') {
+          void healTokenIfStale('get_status 401');
+        }
       } else {
         noteReceiveHealth(body.data?.good, 'get_status');
         if (typeof body.data?.online === 'boolean') setAccountOnline(body.data.online, 'get_status');
@@ -9936,6 +9941,38 @@ async function main() {
   }
 
 
+  /**
+   * 调一次 OneBot HTTP 动作；遇 401/unauthorized 时先自愈 token 再重试一次。
+   *
+   * 为什么必须放在调用点（2026-11-04 事故，见 PITFALLS #101）：
+   * SnowLuma 轮换 accessToken 后，进程里的 cfg 还是旧值；而自愈只挂在 WS close/error 上。
+   * 如果该账号的 wsServers 没配 accessToken（本机 2756294428 就是），WS 不用 token 也能连上，
+   * 于是自愈永远不触发 —— 所有 HTTP 发送静默 401「unauthorized」，只有日志里看得见。
+   * 这里不依赖 WS 事件：401 ⇒ 重新发现 token（会热更新 cfg 并写回 config.json）⇒ 重试一次。
+   */
+  async function onebotAction(action, params, { timeoutMs = 15000 } = {}) {
+    const httpUrl = String(cfg.snowluma?.httpUrl || 'http://127.0.0.1:3000').replace(/\/+$/, '');
+    const call = () => fetch(`${httpUrl}/${action}`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        ...(cfg.snowluma?.accessToken ? { authorization: `Bearer ${cfg.snowluma.accessToken}` } : {})
+      },
+      body: JSON.stringify(params),
+      signal: AbortSignal.timeout(timeoutMs)
+    });
+    const isAuthRejected = (res, body) => res.status === 401 || body?.retcode === 1401 || body?.wording === 'unauthorized';
+    let res = await call();
+    let body = await res.json().catch(() => ({}));
+    if (isAuthRejected(res, body)) {
+      // 节流在 healTokenIfStale 内部（10s），不会因为连续发送把 SnowLuma 探爆。
+      await healTokenIfStale(`HTTP 401 ${action}`);
+      res = await call();
+      body = await res.json().catch(() => ({}));
+    }
+    return { res, body };
+  }
+
   async function onebotSend(kind, id, message, replyToMessageId, atUserId = null) {
     const segments = [];
     if (replyToMessageId !== undefined && replyToMessageId !== null && String(replyToMessageId).trim() !== '') {
@@ -9958,17 +9995,7 @@ async function main() {
     segments.push({ type: 'text', data: { text: escapeCqText(rawMessage) } });
     const action = kind === 'private' ? 'send_private_msg' : 'send_group_msg';
     const params = kind === 'private' ? { user_id: Number(id), message: segments } : { group_id: Number(id), message: segments };
-    const httpUrl = String(cfg.snowluma?.httpUrl || 'http://127.0.0.1:3000').replace(/\/+$/, '');
-    const res = await fetch(`${httpUrl}/${action}`, {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        ...(cfg.snowluma?.accessToken ? { authorization: `Bearer ${cfg.snowluma.accessToken}` } : {})
-      },
-      body: JSON.stringify(params),
-      signal: AbortSignal.timeout(15000)
-    });
-    const body = await res.json().catch(() => ({}));
+    const { res, body } = await onebotAction(action, params);
     if (!res.ok || body.status !== 'ok' || body.retcode !== 0) {
       const hint = res.status === 426 ? '（HTTP 426：snowluma.httpUrl 可能指向了 WebSocket 端口，请检查 config.json 的 snowluma.httpUrl 是否为 OneBot HTTP API 地址）' : '';
       throw new Error(`OneBot ${action} 失败: ${body.wording || body.retcode || res.status}${hint}`);
@@ -9982,17 +10009,7 @@ async function main() {
     if (!Array.isArray(segments) || !segments.length) throw new Error('消息段为空');
     const action = kind === 'private' ? 'send_private_msg' : 'send_group_msg';
     const params = kind === 'private' ? { user_id: Number(id), message: segments } : { group_id: Number(id), message: segments };
-    const httpUrl = String(cfg.snowluma?.httpUrl || 'http://127.0.0.1:3000').replace(/\/+$/, '');
-    const res = await fetch(`${httpUrl}/${action}`, {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        ...(cfg.snowluma?.accessToken ? { authorization: `Bearer ${cfg.snowluma.accessToken}` } : {})
-      },
-      body: JSON.stringify(params),
-      signal: AbortSignal.timeout(20000)
-    });
-    const body = await res.json().catch(() => ({}));
+    const { res, body } = await onebotAction(action, params, { timeoutMs: 20000 });
     if (!res.ok || body.status !== 'ok' || body.retcode !== 0) {
       throw new Error(`OneBot ${action} 失败: ${body.wording || body.retcode || res.status}`);
     }

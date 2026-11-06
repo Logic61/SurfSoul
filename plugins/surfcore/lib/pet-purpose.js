@@ -639,8 +639,34 @@ export function createPetPurposeService({ chat, tokenBudget = null, pluginLog = 
     }
   }
 
+  /**
+   * 看屏幕（2026-11-01）：「每隔一段时间截一张」由这里驱动，服务内部按 intervalMin 节流；
+   * 安静时段不看（夜里屏幕通常锁着，没必要浪费视觉调用）。
+   * 2026-11-03：从 tick() 里拆出来自成一拍 —— 以前它排在载体/每日上限的早退之后，
+   * 载体配成 QQ、或目的撞了 dailyMax 时整段被跳过，看屏幕一次都轮不到。
+   * 看屏幕只受自己的闸门管（开关 / 专注 / token 预算 / 安静时段），与「要不要主动搭话」解耦。
+   */
+  async function lookScreen(p) {
+    if (!screen?.enabled?.()) return { ok: false, reason: 'screen-disabled' };
+    if (focusNow()) return { ok: false, reason: 'screen-focus' };
+    let budgetBlocked = false;
+    if (tokenBudget?.block) {
+      try { budgetBlocked = Boolean((await tokenBudget.block('other'))?.blocked); } catch {}
+    }
+    if (budgetBlocked) return { ok: false, reason: 'screen-budget' };
+    if (inQuietHours(Date.now(), p.config)) return { ok: false, reason: 'screen-quiet' };
+    try {
+      return await screen.look({ ownerName: chat.ownerInfo().name, reason: 'tick' });
+    } catch (error) {
+      pluginLog('[pet-purpose] 定时看屏幕异常：', String(error?.message ?? error).slice(0, 160));
+      return { ok: false, reason: 'screen-error' };
+    }
+  }
+
   async function tick() {
     const p = purposeConfig();
+    // 先看一眼屏幕：这一步和「要不要主动搭话」无关，载体是 QQ、目的撞了每日上限都不该把它一起停掉。
+    await lookScreen(p);
     if (p.carrier !== 'pet' || p.config.enabled === false || !p.chatEnabled) return;
     if (focusNow()) {
       // 不刷屏：专注期间每 10 分钟最多记一条。
@@ -654,19 +680,6 @@ export function createPetPurposeService({ chat, tokenBudget = null, pluginLog = 
     if (!chat.online().online) {
       await fallbackToQQ();
       return;
-    }
-    // 看屏幕（2026-11-01）：「每隔一段时间截一张」由这里驱动，服务内部按 intervalMin 节流；
-    // 安静时段不看（夜里屏幕通常锁着，没必要浪费视觉调用）。
-    if (screen?.enabled?.()) {
-      let screenBudgetBlocked = false;
-      if (tokenBudget?.block) {
-        try { screenBudgetBlocked = Boolean((await tokenBudget.block('other'))?.blocked); } catch {}
-      }
-      if (!screenBudgetBlocked && !inQuietHours(lastTickAt, p.config)) {
-        try { await screen.look({ ownerName: chat.ownerInfo().name, reason: 'tick' }); } catch (error) {
-          pluginLog('[pet-purpose] 定时看屏幕异常：', String(error?.message ?? error).slice(0, 160));
-        }
-      }
     }
     const state = loadState();
     ensurePurposeDay(state, lastTickAt);

@@ -3543,3 +3543,37 @@ sleep/proactive 定时器、补历史只补「水位之后的新消息」。于�
 
 **教训**：**外部系统（SnowLuma/QQ）的数据同步不是瞬时的**。补历史这类「补齐缺口」的功能不能只在连接边沿打一枪：
 要保存缺口起点、幂等重试，而且重试时必须用保存的起点、不能用现算水位。补救窗口有上限（本轮没做手动回填）。
+
+## #101（2026-11-04）SnowLuma token 轮换后「发不出消息」一整天：自愈只挂在 WS 事件上，而 WS 根本不需要 token
+
+**现象**：11/4 09:04 起所有 `send_private_msg` / `send_group_msg` 都返回 `unauthorized`（SnowLuma 只在
+`isAuthorized()` 失败时回这个 wording），但入站消息照收、`qq_status` 显示在线；`state/bridge.log` 里只有一行行
+`QQ 发送失败 (...): OneBot send_private_msg 失败: unauthorized`。09:02:46 WS 连上（该账号 `wsServers` 没配
+accessToken，随便连），紧接着 `[history] get_friend_msg_history 失败：unauthorized`。
+
+**根因（两个坑叠在一起）**：
+
+1. 11/3 14:06 `scripts/rotate-snowluma-token.mjs` 轮换 token，探针判定 SnowLuma 是 **static**（重启才读新配置）：
+   只改了 `SnowLuma/config/onebot_2756294428.json`，`config.json` 里仍是旧 token。11/4 早上机器重启后
+   SnowLuma 读到新 token、桥接 08:59:45 启动读到旧 token → 之后所有 HTTP 调用 401；11/3 晚上能正常发，
+   是因为 SnowLuma 还没重启、内存里还是旧 token（两边碰巧一致）。
+2. 桥接的 token 自愈只在 WS `close` / `error` 时触发（`src/bridge.js` 的 `healTokenIfStale`）。这个账号的
+   WS 服务端没配 token，所以 WS 永远能连上、永不进自愈分支；而 `snowluma.homeDir` 是空的，
+   `discoverSnowLumaConnection()` 扫不到 `config/onebot_<QQ>.json`，就算触发也只会拿旧 token 再探一次。
+   结果：**桥接活着、WS 在线、发送全 401，没有任何自愈路径**。11/4 09:10 有人把新 token 写进 `config.json`，
+   但进程没重启、内存里还是旧 token，于是继续静默失败到当天 22:42（共 13 小时）。
+
+**修法**（2026-11-04）：
+
+- `config.json` 的 `snowluma.homeDir` 填真实 SnowLuma 目录（本机 `C:/Users/32372/snowluma`），自愈才能读到
+  per-account 的 `onebot_<QQ>.json`；
+- 发送路径统一走 `bridge.js` 的 `onebotAction()`：401/1401/`wording=unauthorized` ⇒ `healTokenIfStale()` ⇒ 重试一次；
+- `pollSnowlumaStatus()` 的 60s `get_status` 轮询遇 401 也触发自愈（兜住 `onebotAction` 之外的历史/媒体等调用）；
+- 教训：**改 `config.json` 里桥接启动时加载的字段（含 token）必须重启桥接**；轮换脚本 static 模式下
+  「SnowLuma 重启」和「桥接重启」是一对，缺一个就是静默 401。
+
+**验证**：重启桥接后 `state/bridge.log` 无 `unauthorized`、`[history] ... 补回` 正常，控制台
+`GET /api/status` 的 `snowluma.connected/good` 为 true；带当前 token 打 `http://127.0.0.1:3000/get_login_info`
+返回 200（旧 token 401）。
+
+**影响面**：只影响「桥接进程内还揣着旧 token」这一种状态；入站/补历史/媒体等其它 HTTP 调用同源同伤。

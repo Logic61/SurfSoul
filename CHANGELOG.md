@@ -8,6 +8,9 @@
 
 ### 修复
 
+- **SnowLuma token 失配导致 QQ 发送全天 401**（PITFALLS #101）：`snowluma.homeDir` 补上真实目录，
+  桥接发送改走 `onebotAction()`（401 ⇒ 自愈 token ⇒ 重试一次），`get_status` 60s 轮询遇 401 也触发自愈；
+  轮换脚本 static 模式下「SnowLuma 重启 + 桥接重启」缺一不可。
 - **`test:audit` 从 89/95 修到全绿**（PITFALLS #98）：版本号、打码期望、模型名、语音 preset 文案、DSH 工具名对账
   五处历史漂移全部按真相源修正；门禁不再长期红着。
 - **DSH 工具名对账扫错安装**（PITFALLS #97）：0.2.x 桌面版工具包只在 `resources/app.asar`，过去按 npm 装的

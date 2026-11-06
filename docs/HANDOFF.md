@@ -5,6 +5,41 @@
 
 ---
 
+## 快照（2026-11-04 23:1x，SnowLuma token 失配：QQ 发送全天 401 → 已恢复 + 自愈补丁）
+
+### 现象 / 根因
+
+- 11/4 09:04–22:42 所有 `send_private_msg` / `send_group_msg` 返回 `unauthorized`（SnowLuma HTTP 401），
+  但入站照收、`qq_status` 在线 —— 不是 QQ 掉线，是**桥接进程里揣着旧的 SnowLuma accessToken**。
+- 根因两层：① 11/3 14:06 `rotate-snowluma-token.mjs` 轮换是 static（SnowLuma 重启才读新配置），
+  11/4 早上机器重启后 SnowLuma 用新 token、桥接 08:59 启动读的是 `config.json` 旧 token；
+  ② 自愈只在 WS close/error 触发，而该账号 `wsServers` 没配 accessToken（WS 随便连），且 `snowluma.homeDir` 为空，
+  自愈既不会触发、触发了也扫不到 per-account 配置。详见 `docs/PITFALLS.md` #101。
+
+### 做了什么
+
+| 类别 | 内容 |
+| --- | --- |
+| 恢复 | 22:54、23:12 两次控制台 `/api/restart` 重启桥接（第一次先恢复发送，第二次加载补丁）；重启后日志 0 条 unauthorized |
+| 配置 | `config.json` 的 `snowluma.homeDir` = `C:/Users/32372/snowluma`（自愈能读 `config/onebot_<QQ>.json`） |
+| 代码 | `src/bridge.js`：新增 `onebotAction()`（401/1401/`wording=unauthorized` ⇒ `healTokenIfStale()` ⇒ 重试一次），
+  `onebotSend` / `onebotSendSegments` 改用它；`pollSnowlumaStatus()` 的 60s `get_status` 遇 401 也触发自愈 |
+| 文档 | PITFALLS #101、CHANGELOG [未发布]；`docs/guides/CURRENT-NUMBERS.md` 按 `npm run docs:numbers` 重新生成 |
+
+### 验证
+
+- `npm run test:audit` → **100/100**；`npm run test:regressions` → 16/16。
+- 桥接 23:13:54 启动后：`state/bridge.log` 无 unauthorized / 失败；SnowLuma 日志里 `get_login_info` / `get_status` /
+  `get_friend_msg_history` / `get_group_msg_history` 均正常派发（HTTP token 已对）。
+- **仍未验证**：一次真实的 QQ 发送（等下一次自然消息，或经用户确认后用 `/api/test-send` 单独试）。
+
+### 下一步 / 未做
+
+- 没给 `onebotAction()` 的「401 ⇒ 自愈 ⇒ 重试」加行为级回归测试（现有套件全绿，但没钉住这条新路径）。
+- 表情/图片/语音/历史等其它 HTTP 调用仍是各自手写 fetch，只靠 `get_status` 60s 轮询兜底；要彻底统一可以都改走 `onebotAction()`。
+
+---
+
 ## 快照（2026-11-03 19:0x–20:0x，工程可信度批次：门禁修绿 + 决策流水 + 安全姿态 + 重启恢复 + 4789 + 低成本）
 
 ### 用户原话
