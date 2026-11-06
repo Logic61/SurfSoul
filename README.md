@@ -202,7 +202,7 @@ node scripts/verify-dsh-020-adaptation.mjs      # 对本机 DSH 版本逐项复�
 | `chat` | 群友 | 白名单内聊天，工具面受安全守卫限制 |
 | `closed-agent` | 只理管理员 | 私聊 owner，可用完整 DSH 工具 |
 | `reserved` | 一代仿真群友 | 状态机 + 空格分条 + `[SILENT]` |
-| `reserved2` | 二代仿真群友（**默认**） | 一切皆工具：自己看消息、发言、等待、潜水、收尾 |
+| `reserved2` | 二代仿真群友（**默认**） | 一切皆工具：自己看消息、发言、等待、潜水、收尾；**本机/账号级/群管理工具只在主人本人触发的回合可用，且逐次过内部模型审批**（fail-closed） |
 
 ### 3.3 让她主动找你（可选）
 
@@ -272,7 +272,7 @@ node scripts/verify-dsh-020-adaptation.mjs      # 对本机 DSH 版本逐项复�
 | **语音** | 语音库发送、本地/云端 TTS 现场合成、语音包安装启停、音量/响度、频率上限；`qq_send_voice` / `qq_list_voices`（**AI 发语音默认关闭**） | [SUBSYSTEM-VOICE.md](docs/guides/SUBSYSTEM-VOICE.md) |
 | **桌宠** | 文本/语音对话、气泡与回复按钮、专注模式、目的载体、断线重连 | [SUBSYSTEM-PET.md](docs/guides/SUBSYSTEM-PET.md) |
 | **额度** | 每日 token 额度（QQ/B站/其他/总额，双单位，80% 提醒、100% 停）、消费看板 | [DATA-AND-CONFIG.md](docs/guides/DATA-AND-CONFIG.md) |
-| **工具面** | 全部 `qq_*` 工具（数量见 [CURRENT-NUMBERS.md](docs/guides/CURRENT-NUMBERS.md)）、四个 MCP server、两代 preset、fail-closed 工具守卫 | [AGENT-TOOLS-AND-PRESETS.md](docs/guides/AGENT-TOOLS-AND-PRESETS.md) |
+| **工具面** | 全部 `qq_*` 工具（数量见 [CURRENT-NUMBERS.md](docs/guides/CURRENT-NUMBERS.md)）、四个 MCP server、两代 preset、fail-closed 工具守卫、**本回合触发者归因 + 仅二代的内部模型审批**（2026-11-06） | [AGENT-TOOLS-AND-PRESETS.md](docs/guides/AGENT-TOOLS-AND-PRESETS.md) |
 | **界面** | 设置页 14 个标签、控制台 10 个页面 | [UI-AND-CONSOLE.md](docs/guides/UI-AND-CONSOLE.md) |
 
 ---
@@ -339,7 +339,11 @@ node scripts/verify-dsh-020-adaptation.mjs      # 对本机 DSH 版本逐项复�
 
 ## 七、安全与边界（摘要）
 
-- **群友碰不到你的机器**：仿真会话的工具面是白名单、fail-closed，本地执行能力全部被 restrict。
+- **群友无法直接触发特权工具**：本机/电脑类工具、账号级动作（好友申请、跨场合投递）、群管理动作只在
+  **主人本人触发的回合**里临时可用（桥接按真实 sender QQ 判定「这一轮是谁触发的」，群友无法伪造）；非主人回合一律
+  fail-closed。2026-11-06 起这类调用每次还要过一层**内部模型审批**（fail-closed；审批是启发式安全层，不是授权来源）。
+- **硬边界是归因 + 白名单**：真实 sender 归因、工具 schema/执行期守卫白名单、发送白名单才是硬闸；模型审批/敏感正则
+  属启发式，不承诺 100%。
 - **发送必须命中白名单**：没有"管理员例外"这种后门。
 - **控制台只接受本机回环** + 令牌（定长比较）+ Host/Origin 校验 + 写操作强制 JSON。
 - **密钥不落日志**；`state/` 用 icacls 切断 ACL 继承。

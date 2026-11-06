@@ -27,7 +27,7 @@
 | # | 目标 | 验收方式 |
 | --- | --- | --- |
 | M1 | QQ 消息稳定接入 DSH，agent 回复/工具审批/提问能回到 QQ | 真机发一条消息 → DSH 会话出现 → 回复回到 QQ |
-| M2 | 群友**物理上**无法碰本机：无本地工具、发送强制白名单、回复审计 | `npm run test:audit` + `docs/guides/SECURITY_BASELINE.md` 清单 |
+| M2 | **群友无法直接触发特权工具**：群友无论怎么诱导都不能直接让 agent 操作本机/账号级动作；只有 **ownerQQ 本人触发的回合**临时拥有本机能力，且每次调用逐次过内部模型审批（fail-closed）；发送强制白名单、回复审计 | `npm run test:audit` + `docs/guides/SECURITY_BASELINE.md` 清单 |
 | M3 | 四个运行模式边界清晰，切换即生效，权限降级时旧会话自动重建 | 控制台切模式 → `state/mode.json` 与 DSH 设置一致 → 新会话用对 preset |
 | M4 | 会话/配置/记忆**不丢**：任何清理都可回滚 | `_backups/`、`~/.dsh/_quarantine/`、`clean-dead-workspaces --apply` 前自动备份 |
 | M5 | DSH 升级后能在一个版本内适配（协议/端口/preset 变化） | `npm run verify:adaptation`；升级后 `npm run test:audit` 全绿 |
@@ -62,6 +62,21 @@
 ## 2. 当前版本与里程碑
 
 - 当前版本：`0.1.0`（SurfCore 合体版），目标 DSH `0.2.1-rc.2`。
+- 已完成（2026-11-06 下午）：**工具场景放宽 + ownerQQ 归因 + 内部模型审批（reserved2）**——用户原话「把只允许
+  主人私聊调用的工具放开到群聊/私聊都能触发（认准请求者是 ownerQQ）」+ 加一层内部模型审批；当晚拍板
+  「全部放开 / fail-closed / 主人私聊保持现状 / 仅 reserved2 生效」（决策记录见 §4）。落地：
+  ① 桥接新增 `src/turn-trigger.js` 与 `state/turn-triggers.json`（投递前按真实 `event.user_id` 记本回合触发者，
+  `turn/start` 对齐、`turn/end` 失效；定时/系统唤醒 fail-closed；六条清理路径）；
+  ② DSH 新增插件行 `qq-owner-approval`（只挂 qq-chat-v2）+ 共享 `plugins/surfcore/lib/turn-trigger.js`：
+  `tools/pre-execute` 对本地 10 工具 / 账号级 3 工具 / 群管理 2 工具逐次模型审批（low/medium allow、high deny、
+  坏 JSON/超时/异常 fail-closed、每回合预算 + 去重 + 审计 `state/tool-approvals.jsonl`），`approval/request` 领取
+  已批准调用的沙箱升权（`allowed-once`）；③ `qq-tool-restrict` 本地工具改两条放行路径（主人私聊 / 主人触发回合 + 开关）；
+  ④ bridge 五个端点（好友申请 2 / 跨场合 / 禁言 / 改名片）场景放宽到「主人本人触发的回合」，旧 `ownerAt` 窗口/白名单/
+  目标/频率闸全部保留为兜底；⑤ `socialV2.toolApproval.*` 配置 + 安全姿态 `toolApproval` 项 + `GET /api/tool-approvals`；
+  ⑥ preset 安全规则 1/4、工具协议 18/20/21 改写 + 新增第 22 条【场景与审批】、不变量短句换 `主人本人触发的回合`。
+  新测试 `test-turn-triggers` / `test-owner-trigger-gates` / `test-owner-approval` 进 `test:audit`；
+  `CURRENT-NUMBERS.md` 由 `npm run docs:numbers` 重新生成。⚠️ 真机未验证：需重启桥接 + DSH、正在进行的 QQ 会话
+  `/reset` 后按 HANDOFF 快照的「验证」步骤观察（详见 `RULES.md` 硬边界第 1/13/14/15 条、`PITFALLS.md` #103）。
 - 已完成（2026-11-06 08:3x–09:3x）：**好友申请路线（主动唤醒 + 权限放开，由模型自己判断加不加）**——用户原话
   「看看snowluma有没有好友申请的接口，有的话给surfcore的qq部分加上」→「权限放开，由模型自己判断是否添加好友」。
   只读盘点确认：SnowLuma 1.14.5 只有 `request`/`friend` 事件 + `set_friend_add_request` +
@@ -348,6 +363,19 @@
 - 任何会**改变数据存放位置**的迁移。
 - 安全边界的放宽（新模式、新工具面、白名单扩大）。
 - 版本号与 Release 节奏。
+
+**已拍板记录：2026-11-06 工具场景放宽（安全边界放宽，用户书面确认）**
+
+| 问题 | 用户选择 |
+| --- | --- |
+| 放开范围 | **全部放开**：本地执行 10 工具（含 `subagent_codex`）+ 好友申请 2 工具 + 群管理（禁言/改别人名片）+ 跨场合投递 |
+| 审批失败语义 | **fail-closed**：模型审批超时/不可用/解析失败 → 拒绝执行并告知模型理由（`failClosed` 写死 true） |
+| 主人私聊里的本机工具 | **保持现状**：私聊不跑模型审批，DSH 沙箱升权的人工审批照旧（只有 owner 能回） |
+| 生效模式 | **仅 `reserved2`**；chat/reserved（冻结）/closed-agent 行为完全不变 |
+| 附带承认 | 模型审批是**启发式**安全层，不替代硬边界（真实 sender 归因 + 工具白名单 + 发送白名单）；主人在触发回合里仍可能被群友的注入内容污染，缓解见 `PITFALLS.md` #103、`SECURITY_BASELINE.md` §三 R12/R13 |
+
+> 这条决策改变了 M2 的表述：从「群友物理上碰不到本机」改为「群友无法直接触发特权工具；只有 ownerQQ 本人触发的回合
+> 临时拥有本机能力且逐次模型审批」。回滚开关 `socialV2.toolApproval.enabled=false`。
 
 ## 5. 已放弃 / 回滚过的路线（记录为什么，避免重走）
 

@@ -5,6 +5,79 @@
 
 ---
 
+## 快照（2026-11-06 18:0x，工具场景放宽 + ownerQQ 归因 + 内部模型审批）
+
+### 用户原话
+
+> 「把只允许主人私聊调用的工具放开到群聊/私聊都能触发（认准请求者是 ownerQQ）」（随后要求加一层内部模型审批）
+> 拍板：**全部放开**（本地执行 10 工具 + 好友申请 + 群管理 + 跨场合投递）/ **fail-closed** / **主人私聊保持现状** /
+> **仅 reserved2 生效**。
+
+### 先查了什么（只读）
+
+- 三路侦察（`_recon/reports/`）：bridge-scout（桥接侧工具门禁与请求者身份信号）、dsh-scout（DSH pre-execute /
+  approval-request / llm 契约与 preset 插件装载机制）、rules-scout（规则红线 / 文档面 / 审计测试面影响）。
+- 关键 DSH 契约（dsh-scout 结论，均已写进代码注释与 PITFALLS #103）：① 返回 `{kind:'deny'}` **不带非空 reason**
+  会被 DSH 当成没有拒绝理由而**继续执行**（fail-open）；② `approval/request` 是唯一能程序化领取人工审批的钩子，
+  且必须 `{prepend:true}` 才抢在桥接转发 listener 之前；③ `tools/pre-execute` **没有内建超时**，listener 要自己
+  组合 `AbortSignal.any([exec.signal, 超时, 生命周期])`；④ 插件行顶层 import / `apply()` 抛错会让 preset invalid，
+  QQ 会话直接建不出来（所以 `inject:['tools']`、llm 用 `ctx.get('llm')` 懒取、零 `@deepseek-ai/*` import）。
+- 既有代码里「只允许主人私聊」有两套互不相干的实现：① `plugins/surfcore/qq-tool-restrict.mjs` 的本地工具执行期
+  鉴权（10 个 `OWNER_PRIVATE_TOOL_NAMES`）；② `src/bridge.js` 的端点场景闸（好友申请/跨场合/禁言/改名片）。
+  两者本次都要改，且旧 `ownerAt` 时间窗只作兜底（见 `RULES.md` 硬边界第 13 条）。
+- 既有文档漂移顺手记录：`SECURITY_BASELINE.md`「30 个离线回归脚本」（早已过期）、`AGENT-TOOLS-AND-PRESETS.md`
+  文件头「仅主人私聊 + 授权窗口」（窗口 11-06 已删）、`UI-AND-CONSOLE.md` 未写「安全姿态」「唤醒决策流水」、
+  `AGENTS.md` 的 DSH 版本旧值。
+
+### 做了什么
+
+| 类别 | 内容 |
+| --- | --- |
+| 归因（桥接） | 新增 `src/turn-trigger.js`（纯函数：选最新入站/构造 TriggerRecord/文件结构/ownerTurn 判定），`src/bridge.js` 投递前入队、`turn/start` 对齐、`turn/end` 失效，原子写 `state/turn-triggers.json`；六条清理路径（退役/`/reset`/`/api/session/reset`/`/api/socialV2/reset`/切模式/启动 prune）；定时/系统唤醒 fail-closed；写失败只 log |
+| 场景放宽（桥接端点） | 好友申请 GET/POST、跨场合投递、禁言/解禁、改别人名片五处改为「主人本人私聊 **或** 主人本人触发的回合」；旧 `ownerAt` 窗口 / `allow.groups` / `allowTargets` / 目标成员 / 频率闸全部保留；私聊禁言必须显式 `groupId` 且命中 `allow.groups`；安全姿态新增 `toolApproval` 项；新增 `GET /api/tool-approvals`（仅控制台）；`socialV2.toolApproval` 归一化（缺省 enabled、failClosed 恒 true）+ 控制台保存白名单 |
+| 模型审批（DSH） | 新增插件行 `plugins/surfcore/qq-owner-approval.mjs` + 共享 `plugins/surfcore/lib/turn-trigger.js`；`tools/pre-execute` 主门（三类 15 个特权工具逐次评审，低/中风险 allow、高风险 deny、坏 JSON/超时/异常 fail-closed、每回合预算 6 + 同回合同参数去重）、`approval/request` 领取 `allowed-once`；审计 `state/tool-approvals.jsonl`（参数/令牌不入日志、>1MB 轮转）；`plugins/surfcore/package.json` 的 exports/files 登记 |
+| 守卫 / preset | `qq-tool-restrict.mjs` 本地工具改两条放行路径（主人私聊 / reserved2 + 开关 + 主人触发回合），读盘复用共享 lib、读失败仍 fail-closed；`dsh/agent-presets/qq-chat-v2/agent.cordis.yml` 挂 `qq-owner-approval` 行、安全规则 1/4 与工具协议 18/20/21 按新语义改写并新增第 22 条【场景与审批】；`src/preset-prompt.js` 不变量短句换 `主人本人触发的回合`；生成器登记新行 + 必含行；MCP 工具描述同步 |
+| 配置 | `config.example.json` 新增 `socialV2.toolApproval` 默认段；`config.json` 可覆盖（`enabled=false` 即回滚） |
+| 文档 | `RULES.md`（权限分层/硬边界 1/2/12/13/14 + 新增第 15 条/途径 C·D/不变量）、`SECURITY_BASELINE.md`、`AGENT-TOOLS-AND-PRESETS.md`、`DATA-AND-CONFIG.md`、`MODULE-BRIDGE.md`、`BOUNDARIES.md`、`ARCHITECTURE.md`、`UI-AND-CONSOLE.md`、`ROADMAP.md` §2/§4 + M2、`PITFALLS.md` **#103**、`RISK_REGISTER.md` R43、`CHANGELOG.md` `[未发布]`、`README.md`/`README.en.md`、`AGENTS.md` DSH 版本；`CURRENT-NUMBERS.md` 由 `npm run docs:numbers` 重新生成（**不要手改**） |
+
+### 验证
+
+- 离线门禁（staging 工作副本）：`npm run test:audit` 全绿（脚本数以 `docs/guides/CURRENT-NUMBERS.md` 为准；
+  新增 3 个：`test-turn-triggers` / `test-owner-trigger-gates` / `test-owner-approval`）、`npm run test:regressions`、
+  `node scripts/build-agent-preset-patches.mjs --check`、`node scripts/doc-numbers.mjs --check`、`npm run config:check`、
+  `npm run verify:adaptation`。
+- **真机尚未验证**（本次只到代码 + 离线测试；没有重启桥接/DSH，也没有在真实 QQ 会话里跑过特权工具）。
+  待重启后按 §「下一步」验证：群聊里由主人发一条让 agent 用本机工具的消息 → `state/tool-approvals.jsonl` 出现
+  allow/deny 记录；换群友发同样的话 → 特权工具被拒（403/deny，reason 非空）。
+- **未验证项**：模型审批在真实 DSH 会话里的 `ctx.get('llm')` 路由与延迟；`allowed-once` 领取后是否真的不再弹
+  QQ 人工审批；`reserved2` 非 owner 回合对账号级/群管理工具的 deny 观感。
+
+### 下一步 / 未做
+
+1. **重启桥接**（`POST /api/restart` 或 start.bat）——`src/` 改动生效，归因文件开始更新。
+2. **重启 DSH**——新插件行、preset 文案、MCP 工具描述进入 QQ 会话工具面。
+3. 正在进行的 QQ 会话 `/reset` 一次（旧 preset 会话不会加载新插件行）。
+4. 真机验证（按顺序）：① 群聊里主人本人发一条明确要求（如「看下桌面上那个文件」）→ 应看到
+   `state/turn-triggers.json` 更新、本机工具被调用且 `state/tool-approvals.jsonl` 有 allow/deny 记录；
+   ② 同一群换群友发同样的话 → 特权工具一律拒绝（没有归因/非 owner）；③ `GET /api/security-posture` 的
+   `toolApproval` 项为 `ok`、`GET /api/tool-approvals` 能看到记录；④ 定时唤醒/收尾后 `turnActive` 变 false。
+5. 提交状态：staging 仓库本地 **8 个 commit**（归因/端点/审批插件/守卫/preset/测试/文档，见 `git log b84df3a..HEAD`），
+   **未 push**；真实仓库由 Lead 统一同步。
+6. 未做：`qq_send_image` 本机路径仍无目录白名单（新旧残余风险合并记录在 `SECURITY_BASELINE.md` §三 R13，
+   本轮未扩大权限面，但旧间接约束失效）；控制台没有「审批流水」独立页面（只有 API + 安全姿态项）。
+
+### 回滚
+
+- **配置层（最快）**：`socialV2.toolApproval.enabled=false` → bridge 端点场景闸 + DSH 审批监听一起回旧行为
+  （本地工具只认主人私聊、群管理只认旧 `ownerAt` 窗口、好友申请/跨场合只认主人私聊）；插件按 mtime 读配置，
+  下次工具调用生效，桥接侧下一轮生效。**failClosed 不能改成 false**（会被忽略）。
+- **代码层**：按 commit revert 8 个提交（归因/端点/插件/守卫/preset/测试）→ 重启桥接 + DSH → 正在进行的 QQ 会话
+  `/reset`。回滚后 `state/turn-triggers.json` / `state/tool-approvals.jsonl` 可删（陈旧无影响）。
+- **数据层**：不需要迁移；`state/turn-triggers.json` 是快照（删了只会让群聊特权工具暂时 fail-closed），
+  `state/tool-approvals.jsonl` 是审计流水（可删）。配置备份沿用 `state/agents/_backups/config-*.json` 先例。
+
+---
+
 ## 快照（2026-11-06 09:1x，好友申请：主动唤醒 + 权限放开、由模型自己判断加不加）
 
 ### 用户原话

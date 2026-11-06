@@ -307,6 +307,13 @@ HTTP transport 下起作用，而三个 MCP server 全是 stdio。清掉是为�
 | **`session/create` + preset** | 活 DSH 实测：挂 `qq-chat-v2` 成功，`agentPresets/list` 含 `qq-chat` 与 `qq-chat-v2` |
 | **`session/modelCatalog`** | 仍可用，返回 `default` / `routableProviders` / `groups` / `failures`，桥接的思考强度下拉依赖它 |
 
+> **2026-11-06 补充（内部模型审批用到的 DSH 侧契约，未改动 DSH 本体）**：新增插件行 `qq-owner-approval`
+> 依赖三条已复核的 0.2.x 契约——① `tools/pre-execute` listener 返回 `{kind:'deny'}` **必须带非空 `reason`**
+> （无 reason 会被当成「没有拒绝理由」而 fail-open 继续执行）；② `approval/request` 是唯一能程序化领取人工审批的钩子，
+> 且必须 `{prepend:true}` 才能抢在桥接转发 listener 之前（领取成功返回 `'allowed-once'`，否则 `next()` 交回人工）；
+> ③ `tools/pre-execute` 没有内建超时，listener 自己用 `AbortSignal.any` 组合超时与生命周期。三条都只在插件侧使用，
+> 未改 `$events` / waterfall / outcome 形状。完整踩坑见 `docs/PITFALLS.md` #103。
+
 ---
 
 ## 9. 验证记录（2026-10-02）

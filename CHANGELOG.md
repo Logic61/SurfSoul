@@ -4,6 +4,75 @@
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 发布规则见 [docs/guides/VERSIONS.md](docs/guides/VERSIONS.md)。
 
+## [未发布] - 2026-11-06（工具场景放宽 + ownerQQ 归因 + 内部模型审批）
+
+### 新增
+
+- **本回合触发者归因（桥接，`reserved2`）**：用户原话「把只允许主人私聊调用的工具放开到群聊/私聊都能触发（认准请求者是
+  ownerQQ）」。新增 `src/turn-trigger.js` + `state/turn-triggers.json`（桥接是唯一写者、DSH 插件只读）：投递 prompt 前按
+  真实 `event.user_id`/`isOwner` 记「本回合触发者」，`turn/start` 对齐、`turn/end` 失效；`trigger.at` 用触发消息自身的
+  消息时间；**定时/系统唤醒（timeout/replyCheck/proactiveCheck/admin/history/friendRequest/recovery/poke）一律不算主人触发**；
+  会话退役/`/reset`/`/api/session/reset`/`/api/socialV2/reset`/切模式/启动 prune 六条路径清理，启动时 `turnActive` 强制归零。
+  写失败只 log、绝不影响消息投递；插件读不到 → fail-closed。字段契约以 `src/turn-trigger.js` 为准，插件侧只读实现见
+  `plugins/surfcore/lib/turn-trigger.js`。
+- **内部模型审批（DSH 插件行 `qq-owner-approval`，仅 qq-chat-v2）**：对三类特权工具（本地执行 10 个 / 账号级 3 个 /
+  群管理 2 个）逐次调模型评审：`tools/pre-execute`（`prepend`）主门——低/中风险 allow、高风险 deny、坏 JSON/超时/异常/
+  缺路由一律 **fail-closed** 且 deny 必带非空 reason；每回合 ≤ `maxReviewsPerTurn`（默认 6）次、同回合同工具同参数去重；
+  模型已批准的本地调用在 `approval/request`（`prepend`）上被领取一次 `allowed-once`（消费即删），未领取的审批仍转 QQ
+  人工（只有 owner 能回）。审计 `state/tool-approvals.jsonl`（参数/令牌绝不入日志，>1MB 轮转 `.1`）。共享库
+  `plugins/surfcore/lib/turn-trigger.js`；`plugins/surfcore/package.json` 的 `exports`/`files` 已登记。
+- **`socialV2.toolApproval` 配置**（缺省即启用）：`enabled`（true，回滚开关）、`failClosed`（恒 true）、`model`、`maxTokens`、
+  `timeoutMs`、`maxReviewsPerTurn`、`triggerWindowMs`、`claimSandboxApproval`；`config.example.json` 补默认段；控制台
+  `/api/socialV2/config` 保存白名单加 `toolApproval` 并归一化（`failClosed=false` 被忽略并打日志）。
+- **安全姿态与只读流水**：`GET /api/security-posture` 新增 `toolApproval` 项（开关/failClosed/reserved2 活跃主人回合数/
+  今日 allow·deny·fail/最近一次时间）；新增 `GET /api/tool-approvals?limit=N`（仅控制台令牌，不在 agent 白名单）。
+- **`state/tool-approvals.jsonl` 审计流水**（DSH 插件写、桥接只读）：`{t,key,sessionId,tool,decision:allow|deny|fail,risk,
+  reason,model,latencyMs,triggerUserId,triggerIsOwner,wakeReason,mode,source:'model'}`。
+
+### 安全
+
+- **场景放宽（仅 `reserved2`）**：好友申请（GET/POST）、跨场合投递、禁言/解禁、改别人群名片五处，来源条件从「必须在主人私聊」
+  改为「主人本人私聊 **或** 主人本人触发的回合」。**旧闸全部保留**：`allow.groups` / `allowTargets` / 目标成员 / 每小时上限 /
+  群管理旧 `ownerAt` 窗口（降为兜底）；私聊发起禁言必须显式带 `groupId` 且命中 `allow.groups`，群聊里传别的群号 400。
+- **授权只认真实 sender QQ**：`ownerTurnAllowed(key)` = `private:<ownerQQ>`（旧路径）或 reserved2 + `socialV2.toolApproval.enabled`
+  + `turnActive` + `trigger.isOwner` + 窗口内；缺任何字段 fail-closed。群友仍无法直接触发特权工具；主人触发回合里群友追加的
+  要求不算授权。`reserved2` 下非 owner 回合对账号级/群管理工具**直接 deny**（有意从严）；旧 `ownerAt` 窗口只在
+  chat/reserved/closed-agent 或 `socialV2.toolApproval.enabled=false` 回滚时兜底。
+- **审批 ≠ 授权**：模型审批是启发式安全层（可能被注入/误放行），硬边界仍是真实 sender 归因 + 工具 schema/guard 白名单 +
+  发送白名单；审批 allow 只决定放行到下一层，不跳过 guard/端点旧闸。主人私聊里的本机工具**保持现状**（不跑模型审批；
+  DSH 沙箱升权的人工审批照旧）。
+- **守卫放宽**：`qq-tool-restrict.mjs` 的 `OWNER_PRIVATE_TOOL_NAMES`（10 个）改为两条放行路径——reserved2 + 开关开启 +
+  主人本人触发回合（优先），其次旧 `private:<ownerQQ>` 映射；读盘复用共享 lib，任何读取失败仍 fail-closed。
+- **preset 契约**：`qq-chat-v2` 安全规则 1/4、工具协议 18/20/21 按新语义改写并新增第 22 条【场景与审批】；唤醒提示新增
+  【本回合授权】行（仅 reserved2）；跨场合/好友申请注入条件改为「本回合由主人触发」（群里追加脱敏口径）；
+  `src/preset-prompt.js` 不变量短句 `只在主人私聊里可用` → **`主人本人触发的回合`**；MCP 工具描述同步。
+- **诚实记录残余风险**：`qq_send_image` 本机路径没有目录白名单，旧间接约束「路径只在主人私聊里产生」在放宽后失效
+  （`SECURITY_BASELINE.md` §三 R13）；模型审批层可被注入/误放行（同 §三 R12、PITFALLS #103）。
+
+### 测试与文档
+
+- 新增 `scripts/test-turn-triggers.mjs`（归因纯函数 + 投递→turn/start→turn/end 文件翻转 + 唤醒授权行 + 脱敏 + 退役/切模式/
+  reset 清理）、`scripts/test-owner-trigger-gates.mjs`（五个端点 × owner 回合/非 owner/无回合/chat 模式 + 私聊显式 groupId +
+  旧时间窗兼容 + 安全姿态/审批流水只读接口）、`scripts/test-owner-approval.mjs`（插件纯函数 + fake ctx/fake llm 矩阵 +
+  预算/去重/grants 领取 + guard 两条路径）；三个都登记进 `scripts/test-audit.mjs`。
+- 修改：`test-friend-requests` / `test-group-admin-tools` / `test-scene-wiring` / `test-security-posture` / `test-mode-matrix`
+  （放宽仅 reserved2、`toolApproval` 缺省/enabled=false 回滚）/ `test-preset-local-tools` / `test-preset-prompt` /
+  `test-qq-preset-contract` / `test-agent-preset-patches` / `test-audit-setup-guards` / `audit-bridge-harness`。
+- 生成物：`build-agent-preset-patches.mjs` 登记审批行相对名 + qq-chat-v2 必含行，`plugins/surfcore/presets/*.patch.yml`
+  重新生成；`CURRENT-NUMBERS.md` 由 `npm run docs:numbers` 重新生成（**不要手改**）。
+- 文档：`RULES.md`（权限分层 / 硬边界 1·2·12·13·14 + 新增 15 / 途径 C·D / 不变量）、`SECURITY_BASELINE.md`、
+  `AGENT-TOOLS-AND-PRESETS.md`、`DATA-AND-CONFIG.md`、`MODULE-BRIDGE.md`、`BOUNDARIES.md`、`ARCHITECTURE.md`、
+  `UI-AND-CONSOLE.md`、`ROADMAP.md`（§2 完成记录 / §4 拍板记录 / M2 措辞）、`HANDOFF.md` 顶部快照、`PITFALLS.md` **#103**、
+  `RISK_REGISTER.md` R43、`README.md`/`README.en.md` 安全承诺与能力表、`AGENTS.md` DSH 版本；顺手修三处既有漂移
+  （SECURITY_BASELINE「30 个离线回归脚本」→ 引用 CURRENT-NUMBERS、AGENT-TOOLS 好友申请「仅主人私聊+授权窗口」旧口径、
+  UI-AND-CONSOLE 缺「安全姿态/唤醒决策流水」）。
+- ⚠️ **生效需要重启**：桥接代码 → 重启桥接；插件行/preset/MCP 工具描述 → **重启 DSH**；正在进行的 QQ 会话再 `/reset` 一次。
+  **真机未验证**（本次只到代码 + 离线门禁）：重启后按 `HANDOFF.md` 顶部快照的「验证」步骤观察
+  `state/turn-triggers.json` 与 `state/tool-approvals.jsonl`。
+- 回滚：`socialV2.toolApproval.enabled=false`（立即回旧行为）；或按 commit revert 代码 + 重启桥接/DSH。
+- 新配置/状态/端点：`socialV2.toolApproval.*`、`state/turn-triggers.json`、`state/tool-approvals.jsonl`、
+  `GET /api/tool-approvals`、`GET /api/security-posture` 的 `toolApproval` 项。
+
 ## [未发布] - 2026-11-06（好友申请：主动唤醒 + 模型自己判断加不加）
 
 ### 新增

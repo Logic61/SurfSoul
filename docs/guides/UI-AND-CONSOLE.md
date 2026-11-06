@@ -461,11 +461,11 @@
 | 2 | 会话与审批 ☷ + 计数 | `sessions` | `sessions` | `#section-sessions`（`1815`）、`#section-pending`（`1819`） |
 | 3 | 人格与角色 ◉ | `persona` | `persona` | `#section-persona`（`1827`） |
 | 4 | ~~语音 ♪（可选安装）~~ | `voice` | **已删除导航入口**（2026-10-26，RISK R32） | 区块 `#section-voice` 保留但去掉 `data-page` + 加 `hidden`，永不显示 |
-| 5 | 二代仿真 ◈（V2） | `social-v2` | `social-v2` | `#section-social-v2`（`2081`） |
+| 5 | 二代仿真 ◈（V2） | `social-v2` | `social-v2` | `#section-social-v2`（`2081`）、`#section-wake-decisions`（`2427`） |
 | 6 | 一代仿真 ◇（V1） | `social-v1` | `social-v1` | `#section-social-v1`（`1900`） |
 | 7 | 黑话词库 ▤ | `slang` | `slang` | `#section-slang`（`2408`） |
 | 8 | 令牌与花费 ◧ | `usage` | `usage` | `#section-usage`（`2661`） |
-| 9 | 访问与安全 ⊙ | `access` | `access` | `#section-whitelist`（`2541`）、`#section-security`（`2579`）、`#section-token`（`2605`） |
+| 9 | 访问与安全 ⊙ | `access` | `access` | `#section-whitelist`（`2541`）、`#section-security`（`2579`）、`#section-posture`（`2641`）、`#section-token`（`2605`） |
 | 10 | 调试与运维 ⌘ | `operations` | `operations` | `#section-test-send`（`2615`）、`#section-maintenance`（`2632`）、`#section-notify`（`2644`） |
 | 11 | 工具参考 ⓘ | `reference` | `reference` | `#section-reference`（`2524`） |
 
@@ -499,6 +499,7 @@
 | 二代仿真 | 会话状态 / 全部会话状态 / 唤醒状态格式化 | `GET /api/socialV2/state?key=`、`/states` | `3560-3565`、`3778-3843`、`4031-4034` |
 | 二代仿真 | 工具调用日志（表格，单元格点击展开全 JSON） | `GET /api/socialV2/tool-log?limit=200`、`POST …/tool-log/clear` | `3646-3680`、`4047-4059` |
 | 二代仿真 | AI 反馈：加载 / 清空 | `GET /api/socialV2/feedback`、`POST …/feedback-clear` | `4035-4046` |
+| 二代仿真 | **唤醒决策流水**（2026-11-03）：6h~7d 聚合与"醒/跳过/压后/无行动"明细，含"回合无行动且没先静置"占比 | `GET /api/wake-decisions?hours=` | 区块 `2427`、loader `4666-4690` |
 | 二代仿真 | 轻量记忆：加载 / 清空全部 / 单条清空 / 编辑 / 删除 | `GET /api/socialV2/memory?key=`、`/memory-clear`、`/memory-update`、`/memory-remove` | `3682-3776` |
 | 二代仿真 | 初始提示词：按 key 加载/保存/删除，空 key 时列出全部 | `GET/POST /api/socialV2/initial-prompt` | `3846-3936` |
 | 二代仿真 | 上线补历史「立即检查一次」 | `POST /api/socialV2/history-catchup {force:true}` | `3966-3993` |
@@ -510,6 +511,8 @@
 | 黑话 | 手动添加、立即提取、研究全部、参数保存 | `POST /api/slang`、`/extract`、`/config` | `4465-4518` |
 | 访问与安全 | 白名单/黑名单/管理员保存 | `GET/POST /api/whitelist` | `3084-3093`、`3260-3269` |
 | 访问与安全 | 安全拦截通知 + `state/` 权限状态与「重新检测」 | `GET/POST /api/security {interceptNotify\|rehardenStateDir}` | `4520-4550` |
+| 访问与安全 | **安全姿态**（2026-11-03，2026-11-06 新增 `toolApproval` 项）：state ACL / SnowLuma token staged / 鱼群 / 防爆破 / 发送频率 / 发送前评审 / **工具模型审批**（开关、failClosed、reserved2 活跃主人回合数、今日 allow/deny/fail、最近一次时间）/ 跨场合 / 白名单 / 群管理窗口 / 关闭的工具；warn 项聚合到告警条，「刷新」按钮重拉 | `GET /api/security-posture` | 区块 `2641-2649`、loader `4639-4662`、进 access 页时拉取 `4795-4797` |
+| 访问与安全 | **工具模型审批流水**（2026-11-06）：目前只有只读 API，没有独立卡片；控制台/脚本可用控制台令牌查最近 N 条（记录已脱敏） | `GET /api/tool-approvals?limit=N` | `src/bridge.js`（tool-approvals 段），agent 令牌不可访问 |
 | 访问与安全 | 控制台令牌：保存 / 生成随机 | `POST /api/console/token {token}` | `4552-4574` |
 | 调试与运维 | 测试发送（群/私聊） | `POST /api/test-send {kind,id,message}` | `3270-3278` |
 | 调试与运维 | 重启桥接 / 清空 QQ 聊天工作区 | `POST /api/restart`、`POST /api/workspace/reset` | `3279-3290` |
@@ -657,6 +660,7 @@
 | `social.*`（一代，24 项） | QQ | QQ 高级「一代仿真」（`client.js:729-758`）；控制台一代页（`console.html:1900-2001`） | 单位/默认值两套 |
 | `socialV2.*`（含 wake/send/wait/proactive/context/history/feedback） | QQ | QQ 高级多组（`client.js:759-877`）；控制台二代页（`console.html:2081-2407`） | 重叠 9 组 |
 | `socialV2.tools.*` | QQ | QQ 高级动态「二代 · 工具开关」（`client.js:1693-1695`）；控制台工具开关（`console.html:2101-2133`） | 同一份工具面 |
+| `socialV2.toolApproval.*` | QQ | **控制台二代页「工具模型审批」组**（`console.html` 二代配置保存 body；2026-11-06）；设置页暂无独立卡 | 桥接只做归一化/姿态；真正审批在 DSH 插件 `qq-owner-approval`；`failClosed` 恒 true |
 | `socialV2.closure.*` | QQ | QQ 高级「对话收尾判断」卡（`client.js:1634-1686`） | 控制台没有 |
 | `socialV2.tokenGuard.*` | QQ | QQ 高级「Token 防爆破」（`client.js:791-798`） | 控制台没有 |
 | `socialV2.sticker.*` | QQ | QQ 高级「表情包」（`client.js:1696-1706`）；控制台「表情包参数」（`console.html:2269-2295`） | — |

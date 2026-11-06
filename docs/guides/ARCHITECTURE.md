@@ -273,9 +273,9 @@ QQ 仍读仓库根的 `config.json`，B站 仍读自己的配置，插件只是�
 
 | 威胁 | 边界 | 落点 |
 | --- | --- | --- |
-| 群友让 agent 干本机的事 | 仿真会话的**工具白名单**（fail-closed） | `plugins/surfcore/qq-tool-restrict.mjs`：只放行 QQ MCP + 搜索，其余一律拒绝 |
-| 群友让 agent 给陌生人发消息 | **发送白名单**是硬闸（不带"管理员例外"） | 桥接 `allowed()` + MCP 侧再校验一次 |
-| 群友诱导外发本机信息 | 出站审计（路径/凭据/手机号/住址正则）+ 身份闸（不许冒用别人账号标识） | `src/sensitive.js`、`src/identity-guard.js` |
+| 群友让 agent 干本机的事 | **本回合真实 sender 归因**（群聊特权工具只在「主人本人触发的回合」可用）+ 工具白名单与执行期守卫（fail-closed）+ 逐次内部模型审批（启发式，fail-closed） | `src/turn-trigger.js` + `state/turn-triggers.json`（桥接写）→ `plugins/surfcore/lib/turn-trigger.js` + `plugins/surfcore/qq-owner-approval.mjs` + `plugins/surfcore/qq-tool-restrict.mjs` |
+| 群友让 agent 给陌生人发消息 | **发送白名单**是硬闸（不带"管理员例外"）；账号级/群管理动作另需「主人本人触发回合」+ 模型审批 | 桥接 `allowed()` + MCP 侧再校验一次 + `ownerTurnAllowed()` |
+| 群友诱导外发本机信息 | 出站审计（路径/凭据/手机号/住址正则）+ 身份闸（不许冒用别人账号标识）；本机工具场景放宽后的残余风险见 SECURITY_BASELINE §三 R12/R13 | `src/sensitive.js`、`src/identity-guard.js` |
 | 本机其它程序改配置 | 控制台令牌（定长比较）+ Host 白名单 + 同源 + JSON 强制；插件 API 走 DSH 自己的鉴权 | 桥接入口集中关卡（153 个端点分支**之前**） |
 | 网页通过浏览器打本机 | Host/Origin 校验（浏览器不能伪造 Host）+ 写操作必须 `application/json` | 同上 |
 | 提示注入让 agent 读内网 | SSRF 防护：仅 http(s)、禁内网/环回/链路本地/CGNAT、DNS 解析后逐地址校验、重定向每跳复核 | `src/safe-fetch.js` |
@@ -295,8 +295,10 @@ QQ 仍读仓库根的 `config.json`，B站 仍读自己的配置，插件只是�
 
 | 你改了什么 | 需要做什么 | 生效范围 |
 | --- | --- | --- |
-| `src/*.js`（核心引擎） | **重启 DSH**（插件侧） + 重启桥接（桥接侧） | 两边都换了代码 |
+| `src/*.js`（核心引擎） | **重启 DSH**（插件侧） + 重启桥接（桥接侧） | 两边都换了代码；`src/turn-trigger.js`/`src/bridge.js` 的归因与端点场景闸属桥接侧 |
 | `plugins/surfcore/lib/*.js` | 热重载插件（`plugin_manager` 关/开）或重启 DSH | 插件；`src/memory-card.js` 还要 bump `?rev=` |
+| **`plugins/surfcore/qq-owner-approval.mjs` / `qq-tool-restrict.mjs` / `plugins/surfcore/presets/*`** | **重启 DSH**（preset 行与工具面在会话创建时装配）+ 正在进行的 QQ 会话 `/reset` | 内部模型审批、工具守卫、preset 文案 |
+| **`socialV2.toolApproval.*`（`config.json`）** | 插件按 mtime 读，下次工具调用即生效；桥接侧下一轮读配置 | 内部模型审批开关/预算/窗口；`enabled=false` 即回滚 |
 | `dsh/agent-presets/*` | `node scripts/build-agent-preset-patches.mjs` → 重装/重启 DSH | preset 提示词与工具面 |
 | `config.json`（QQ 侧） | 控制台保存即生效；改动结构大的字段建议重启桥接 | 桥接 |
 | `~/.dsh/surfcore/config.json` | 设置页保存即生效（服务自行重读） | 插件 |

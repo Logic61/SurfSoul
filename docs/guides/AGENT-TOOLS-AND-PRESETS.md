@@ -1,10 +1,11 @@
 # 工具面与 preset（AGENT-TOOLS-AND-PRESETS）
 
 > 这份文档回答：**agent 的手从哪来**（四个 MCP server + 全部 `qq_*` 工具）、**哪些手被绑住**
-> （五层闸门 + fail-closed 守卫）、**她戴哪张面具**（`qq-chat` / `qq-chat-v2` 两代 preset）、
+> （七层闸门 + fail-closed 守卫 + 本回合归因 + 内部模型审批）、**她戴哪张面具**（`qq-chat` / `qq-chat-v2` 两代 preset）、
 > **这些是怎么装进 DSH 的**。
-> **最后核对**：2026-11-06（新增好友申请 `qq_list_friend_requests` / `qq_handle_friend_request`：
-> 仅主人私聊 + 授权窗口）。工具/名单数量以 [CURRENT-NUMBERS.md](CURRENT-NUMBERS.md) 为准。
+> **最后核对**：2026-11-06（工具场景放宽 + ownerQQ 归因 + 内部模型审批：本地执行 10 工具、好友申请、
+> 跨场合投递、群管理改为「主人本人触发的回合」可用且逐次模型审批，仅 `reserved2` 生效）。
+> 工具/名单数量以 [CURRENT-NUMBERS.md](CURRENT-NUMBERS.md) 为准。
 > 配套阅读：总纲 [ARCHITECTURE.md](ARCHITECTURE.md) · 边界 [BOUNDARIES.md](BOUNDARIES.md) · 索引 [../README.md](../README.md)。
 
 ---
@@ -79,7 +80,7 @@
 | `qq_reply` | 引用某条消息发送 | `reply` | 必须给出真实 messageId |
 | `qq_send_message` | **统一发送**：一条或多条、可引用、可自定义条间间隔 | `sendMessage` | 最多 8 条 |
 | `qq_send_burst` | 分多条发（随机真人间隔） | `sendBurst` | 最多 8 条 |
-| `qq_send_cross_scene` | **受控跨场合投递**：主人私聊 → 显式白名单群 | `crossSceneSend` | 默认关（`socialV2.crossSceneSend.enabled=false`）；仅 `private:<ownerQQ>` 发起；目标须同时进 `allow.groups` 与 `allowTargets`；一条纯文本；敏感/身份/长度/频率/静默/鱼群全闸；桥接代投，不向模型发目标 token |
+| `qq_send_cross_scene` | **受控跨场合投递**：主人本人发起 → 显式白名单群 | `crossSceneSend` | 默认关（`socialV2.crossSceneSend.enabled=false`）；来源 = 主人私聊（旧路径）或主人本人触发的回合（2026-11-06 放宽），别人私聊/群友触发的回合 403；目标须同时进 `allow.groups` 与 `allowTargets`；一条纯文本；敏感/身份/长度/频率/静默/鱼群全闸；桥接代投，不向模型发目标 token；每次调用先过内部模型审批 |
 | `qq_send_poke` | 拍一拍（群聊需 targetUserId） | `sendPoke` | 频率限制 |
 | `qq_send_sticker` | 发一张收藏表情（一条只能一张，不能带文字；**可以单独作为一条回复**，不必配文字） | `sendSticker` | 每条只能一张；频率由模型按语境判断（只受每轮 8 条 / token 闸门约束） |
 | `qq_send_image` | 发一张普通图片：URL / `data:image/…` / `base64://…` / **本机文件路径**；也支持 `fromMessageId` 转发别人发的图 | `sendImage` | 每条只能一张、不能带文字；桥接内下载/读盘并校验（≤10MB、文件头必须是 jpg/png/gif/webp）；本机路径只在管理员机器读。**>1.3MB 的本地图自动改走 SnowLuma 的 `file://` 通道**（OneBot HTTP 请求体上限 2MiB，base64 会超；见 PITFALLS #82）。**画图功能的落地点**（见 §4） |
@@ -98,49 +99,64 @@
 > 行为边界见 [`RULES.md`](../../RULES.md) 硬边界第 5 条，踩坑记录见 `PITFALLS.md`
 > 「SnowLuma 动作目录是 SDK 构建期快照」。
 
-### 2.4.1 群管理动作（仅管理员本人授权后、仅群聊）
+### 2.4.1 群管理动作（主人本人触发的回合；2026-11-06 起群聊/私聊都行）
 
 > 2026-11-02 用户拍板：「允许 qqbot 在群聊中接受管理员除了访问电脑之外的所有工具，包括但不限于禁言群成员」。
-> 人工决策点：管理员 = **ownerQQ 本人**（不是 QQ 群管理员/群主）；电脑/本机工具仍只在主人私聊；第一批只做禁言+解禁。
+> 人工决策点：管理员 = **ownerQQ 本人**（不是 QQ 群管理员/群主）。2026-11-06 用户再次拍板把场景放宽到
+> 「主人本人触发的回合」（群聊/私聊都行），旧「管理员最近在群里开口 10 分钟」的 `ownerAt` 时间窗**保留为兜底**。
 
 | 工具 | 作用 | 开关 | 硬约束 |
 | --- | --- | --- | --- |
-| `qq_set_group_ban` | **禁言 / 解除禁言**一个群成员（`durationSeconds` 秒；**0 = 解禁**） | `setGroupBan`（默认开） | 仅 `group:` 会话；只认管理员（ownerQQ）——要求他**最近在群里说过话**（`socialV2.adminActions.windowMs`，默认 10 分钟）；目标必须是本群成员，不能是她自己 / 管理员本人 / 群主 / 其他群管理员；时长 0~2592000 秒；每会话每小时 ≤ `maxPerHour`（默认 20）；只 reserved2 + 会话令牌 |
-| `qq_set_group_card` | 改群名片：默认改自己；**改别人**属于管理动作 | `setGroupCard`（默认开） | 改自己：群里/私聊都行；改别人：管理员私聊，或管理员在群里开口后的同一授权窗口；目标须为本群成员；≤60 字 |
+| `qq_set_group_ban` | **禁言 / 解除禁言**一个群成员（`durationSeconds` 秒；**0 = 解禁**） | `setGroupBan`（默认开） | 授权 = 主人本人触发的回合（主路径）或旧 `ownerAt` 时间窗（兜底，`socialV2.adminActions.windowMs` 默认 10 分钟）；群聊/私聊都行，但**私聊必须显式带 `groupId` 且命中 `allow.groups`**（群聊里传别的群号会被 400 拒）；目标必须是本群成员，不能是她自己 / 管理员本人 / 群主 / 其他群管理员；时长 0~2592000 秒；每会话每小时 ≤ `maxPerHour`（默认 20）；只 reserved2 + 会话令牌；每次调用先过内部模型审批 |
+| `qq_set_group_card` | 改群名片：默认改自己；**改别人**属于管理动作 | `setGroupCard`（默认开） | 改自己：群里/私聊都行；改别人：主人本人私聊、主人本人触发的回合、或管理员在群里开口后的旧授权窗口（三通道任一成立即放行）；目标须为本群成员；≤60 字；每次调用先过内部模型审批 |
 
-> **为什么用「时间窗」而不是「这条消息是不是管理员发的」**：工具调用发生在 AI 回合里，桥接无法可靠地把
-> 一次工具调用归因到某一条消息。时间窗只认真实 sender QQ（`isOwner` 由 `cfg.ownerQQ` 判定，群友无法伪造），
-> 所以它挡得住 prompt injection 的核心路径；窗口过期后必须等管理员再次开口。实现见
-> `src/bridge.js` 的 `groupAdminAuthority()`，测试见 `scripts/test-group-admin-tools.mjs`。
-> 唤醒提示在窗口有效时会多一小段【管理员在群里】（见 §5），窗口过期不注入。
+> **授权口径与为什么升级**：旧设计只有「管理员最近在群里说话的时间窗」——因为工具调用发生在 AI 回合里，
+> 桥接当时无法把一次调用归因到某一条消息。2026-11-06 新增 `state/turn-triggers.json`（桥接按真实
+> `event.user_id` 写「本回合触发者」，DSH 插件只读）之后，**主路径变成精确归因**：只有「主人本人那条触发消息
+> 所在的回合」才临时授权，非主人回合直接 403；旧时间窗只作为兼容兜底保留。两条只认真实 sender QQ
+> （`isOwner` 由 `cfg.ownerQQ` 判定，群友无法伪造）。实现见 `src/bridge.js` 的 `ownerTurnAllowed()` /
+> `groupAdminAuthority()`，测试见 `scripts/test-owner-trigger-gates.mjs`、`scripts/test-group-admin-tools.mjs`。
+> 唤醒提示在授权有效时会多一段【管理员在群里】或【本回合授权】（见 §5 与 `MODULE-BRIDGE.md` §3.12）。
+>
+> **reserved2 下的从严口径（有意为之）**：非 owner 回合对账号级/群管理工具会**直接 deny**——DSH 前置模型审批层
+> （`qq-owner-approval`，pre-execute）先拒绝，走不到桥接端点；旧 `ownerAt` 时间窗在实际运行中只在
+> **chat/reserved/closed-agent**（不挂审批行）或 **`socialV2.toolApproval.enabled=false` 回滚**时兜底。
+> 目的：不再让「主人上一轮说过话、这一轮群友触发」的回合继承授权。
+>
+> **模型审批**：这两条工具在非私聊主人会话里每次调用还会过 `plugins/surfcore/qq-owner-approval.mjs` 的内部
+> 模型审批（`socialV2.toolApproval`，fail-closed）；审批只核对「是否为主人这条消息真正要求、风险是否可接受」，
+> 不改变授权来源（授权仍只认真实 sender 归因）。
 >
 > **目标解析**：管理员只说了昵称/群名片时，模型用 `qq_get_group_members(key, token)`（reserved2 的只读 v2
 > 通道，见 §2.1）拿到真实 QQ 号 + role；同名分不清就先问管理员。旧只读工具在 reserved2 下没有会话令牌，
 > 所以这条通道是 2026-11-02 专门为群管理动作补的（`GET /api/socialV2/group-members`）。
 
-### 2.4.2 好友申请（仅主人私聊，模型自己判断，2026-11-06）
+### 2.4.2 好友申请（主人本人私聊或主人触发的回合；模型自己判断，2026-11-06）
 
 > 用户原话：「看看snowluma有没有好友申请的接口，有的话给surfcore的qq部分加上」。
-> 随后用户又定：「**权限放开，由模型自己判断是否添加好友**」——不再要求主人逐条点头/刚开过口。
+> 随后用户又定：「**权限放开，由模型自己判断是否添加好友**」——不再要求主人逐条点头/刚开过口；
+> 当晚再次拍板把场景放宽到「主人本人触发的回合」（2026-11-06 全部放开的一部分）。
 > SnowLuma 只在有人加好友时推一次 `request` 事件、**没有**「列出普通待处理好友申请」的接口
 > （`get_doubt_friends_add_request` 是「被过滤/可疑申请」，不是普通列表，见 `PITFALLS.md` #102），
 > 所以桥接自己把事件落盘缓存，列表 = 事件缓存 + 网关现拉的两档合并。
 
 | 工具 | 作用 | 开关 | 硬约束 |
 | --- | --- | --- | --- |
-| `qq_list_friend_requests` | **查看待处理好友申请**：合并「事件推送的普通申请」+「QQ 系统过滤的可疑申请」；返回每条的 `kind`（`request`/`filtered`）与 `flag`（处理时要原样回传）、申请人 QQ 号/昵称/留言，留言标 `untrusted: true` | `friendRequests`（默认开） | **仅主人私聊**（账号级信息；群里/别人私聊 403）；只读。普通申请来自 `state/friend-requests.json` 事件缓存（保留 7 天、最多 50 条）；`filtered` 一档现拉网关，拉取失败仍返回已知部分 |
-| `qq_handle_friend_request` | **同意 / 拒绝一条好友申请**：`kind=request` 走 `set_friend_add_request`；`kind=filtered` 走 `set_doubt_friends_add_request`。`approve=true` 同意、`false` 拒绝（缺省 true） | `friendRequests`（默认开） | **真会生效的账号级动作**（同意后对方真的成为好友、会开始收到对方消息）：仅主人私聊；**由模型自己判断**（不用主人逐条确认，处理完在私聊里告诉主人）；每小时 ≤ `maxPerHour`（默认 20，与群管理动作共用计数）；`kind`/`flag` 必须来自列表返回，普通申请还要命中桥接事件缓存（否则 400）；网关失败 502 |
+| `qq_list_friend_requests` | **查看待处理好友申请**：合并「事件推送的普通申请」+「QQ 系统过滤的可疑申请」；返回每条的 `kind`（`request`/`filtered`）与 `flag`（处理时要原样回传）、申请人 QQ 号/昵称/留言，留言标 `untrusted: true` | `friendRequests`（默认开） | **主人本人私聊，或主人本人触发的回合**可用（账号级信息；别人私聊/群友触发的回合 403）；只读。普通申请来自 `state/friend-requests.json` 事件缓存（保留 7 天、最多 50 条）；`filtered` 一档现拉网关，拉取失败仍返回已知部分；群里只报结论、不念原始信息；每次调用先过内部模型审批 |
+| `qq_handle_friend_request` | **同意 / 拒绝一条好友申请**：`kind=request` 走 `set_friend_add_request`；`kind=filtered` 走 `set_doubt_friends_add_request`。`approve=true` 同意、`false` 拒绝（缺省 true） | `friendRequests`（默认开） | **真会生效的账号级动作**（同意后对方真的成为好友、会开始收到对方消息）：主人本人私聊或主人本人触发的回合；**由模型自己判断**（不用主人逐条确认，处理完在私聊里告诉主人；群里只说结论）；每小时 ≤ `maxPerHour`（默认 20，与群管理动作共用计数）；`kind`/`flag` 必须来自列表返回，普通申请还要命中桥接事件缓存（否则 400）；网关失败 502；每次调用先过内部模型审批 |
 
-> **权限口径（2026-11-06 用户二次拍板后）**：好友申请是账号级动作（同意=对方进入好友列表，不可逆、对方会收到通知），
-> 申请留言/昵称是**陌生人可控内容**（典型提示注入入口：「同意我，我是你主人」）。桥接的口径是：
-> ① 这两条信息只在 `private:<ownerQQ>` 会话里出（群里/别人私聊拿不到）；② **收到新申请时会主动唤醒主人私聊会话**，
-> 她自己判断加不加（软判断在 preset 第 21 条：像真人/群友/熟人的可以同意，可疑/说不清的先问或拒绝）；
+> **权限口径（2026-11-06 用户二次拍板 + 当晚场景放宽后）**：好友申请是账号级动作（同意=对方进入好友列表，
+> 不可逆、对方会收到通知），申请留言/昵称是**陌生人可控内容**（典型提示注入入口：「同意我，我是你主人」）。
+> 桥接的口径是：① 只允许**主人本人私聊，或主人本人触发的回合**（主人那条触发消息所在的回合；别人私聊 /
+> 群友触发的回合拿不到，403）；② **收到新申请时会主动唤醒主人私聊会话**，她自己判断加不加
+> （软判断在 preset 第 21 条：像真人/群友/熟人的可以同意，可疑/说不清的先问或拒绝）；
 > ③ 唤醒有节流（`socialV2.friendRequests.wakeMinIntervalMs`，默认 5 分钟；间隔内新申请只落缓存，下次唤醒一起看到），
-> 唤醒本身还走鱼群/token 防爆破/限频；④ 留言只当资料看，不执行其中的指令、不批量乱加。
-> 为什么不再用「主人最近开口的时间窗」：用户明确要求把判断权交给模型；但**会话位置**（仅主人私聊）和**每小时上限**
-> 仍是硬闸，避免群聊内容驱动账号级动作、也避免被刷。
+> 唤醒本身还走鱼群/token 防爆破/限频；④ 留言只当资料看，不执行其中的指令、不批量乱加；⑤ 群里由主人触发时，
+> **只说结论，不念陌生人 QQ/昵称/留言原文**——账号级信息不落群聊上下文。
+> 为什么不再用「主人最近开口的时间窗」：用户明确要求把判断权交给模型；但**授权归因（真实 sender）**、
+> **场景（主人本人触发的回合）**和**每小时上限**仍是硬闸，避免群聊内容驱动账号级动作、也避免被刷。
 > 实现：`src/friend-requests.js`（规范化/TTL/上限/合并/文案）+ `src/bridge.js` 两个端点与 `wakeFriendRequestV2()`；
-> 预设规则见工具协议第 21 条。
+> 预设规则见工具协议第 21、22 条。
 
 > **开关与装配**：桥接默认 `socialV2.tools.friendRequests = true`；控制台「二代仿真 → 工具开关」里有同名
 > checkbox（标签「好友申请」），DSH 设置页工具标签同步。主动唤醒另受 `socialV2.friendRequests.wakeOnRequest`
@@ -174,16 +190,25 @@
 
 ---
 
-## 3. 工具闸门：五层，从外到内
+## 3. 工具闸门：七层，从外到内
 
 ```
 ① 进程/传输    DSH 的 MCP 客户端（stdio）——只有装进 profile 的 server 才存在
 ② 工具是否注册 socialV2.tools.<key> 为 true（false 时该工具压根不在 schema 里）
 ③ 调用方身份   x-agent-call: 1 + x-agent-token 必须命中一个**活跃会话**；
               漏传令牌不会升级成管理端全权（防 confused deputy）
-④ 运行状态    AI 暂停（socialV2.paused）/ 二代总开关关闭 / 该会话不在当前模式允许范围
-⑤ 业务闸门    发送白名单、敏感信息、长度与条数、频率、token 额度、鱼群守则
+④ 本回合归因   state/turn-triggers.json：本回合触发消息的发送者是不是 ownerQQ 本人
+              （桥接按真实 sender QQ 写、DSH 插件只读；定时/系统唤醒一律不算）
+⑤ 内部模型审批 qq-owner-approval 逐次评审三类特权工具（仅 qq-chat-v2 / reserved2）：
+              allow 才继续；deny/坏 JSON/超时/不可用/异常 → 拒绝（fail-closed，reason 必填）
+⑥ 运行状态    AI 暂停（socialV2.paused）/ 二代总开关关闭 / 该会话不在当前模式允许范围
+⑦ 业务闸门    发送白名单、敏感信息、长度与条数、频率、token 额度、鱼群守则
 ```
+
+④⑤ 是 2026-11-06「工具场景放宽 + ownerQQ 归因 + 内部模型审批」新增的两层，只覆盖**三类特权工具**：
+本地执行（10 个 `OWNER_PRIVATE_TOOL_NAMES`，如 `pwsh`/`write`/`subagent_codex`）、账号级（好友申请 2 个 + 跨场合投递）、
+群管理（禁言 / 改别人群名片）。其它工具照旧走 ⑥⑦。**顺序不能换**：模型审批在 guard 之前（审批只决定
+「要不要放行到下一层」，不能让调用跳过 guard/白名单），人工审批（DSH 沙箱升权）还在最内层兜底。
 
 失败码语义（模型据此改策略，而不是硬试）：
 
@@ -220,7 +245,7 @@
 
 | 名单 | 条数 | 内容 |
 | --- | --- | --- |
-| `OWNER_PRIVATE_TOOL_NAMES` | **10** | **仅主人私聊可用**（执行期逐次鉴权，不在 restrict 里）：`pwsh` `bash` `read` `read_image` `write` `edit` `str_replace_editor` `glob` `grep` `subagent_codex`（2026-11-01 加入：Codex 画图） |
+| `OWNER_PRIVATE_TOOL_NAMES` | **10** | **「主人触发回合」专用本地能力**（执行期逐次鉴权，不在 restrict 里）：`pwsh` `bash` `read` `read_image` `write` `edit` `str_replace_editor` `glob` `grep` `subagent_codex`（2026-11-01 加入：Codex 画图；2026-11-06 场景放宽到「主人本人触发的回合」，不再只限私聊） |
 | `LOCAL_EXECUTION_TOOLS`（restrict 隐藏） | **51** | 原 39 个危险能力 + 2026-11-03 新增 12 个（`terminal_*` / `plugin_market` / `session_*`，均从运行中 app.asar 对账扫出） |
 | `KNOWN_DANGEROUS_GLOBAL_TOOLS` | 51 + 18 = **69** | 本地执行面 51 个 + 18 个 `dev_*`（插件注入/打包/自测） |
 | `RESTRICTED_TOOL_NAMES`（导出给测试） | **99** | 69 个危险全局名 + 30 个 `mcp__browser__*`（只放 B站/小红书，其余平台与浏览器控制类隐藏） |
@@ -236,12 +261,31 @@
 只做第 2 段不够——工具名仍会出现在模型面前，既违反"仿真会话不得拥有本地执行能力"，
 也会诱导模型去调它。反过来只做第 1 段也不够——别的 composition 可能再把名字注册进全局层。
 
-**「仅主人私聊」这一类（2026-10-29 起）**：`pwsh`/`bash`/文件类工具不再进 restrict
-（否则模型 schema 里看不见、私聊里也用不了），改成执行期逐次鉴权：读桥接
-`state/sessions.json` 把当前 DSH 会话 id 映射回 QQ 会话 key，只有 `private:<ownerQQ>` 放行；
-映射拿不到一律 fail-closed。**2026-11-01 起 `subagent_codex`（Codex 画图）也归这一类**——
-它会 spawn 真 Codex 子进程、能在工作区跑命令/写文件，能力面 ≈ 本地执行，所以只给主人私聊。
-Guard 侧导出 `OWNER_PRIVATE_TOOL_NAMES` 供 `test-preset-local-tools.mjs` 逐名对账。
+**「主人触发的回合」这一类（2026-10-29 起；2026-11-06 放宽场景）**：`pwsh`/`bash`/文件类工具不再进 restrict
+（否则模型 schema 里看不见、私聊里也用不了），改成执行期逐次鉴权（`plugins/surfcore/qq-tool-restrict.mjs` 的 `guard`）：
+1. 读 `state/turn-triggers.json`（桥接在投递 prompt 前按真实 `event.user_id` 写、`turn/start` 对齐、`turn/end` 失效）
+   把当前 DSH 会话映射到「本回合触发者」；`mode === 'reserved2'` + `socialV2.toolApproval.enabled !== false` +
+   `turnActive` + `trigger.isOwner` + 未过 `triggerWindowMs`（默认 10 分钟）→ 放行；
+2. 否则回退旧路径：会话 key === `private:<ownerQQ>`（读 `state/sessions.json` 映射）→ 放行；
+3. 两条都不成立 → fail-closed。**归因文件缺失/读坏/过期、不是 reserved2、开关关闭、会话映射拿不到，全部落到拒绝。**
+`.subagent_codex`（Codex 画图）仍归这一类——它会 spawn 真 Codex 子进程、能在工作区跑命令/写文件，能力面 ≈ 本地执行；
+区别只是现在「主人触发的回合」也能用，且每次调用先过模型审批。
+Guard 侧导出 `OWNER_PRIVATE_TOOL_NAMES` 供 `test-preset-local-tools.mjs` 逐名对账；清单本体在
+`plugins/surfcore/lib/turn-trigger.js`（审批行与 guard 共用一份，避免两份名单漂移）。
+
+**内部模型审批行 `qq-owner-approval`（2026-11-06，仅 qq-chat-v2）**：
+
+- 文件：`plugins/surfcore/qq-owner-approval.mjs`（行 id `qq-owner-approval`；`inject: ['tools']`，llm 用 `ctx.get('llm')` 懒取）；
+  共享库 `plugins/surfcore/lib/turn-trigger.js`（读归因/配置归一化/审批 prompt/fail-closed verdict/脱敏）。
+  只由 `dsh/agent-presets/qq-chat-v2/agent.cordis.yml` 挂载；**qq-chat（一代冻结）不挂**。
+- 主门 `tools/pre-execute`（`prepend: true`）：三类特权工具逐次评审；主人私聊直接 `next()`（不跑模型审批，老行为）；
+  非 `reserved2`/开关关闭时本地工具仍按旧「仅主人私聊」拒绝、账号级/群管理交回 bridge 旧闸；reserved2 且开关开启时
+  只认「主人本人触发的回合」，否则 deny（reason 必填）。模型返回严格 JSON（low/medium+allow、medium/high+deny），
+  其余组合/坏 JSON/超时/异常 → deny。每回合预算 `maxReviewsPerTurn`（默认 6），同回合同工具同参数去重。
+- 配套 `approval/request`（`prepend: true`）：模型已批准过的本地调用，用 `sessionId + callId` 领取一次
+  `allowed-once`（消费即删），不再转 QQ 人工；没领取到的审批照旧走桥接人工（只有 owner 能回）。
+- 审计：每次决定追加 `state/tool-approvals.jsonl`（**插件写、桥接只读展示**；参数与令牌不入日志；>1MB 轮转 `.1`）。
+- 回滚：`socialV2.toolApproval.enabled=false` → bridge 端点场景闸与插件监听一起回旧行为；代码回滚按 commit revert。
 
 **快速生图（Agnes）——2026-11-01 起是「画图」首选**：
 
@@ -284,8 +328,10 @@ Guard 侧导出 `OWNER_PRIVATE_TOOL_NAMES` 供 `test-preset-local-tools.mjs` 逐
   生成一次约 1~3 分钟。
 - 安全备注：`qq_send_image` 的本机路径**没有目录白名单**（只校验存在/≤10MB/图片文件头——
   这是"把她画/截的图发出来"的设计口径）。画图功能依赖它；反过来说，**知道本机路径文本**
-  就有外发本机图片的能力，这是模型被注入时的一条外发通道，目前靠"路径只在主人私聊里产生"
-  的间接约束而非硬边界。见 `docs/PITFALLS.md` #81。
+  就有外发本机图片的能力，这是模型被注入时的一条外发通道。**2026-11-06 之后**旧间接约束
+  「路径只在主人私聊里产生」不再成立（主人触发的回合里本机工具也能产生路径），现在靠的是：
+  特权工具只在主人触发回合可用 + 逐次模型审批核对「是不是主人这条消息要求的」+ 发送白名单/敏感审计；
+  仍未加目录白名单（残余风险，见 `SECURITY_BASELINE.md` §三 R13、`docs/PITFALLS.md` #81）。
 
 **第三方插件的模型侧工具**（例如 `dsh-memewiki` v2 的 `search_meme_wiki` / `meme_recall` /
 `meme_feedback` / `meme_remember`）：它们不在 DSH 安装包里，`scan-dsh-tool-names` 对账扫不到，
@@ -309,8 +355,8 @@ Guard 侧导出 `OWNER_PRIVATE_TOOL_NAMES` 供 `test-preset-local-tools.mjs` 逐
 | 文本输出 | **就是消息**（桥接直接发） | **只是思考**，发言必须调工具 |
 | 分条 | 按空格分句 | 用 `qq_send_message` 的数组 |
 | 唤醒 | 桥接按概率/关键词唤醒 | 模型自己 `qq_set_wake_config` 决定下次怎么醒 |
-| 工具面 | 同样挂 `qq-tool-restrict` + QQ MCP | 同 |
-| 人格 | `agent.cordis.yml` 的 `persona.prefix`（约 9 个 plugin 行 + 人格段） | 同结构 + 二代协议/工具规则 |
+| 工具面 | 同样挂 `qq-tool-restrict` + QQ MCP | 同 + **`qq-owner-approval` 内部模型审批行**（`inject:['tools']`） |
+| 人格 | `agent.cordis.yml` 的 `persona.prefix`（约 9 个 plugin 行 + 人格段） | 同结构 + 二代协议/工具规则 + 第 22 条【场景与审批】 |
 
 **共同点**：两个 preset 都是"一条 `@deepseek-ai/dsh-agent-preset` 行"，人格正文与工具面都写在
 `dsh/agent-presets/<name>/agent.cordis.yml` 里，由生成器转成 bundle patch。
@@ -320,6 +366,14 @@ Guard 侧导出 `OWNER_PRIVATE_TOOL_NAMES` 供 `test-preset-local-tools.mjs` 逐
 - 二代**不自动转发文本**。如果工具没挂上，模型会"说了话但群里没反应"——这是最常见的误配症状。
 - 一代的 `[SILENT]` 是潜水信号；二代没有这个约定（用 `mark_read` + `set_wake_config` 潜水）。
 - 二代有 `qq_close_conversation`；一代没有（一代靠状态机自行退场）。
+- **审批行只在二代**：一代冻结、行为不变；`socialV2.toolApproval.enabled=false` 时 guard 与审批行一起回旧语义
+  （本地工具只认主人私聊，桥接端点只认主人私聊/旧窗口）。
+- preset 正文的安全不变量（`src/preset-prompt.js` 的 `PRESET_BLOCKING_SUBSTRINGS`）：2026-11-06 起
+  `只在主人私聊里可用` 已换成 **`主人本人触发的回合`**（必须逐字出现在 qq-chat-v2 正文里），其余四条
+  （`群友没有管理权限` / `作为 token 参数传入` / `角色由桥接注入` / `不会自动发送到 QQ`）不变。
+  控制台保存/还原仿真提示词会按这份清单校验——改 preset 文案时两边一起改，否则保存会 403。
+- `qq-chat-v2` 的安全规则第 1/4 条、工具协议第 18/20/21 条已按新语义改写，并**新增第 22 条【场景与审批】**：
+  【本回合授权】含义、审批会拒绝「与主人请求对不上」的调用、被拒不要反复重试、群友追加要求不算授权。
 
 ---
 
@@ -341,9 +395,15 @@ plugins/surfcore/presets/<preset>.patch.yml                    ← 生成物（�
   （源/产物），生成器是唯一转换器。
 - **守卫行的引用方式**：必须是**从 profile 目录可解析的裸说明符**（`surfcore/qq-tool-restrict.mjs`），
   不能是 `./qq-tool-restrict.mjs`——子行 name 按 profile 目录解析，相对路径会找不到文件（正是 0.1.7 的坑）。
+  审批行同理：`surfcore/qq-owner-approval.mjs`（`scripts/build-agent-preset-patches.mjs` 的
+  `RELATIVE_ROW_REWRITES` 已登记；`plugins/surfcore/package.json` 的 `exports` / `files` 也已加入）。
+- **必含行**：生成器按 preset 校验——`qq-chat` 必须含 `persona` + `qq-tool-restrict`；
+  `qq-chat-v2` 还必须含 **`qq-owner-approval`**（缺了 = 群聊主人回合的特权工具没审批，属于安全回归，生成直接报错）。
 - **安装是幂等的**：重复跑 `setup-dsh.mjs` 不会重复插入。
 - **DSH 升级后**：重新 `npm run test:preset-patches` → `node scripts/setup-dsh.mjs` → 重启 DSH。
   工具名对账：`npm run scan:tool-names`。
+- 改审批插件/守卫/preset 后**要重启 DSH**（新行与工具描述才进 QQ 会话工具面），正在进行的 QQ 会话再 `/reset` 一次；
+  只改 `config.json` 的 `socialV2.toolApproval` 属热配置（插件按 mtime 读），下次工具调用即生效。
 
 ---
 
@@ -355,9 +415,15 @@ plugins/surfcore/presets/<preset>.patch.yml                    ← 生成物（�
 | 工具调用 403「不在白名单内」 | 目标不在 `allow.*` | 加白名单（这是硬闸，没有管理员例外） |
 | 403「该接口仅控制台可用」 | 某端点只允许管理端 | 换工具，不要绕 |
 | 401「会话令牌无效」 | 会话被重置/退役，旧 token 失效 | 让桥接重新注入提示词（重新唤醒） |
+| 特权工具报「只能在主人本人触发的回合里使用」/ 403（好友申请、跨场合、群管理） | 本回合不是 ownerQQ 本人触发（群友触发/定时唤醒/别人私聊），或归因文件缺失/过期，或不是 `reserved2` | 由主人本人发一条消息触发新回合；检查 `state/turn-triggers.json` 是否随消息更新、`mode` 是否 `reserved2` |
+| 特权工具报「模型审批未通过 / 审批失败，已拒绝 / 审批结果不可用」 | 内部模型审批 deny / 超时 / 坏 JSON / 模型路由缺失（fail-closed） | 让主人把要求说清楚再试（审批核对的是「是否主人这条消息要求的」）；不要换个说法反复试探；看 `state/tool-approvals.jsonl` 的 decision/reason |
+| 特权工具报「本回合模型审批次数已达上限」 | 单回合调用超过 `maxReviewsPerTurn`（默认 6） | 合并操作；确实需要更多审批时调大配置（1~12） |
+| 群管理 403「私聊里禁言必须显式指定 groupId…」 | 私聊发起禁言没传 `groupId` 或该群不在 `allow.groups` | 传白名单群号重试 |
+| 群管理 403「该群不在白名单，已拒绝」/「群会话只能管理本群的成员」 | 目标群不在 `allow.groups`，或群聊里传了别的群号 | 用当前群；私聊带白名单 groupId |
 | 429 | 频率超限 | 减条数/放慢 |
 | 工具名拼错 → 静默失效 | `restrict()` 对未知名字抛错被吞 | 跑 `npm run scan:tool-names` |
 | DSH 升级后工具集体消失 | MCP 配置被覆盖 / preset 行没重建 | 重跑 `setup-dsh.mjs` |
+| 升级后 QQ 会话建不出来 / preset invalid | 审批行或守卫行加载失败（模块顶层抛错、相对路径解析不到） | 看 DSH 日志里的 `agent-preset/invalid`；确认 `plugins/surfcore/package.json` 的 `exports/files` 含新行、跑 `npm run test:preset-patches` |
 | `qq_send_voice` 报 502 / 「合成超时」 | 语音引擎没启动，或 CPU 被别的大型任务占满导致合成慢过超时（本地包是 CPU 推理；错误现为 504 + 「改回打字」） | 启动对应包；或把 `socialV2.voice.tts.timeoutMs` 调大后重启桥接（见 `SUBSYSTEM-VOICE.md` §4.4） |
 | `qq_wait_for_messages` 报「必须先做沉睡前观察」 | 直接 `set_wake_config` 潜水 | 先 wait 300000 |
 

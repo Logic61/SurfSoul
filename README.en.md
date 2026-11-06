@@ -42,7 +42,7 @@ QQ messages ──► SnowLuma (OneBot v11 WS) ──► qq-bridge ──► DSH
 - Space-based message splitting for more natural multi-message replies.
 - Whitelist/blacklist access control, fail-closed by default.
 - Sensitive text audit prevents paths/credentials from being sent to QQ.
-- MCP tools for reading group history/members, sending messages, replying with quotes, and (in `reserved2`) full simulated-group-friend tooling.
+- MCP tools for reading group history/members, sending messages, replying with quotes, and (in `reserved2`) full simulated-group-friend tooling, **owner-turn attribution + per-call internal model approval** for privileged tools (local execution / account-level / group-admin; 2026-11-06).
 - Slang/network-expression learning with human confirmation.
 - Lightweight memory system for active topics, pending thoughts and member impressions.
 - **Memory cards (the character's long-term memory)**: two cards sharing one document family — the **decayed card** (`memory-card.*`) is the only one loaded into prompts (owner + emotional memories stay vivid, unimportant ones fade one level per day), while the **full archive** (`memory-card-full.*`) keeps every memory permanently vivid and is never injected; it exists for on-demand search/recall via the settings page or `/api/memory-card/full`. Capacity alerts at 80/90/100% with one-click compression apply to the decayed card only; the full archive has a soft cap and is never auto-deleted. Rules and configuration: [docs/guides/MEMORY_CARD.md](docs/guides/MEMORY_CARD.md).
@@ -115,7 +115,7 @@ Then restart DSH. See [docs/guides/DSH_SETUP.md](docs/guides/DSH_SETUP.md) for d
 - `config.json` and `state/` are **never committed**; the repository only ships `config.example.json`. Both are ACL-hardened to the owner / SYSTEM / Administrators (`npm run harden-acl`).
 - MCP send tools enforce whitelist checks and reject CQ-code injection.
 - Local paths, credentials, tokens and other sensitive patterns are filtered by the audit layer.
-- Simulation sessions get **no local execution tools at all**: the preset's `qq-tool-restrict` row hides them from the tool schema at registration time and a runtime allowlist rejects anything outside the QQ MCP namespaces (`npm run scan:tool-names` re-checks that list against the installed DSH).
+- **Group members cannot trigger privileged tools directly.** Since 2026-11-06 (user decision, `reserved2` only), local execution tools (`pwsh`, file read/write, `subagent_codex`, etc.), account-level actions (friend requests, cross-scene delivery) and group-admin actions are available **only in a turn triggered by the owner's own QQ account** — the bridge derives "who triggered this turn" from the real inbound sender QQ id, which group members cannot forge; every such call is additionally reviewed by an **internal model approval** layer (`plugins/surfcore/qq-owner-approval.mjs`, fail-closed: deny/timeout/parse failure/unavailable → refused; owner private chats keep the old behaviour and skip model approval). The model approval is a **heuristic** layer, not the authorization source — the hard boundaries remain: real-sender attribution (`state/turn-triggers.json`), the tool schema/runtime guard (`qq-tool-restrict`, `npm run scan:tool-names` re-checks the list against the installed DSH), and the outbound whitelist.
 - The console uses a generated token when none is configured.
 
 ## Repository Layout
