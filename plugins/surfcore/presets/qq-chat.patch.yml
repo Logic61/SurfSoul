@@ -3,6 +3,7 @@
 # 作用：把 qq-chat 作为一条 @deepseek-ai/dsh-agent-preset 行插入 profile（DSH 0.1.7+ 的 preset 机制）。
 # 守卫行 qq-tool-restrict 用裸说明符 surfcore/qq-tool-restrict.mjs：子行 name 按 profile 目录解析，
 # 该包以 link: 依赖注册在 profile package.json（node_modules junction 由 setup-dsh.mjs 维护）。
+# 模型审批行（仅 qq-chat-v2）同理用裸说明符 surfcore/qq-owner-approval.mjs。
 - insert:
     - id: preset-qq-chat
       name: '@deepseek-ai/dsh-agent-preset'

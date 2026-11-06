@@ -162,6 +162,31 @@ test('模拟会话的 preset 都挂了工具守卫（否则 L7 没有任何载�
   }
 });
 
+test('模型审批行只挂 qq-chat-v2（一代 chat/reserved 冻结，行为完全不变）', async () => {
+  // 2026-11-06「工具场景放宽 + 内部模型审批」：群聊里主人本人触发的回合临时拥有本地工具/
+  // 账号级/群管理能力，但每次调用必须先过 qq-owner-approval 的模型审批。
+  // 这一行**只能**在二代 preset 里：一代（qq-chat）不跑模型审批，挂上去就改变了它的行为。
+  const v2 = readPreset('qq-chat-v2');
+  assert.match(v2.yml, /id:\s*qq-owner-approval/, 'qq-chat-v2 必须挂 qq-owner-approval 行（模型审批的载体）');
+  assert.match(v2.yml, /\.\/qq-owner-approval\.mjs/, 'qq-chat-v2 的审批行要指向本目录的 .mjs');
+  // 位置：紧跟守卫行之后（守卫先把危险工具藏掉，再挂审批；顺序无关正确性，但便于阅读/核对）。
+  const restrictAt = v2.yml.indexOf('id: qq-tool-restrict');
+  const approvalAt = v2.yml.indexOf('id: qq-owner-approval');
+  assert.ok(restrictAt >= 0 && approvalAt > restrictAt, 'qq-owner-approval 行应放在 qq-tool-restrict 之后');
+
+  const v1 = readPreset('qq-chat');
+  assert.equal(v1.yml.includes('qq-owner-approval'), false, '一代 preset 不得挂模型审批行（行为不变）');
+
+  // 审批插件本身也做一次 fake-ctx 兼容检查：现有测试会 apply({tools})，
+  // 新增的 ctx.on/effect/get 缺失时不能抛（抛错会让 preset invalid → QQ 会话建不出来）。
+  const implPath = path.join(ROOT, 'plugins', 'surfcore', 'qq-owner-approval.mjs');
+  assert.ok(fs.existsSync(implPath), '审批插件实现存在（bundle 内，preset 行按包名引用）');
+  const mod = await import(pathToFileURL(implPath).href);
+  assert.equal(mod.name, 'qq-owner-approval');
+  assert.deepEqual(mod.inject, ['tools']);
+  assert.doesNotThrow(() => mod.apply({ tools: {} }), 'fake ctx {tools} 下 apply 不得抛错');
+});
+
 test('模拟会话的 preset 不得挂载 tool-web 的 search/fetch', () => {
   for (const id of SIMULATION_PRESETS) {
     const { yml } = readPreset(id);

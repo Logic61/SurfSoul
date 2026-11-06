@@ -42,9 +42,29 @@ export function presetRowId(name) {
  */
 export const GUARD_SPECIFIER = 'surfcore/qq-tool-restrict.mjs';
 
+/**
+ * 模型审批行的引用方式（与守卫同理：从 profile 目录可解析的裸说明符）。
+ *
+ * 只有 qq-chat-v2 挂它：chat/reserved（冻结）不跑模型审批，行为完全不变；
+ * `socialV2.toolApproval.enabled=false` 时审批行与 guard 一起回滚到旧语义。
+ */
+export const APPROVAL_SPECIFIER = 'surfcore/qq-owner-approval.mjs';
+
 /** 源里允许出现的相对行名 → 新机制下的等价引用。其它相对名一律报错（避免静默装不上）。 */
-const RELATIVE_ROW_REWRITES = new Map([
+export const RELATIVE_ROW_REWRITES = new Map([
   ['./qq-tool-restrict.mjs', GUARD_SPECIFIER],
+  ['./qq-owner-approval.mjs', APPROVAL_SPECIFIER],
+]);
+
+/**
+ * 每个 preset 必须存在的行（缺了就是安全/功能边界被删）。
+ *
+ * qq-chat-v2 额外要求 qq-owner-approval：没有它，群聊里主人触发回合的本地工具
+ * 就没有逐次模型审批（只剩 guard 硬边界），等于悄悄削弱本次安全设计。
+ */
+const REQUIRED_ROWS = new Map([
+  ['qq-chat', ['persona', 'qq-tool-restrict']],
+  ['qq-chat-v2', ['persona', 'qq-tool-restrict', 'qq-owner-approval']],
 ]);
 
 export const BUNDLE_DIR = path.join(REPO_ROOT, 'plugins', 'surfcore');
@@ -103,7 +123,8 @@ function normalizeRows(rows, preset) {
     return next;
   });
   const normalized = walk(rows, 'plugins');
-  for (const required of ['persona', 'qq-tool-restrict']) {
+  const requiredRows = REQUIRED_ROWS.get(preset) ?? ['persona', 'qq-tool-restrict'];
+  for (const required of requiredRows) {
     if (!seen.has(required)) throw new Error(`${preset}: 行列表缺少 ${required} 行（安全/人格边界不允许缺失）`);
   }
   return normalized;
@@ -135,6 +156,7 @@ export function renderPatch(name) {
     `# 作用：把 ${name} 作为一条 @deepseek-ai/dsh-agent-preset 行插入 profile（DSH 0.1.7+ 的 preset 机制）。`,
     `# 守卫行 qq-tool-restrict 用裸说明符 ${GUARD_SPECIFIER}：子行 name 按 profile 目录解析，`,
     `# 该包以 link: 依赖注册在 profile package.json（node_modules junction 由 setup-dsh.mjs 维护）。`,
+    `# 模型审批行（仅 qq-chat-v2）同理用裸说明符 ${APPROVAL_SPECIFIER}。`,
     '',
   ].join('\n');
   // lineWidth: -1 —— 长行不折行，产物与源逐字对应，diff 只反映真实改动。

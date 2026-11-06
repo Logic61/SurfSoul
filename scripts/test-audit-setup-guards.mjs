@@ -2,6 +2,7 @@
 import assert from 'node:assert/strict';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { extractPresetPrefix } from '../src/preset-prompt.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 let failures = 0;
@@ -88,6 +89,52 @@ import fs from 'node:fs';
   const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
   assert.equal(pkg.license, 'MIT', 'package.json 必须声明 license 字段');
   console.log('L6 compliance: no SnowLuma process control, no allowProcessControl, license declared');
+}
+
+// ── 模型审批行（qq-owner-approval）的 fake-ctx 兼容 + 挂载面 ─────────────────────
+// 现有测试/其它脚本会直接 apply 一个只有 tools 的假 ctx；审批插件新增了
+// ctx.on / ctx.effect / ctx.get('llm')，缺任何一个都必须安全跳过（apply 抛错会让该行
+// failed → agent-preset/invalid → QQ 会话建不出来）。
+{
+  const impl = path.join(root, 'plugins', 'surfcore', 'qq-owner-approval.mjs');
+  assert.ok(fs.existsSync(impl), '模型审批插件实现必须存在');
+  const mod = await import(pathToFileURL(impl).href);
+  assert.equal(mod.name, 'qq-owner-approval');
+  assert.deepEqual(mod.inject, ['tools'], 'inject 只保留 tools：llm 必须懒取，否则 llm 缺失会拖垮整个 preset');
+  assert.doesNotThrow(() => mod.apply({ tools: {} }), 'fake ctx {tools} 下 apply 不得抛错');
+  assert.doesNotThrow(() => mod.apply({}), '空 ctx 下 apply 也不得抛错');
+
+  const listeners = new Map();
+  const effects = [];
+  const ctx = {
+    tools: {},
+    on: (event, fn, options) => listeners.set(event, { fn, options }),
+    effect: (fn) => effects.push(fn),
+    get: () => undefined,
+  };
+  assert.doesNotThrow(() => mod.apply(ctx));
+  assert.ok(listeners.has('tools/pre-execute'), '必须注册 tools/pre-execute（主门）');
+  assert.ok(listeners.has('approval/request'), '必须注册 approval/request（领取沙箱升权审批）');
+  assert.deepEqual(listeners.get('tools/pre-execute').options, { prepend: true }, 'pre-execute 必须 prepend');
+  assert.deepEqual(listeners.get('approval/request').options, { prepend: true }, 'approval/request 必须 prepend');
+  assert.equal(effects.length > 0, true, '必须用 ctx.effect 管生命周期');
+  // 没有归因也没有 llm 服务：本地工具必须 fail-closed 拒绝，且 reason 非空
+  // （DSH 对「空 reason 的 deny」会 fail-open 执行——dsh-scout 最大坑）。
+  const pre = listeners.get('tools/pre-execute').fn;
+  const decision = await pre({
+    name: 'pwsh', arguments: {}, callId: 'c1',
+    signal: new AbortController().signal,
+    agent: { id: 's1', session: { id: 's1' } },
+  }, async () => ({ kind: 'allow' }));
+  assert.equal(decision.kind, 'deny', '无归因/无 llm 时必须 fail-closed');
+  assert.equal(typeof decision.reason, 'string');
+  assert.ok(decision.reason.length > 0, 'deny 必须带非空 reason');
+
+  const v2 = fs.readFileSync(path.join(root, 'dsh/agent-presets', 'qq-chat-v2/agent.cordis.yml'), 'utf8');
+  const v2Prefix = extractPresetPrefix(v2);
+  assert.ok(v2Prefix.includes('主人本人触发的回合'), 'qq-chat-v2 正文必须包含新安全不变量「主人本人触发的回合」');
+  assert.equal(v2Prefix.includes('只在主人私聊里可用'), false, '旧文案「只在主人私聊里可用」必须被替换（场景已放宽）');
+  console.log('qq-owner-approval: fake-ctx compatible, listeners prepended, new safety invariant present');
 }
 
 process.exitCode = failures ? 1 : 0;

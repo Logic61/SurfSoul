@@ -12,7 +12,7 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import yaml from 'js-yaml';
 import {
-  BUNDLE_DIR, GUARD_SPECIFIER, PRESETS, REPO_ROOT,
+  APPROVAL_SPECIFIER, BUNDLE_DIR, GUARD_SPECIFIER, PRESETS, RELATIVE_ROW_REWRITES, REPO_ROOT,
   buildPatches, patchFileFor, presetRowId,
 } from './build-agent-preset-patches.mjs';
 
@@ -48,11 +48,15 @@ for (const name of PRESETS) {
     `${name}: preset.yml 的 name/description/order 原样带进 config`);
   ok(Array.isArray(row.config.plugins) && row.config.plugins.length > 0, `${name}: config.plugins 非空（新机制里必填）`);
 
-  // 与源行列表逐字对比：只允许守卫行的 name 被改写。
+  // 与源行列表逐字对比：只允许「已登记的相对行名」被改写成裸说明符
+  // （qq-tool-restrict 守卫 + qq-chat-v2 的 qq-owner-approval 审批行）。
   const source = load(path.join(REPO_ROOT, 'dsh', 'agent-presets', name, 'agent.cordis.yml'));
   const expected = structuredClone(source);
-  for (const r of expected) if (r.name === './qq-tool-restrict.mjs') r.name = GUARD_SPECIFIER;
-  assert.deepEqual(row.config.plugins, expected, `${name}: config.plugins 必须与 agent.cordis.yml 完全一致（守卫名除外）`);
+  for (const r of expected) {
+    const rewrite = RELATIVE_ROW_REWRITES.get(r.name);
+    if (rewrite !== undefined) r.name = rewrite;
+  }
+  assert.deepEqual(row.config.plugins, expected, `${name}: config.plugins 必须与 agent.cordis.yml 完全一致（相对行名改写除外）`);
   ok(true, `${name}: config.plugins 与 agent.cordis.yml 逐字一致（${expected.length} 行）`);
 
   // 人格正文是产品本体：单独再钉一次，防止「顺手改写/截断」。
@@ -62,12 +66,23 @@ for (const name of PRESETS) {
     `${name}: persona.prefix 逐字一致（${srcPersona?.config?.prefix?.length ?? 0} 字符）`);
 }
 
-console.log('## 3. 守卫行引用方式：只用「profile 目录可解析」的裸说明符');
+console.log('## 3. 守卫/审批行引用方式：只用「profile 目录可解析」的裸说明符');
 for (const name of PRESETS) {
   const row = load(patchFileFor(name))[0].insert[0];
   const guard = row.config.plugins.find((r) => r.id === 'qq-tool-restrict');
   ok(guard !== undefined, `${name}: 有 qq-tool-restrict 守卫行`);
   ok(guard?.name === GUARD_SPECIFIER, `${name}: 守卫行 name = ${GUARD_SPECIFIER}`);
+  // 模型审批行只在 qq-chat-v2（一代冻结，行为不变）；缺了它等于群聊 owner 回合的本地工具
+  // 只剩 guard 硬边界、没有逐次模型审批——生成器 REQUIRED_ROWS 也把这一条钉住了。
+  const approval = row.config.plugins.find((r) => r.id === 'qq-owner-approval');
+  if (name === 'qq-chat-v2') {
+    ok(approval !== undefined, `${name}: 有 qq-owner-approval 模型审批行`);
+    ok(approval?.name === APPROVAL_SPECIFIER, `${name}: 审批行 name = ${APPROVAL_SPECIFIER}`);
+    const approvalFile = path.join(BUNDLE_DIR, APPROVAL_SPECIFIER.slice('surfcore/'.length));
+    ok(fs.existsSync(approvalFile), `${name}: 审批实现存在（${path.relative(REPO_ROOT, approvalFile)}）`);
+  } else {
+    ok(approval === undefined, `${name}: 一代 preset 不应挂模型审批行（行为不变）`);
+  }
   const bad = row.config.plugins.filter((r) => typeof r.name === 'string' && (r.name.startsWith('.') || path.isAbsolute(r.name)));
   ok(bad.length === 0, `${name}: 没有任何相对/绝对路径子行名（0.1.7 下会按 profile 目录解析而装不上）${bad.length ? `：${bad.map((r) => r.name).join(', ')}` : ''}`);
   const guardFile = path.join(BUNDLE_DIR, GUARD_SPECIFIER.slice('surfcore/'.length));

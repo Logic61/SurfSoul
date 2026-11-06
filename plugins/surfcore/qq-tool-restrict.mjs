@@ -28,115 +28,36 @@ export const inject = ['tools']
 
 import fs from 'node:fs'
 import path from 'node:path'
-import { fileURLToPath } from 'node:url'
+import {
+  LOCAL_EXECUTION_TOOL_NAMES,
+  isOwnerPrivateKey,
+  readOwnerKey,
+  resolveSurfcoreRoot,
+  resolveTurnContext,
+  sessionIdCandidates,
+} from './lib/turn-trigger.js'
 
-// surfcore 仓库根：**不能**只用模块 URL 推。这个文件既可能被解析成
-// `<repo>/plugins/surfcore/qq-tool-restrict.mjs`（正常情况），也可能被解析成
-// `~/.dsh/plugins/surfcore/qq-tool-restrict.mjs`（profile 里的 link: 依赖 / junction）。
-// 后者的 `../..` 是 `~/.dsh/plugins`，那里没有 config.json —— 于是 2026-10-29 21:06
-// 真的出现过「本地工具被拒：当前会话 未知」：key 和 ownerKey 都读成了空串。
-// 改成按「config.json + state/sessions.json 都存在」去探候选目录，探不到才回退。
-function resolveSurfcoreRoot() {
-  const home = process.env.USERPROFILE || process.env.HOME || ''
-  const dshHome = process.env.DSH_HOME || (home ? path.join(home, '.dsh') : '')
-  const candidates = []
-  try { candidates.push(path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')) } catch {}
-  if (home) candidates.push(path.join(home, 'surfcore'))
-  if (dshHome) {
-    candidates.push(path.join(dshHome, 'surfcore'))
-    candidates.push(path.join(dshHome, 'plugins'))
-  }
-  for (const root of candidates) {
-    try {
-      if (fs.existsSync(path.join(root, 'config.json')) && fs.existsSync(path.join(root, 'state', 'sessions.json'))) return root
-    } catch {}
-  }
-  return candidates[0] ?? ''
-}
-
-const SURFCORE_ROOT = resolveSurfcoreRoot()
-
-/** 主人私聊的会话 key（`private:<ownerQQ>`）；读不到配置就返回空串（fail-closed）。 */
-function ownerPrivateConversationKey() {
-  try {
-    const cfg = JSON.parse(fs.readFileSync(path.join(SURFCORE_ROOT, 'config.json'), 'utf8'))
-    const owner = String(cfg.ownerQQ ?? cfg.admin ?? '').trim()
-    return owner ? `private:${owner}` : ''
-  } catch {
-    return ''
-  }
-}
-
-/**
- * 当前工具调用所属的 DSH 会话 → 桥接会话 key。
- *
- * 桥接把「QQ 会话 key ↔ DSH sessionId」写在 `state/sessions.json`（每次新建/退役都会更新），
- * 这里按文件 mtime 缓存一次解析结果，避免每条工具调用都读盘。拿不到就返回空串。
- *
- * 会话 id 的取法**不能只赌一个字段**：DSH 里 `exec.agent.id` 通常就是 session id，
- * 但也可能是别的；`agent.session.id` 是 Session.header.id 的 getter（最稳）。
- * 这里把能想到的都试一遍，命中即返回。
- */
-function sessionIdCandidates(exec) {
-  const agent = exec?.agent
-  const session = agent?.session
-  const raw = [
-    session?.id,
-    session?.header?.id,
-    session?.sessionId,
-    agent?.sessionId,
-    agent?.session?.id,
-    agent?.session?.header?.id,
-    exec?.session?.id,
-    exec?.sessionId,
-    agent?.id,
-  ]
-  const out = []
-  for (const value of raw) {
-    if (typeof value === 'string' && value && !out.includes(value)) out.push(value)
-  }
-  return out
-}
-
-let sessionMapCache = { key: '', map: new Map() }
-function conversationKeyForExecution(exec) {
-  const candidates = sessionIdCandidates(exec)
-  if (!candidates.length) { debugLocalDeny(exec, candidates, 'no-session-id'); return '' }
-  try {
-    const file = path.join(SURFCORE_ROOT, 'state', 'sessions.json')
-    const st = fs.statSync(file)
-    const cacheKey = `${st.mtimeMs}:${st.size}`
-    if (sessionMapCache.key !== cacheKey) {
-      // 防御 BOM：Windows 上用 PowerShell Set-Content -Encoding utf8 写过这个文件会带 BOM，
-      // JSON.parse 会直接抛『Unexpected token ﻿』——2026-10-29 就因此把本地工具锁死了一晚上。
-      const raw = JSON.parse(fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, ''))
-      const sessions = raw?.sessions && typeof raw.sessions === 'object' ? raw.sessions : {}
-      const map = new Map()
-      for (const [key, sid] of Object.entries(sessions)) map.set(String(sid), String(key))
-      sessionMapCache = { key: cacheKey, map }
-    }
-    for (const id of candidates) {
-      const key = sessionMapCache.map.get(id)
-      if (key) return key
-    }
-    debugLocalDeny(exec, candidates, 'no-match')
-    return ''
-  } catch (error) {
-    debugLocalDeny(exec, candidates, `read-error:${error?.message ?? error}`)
-    return ''
-  }
-}
+// ⚠️ 归因/配置读取已抽到 `lib/turn-trigger.js`（与 qq-owner-approval 审批行共用同一份
+// 实现）：仓库根探测、`config.json` 的 `socialV2.toolApproval`、`state/turn-triggers.json`
+// 的只读消费都在那边。这里只保留「守卫语义」本身。
+//
+// 两个历史坑仍然适用（保留原文以免下次重新踩）：
+//   · 仓库根**不能**只按模块 URL 推：插件也可能被解析成 `~/.dsh/plugins/surfcore/…`，
+//     那里的 `../..` 是 `~/.dsh/plugins`（没有 config.json）——2026-10-29 就因此把
+//     key/ownerKey 读成空串，本地工具被锁死。lib 里按「config.json + state/ 都存在」探测。
+//   · `state/sessions.json` 可能带 BOM（PowerShell -Encoding utf8 写的），lib 里统一剥 BOM。
 
 /**
  * 本地工具被拒时留一条现场记录，方便回查「为什么明明在私聊里还是说不在授权范围」。
  *
  * 2026-10-29 的那次拒绝只告诉我们「当前会话 未知」，而会话 id / 仓库根到底取到了什么
- * 谁也不知道，只能靠猜。这里把候选 id、agent 有没有、仓库根、读到的会话表都写下来。
+ * 谁也不知道，只能靠猜。这里把候选 id、agent 有没有、仓库根、读到的归因都写下来。
  * 上限 200 行，超过就不再写——这是个诊断文件，不是日志系统。
  */
-function debugLocalDeny(exec, candidates, reason) {
+function debugLocalDeny(exec, candidates, turn, reason) {
   try {
-    const file = path.join(SURFCORE_ROOT, 'state', 'guard-debug.log')
+    const root = resolveSurfcoreRoot()
+    const file = path.join(root, 'state', 'guard-debug.log')
     let size = 0
     try { size = fs.statSync(file).size } catch {}
     if (size > 200 * 1024) return
@@ -145,13 +66,16 @@ function debugLocalDeny(exec, candidates, reason) {
       at: new Date().toISOString(),
       name: exec?.name,
       reason,
-      root: SURFCORE_ROOT,
+      root,
       candidates,
+      key: turn?.key ?? '',
+      mode: turn?.mode ?? '',
+      turnActive: turn?.turnActive === true,
+      isValidOwnerTurn: turn?.isValidOwnerTurn === true,
+      toolApprovalEnabled: turn?.toolApprovalEnabled === true,
       hasAgent: Boolean(agent),
       agentKeys: agent && typeof agent === 'object' ? Object.keys(agent).slice(0, 20) : [],
       sessionKeys: agent?.session && typeof agent.session === 'object' ? Object.keys(agent.session).slice(0, 20) : [],
-      mappedKeys: [...sessionMapCache.map.keys()].slice(0, 6),
-      mappedValues: [...sessionMapCache.map.values()].slice(0, 6),
     })
     fs.appendFileSync(file, `${line}\n`, 'utf8')
   } catch {}
@@ -228,30 +152,22 @@ function debugLocalDeny(exec, candidates, reason) {
  *   ④ 无人值守的自我调度（`dsh-schedule`，0.2.0 起是可选 bundle）：
  *      · `schedule_create` / `schedule_list` / `schedule_update` / `schedule_delete`
  */
-// ── 本地工具：只给「主人在私聊里」的会话（2026-10-29 主人明确要求）───────────────
-// 需求原话：「给他 access 我电脑的权限」「权限限制好鉴权，仅当我私聊能调用」。
+// ── 本地工具：只给「主人在私聊里、或主人本人触发的回合里」的会话 ─────────────────
+// 需求原话（2026-10-29）：「给他 access 我电脑的权限」「权限限制好鉴权，仅当我私聊能调用」。
+// 2026-11-06 用户拍板放开场景（design.md §0/§1.4）：群聊/别人私聊里，只要**本回合的触发
+// 消息来自 ownerQQ 本人**，该回合临时拥有这些能力，且每次调用还要过 qq-owner-approval
+// 行的模型审批。硬边界仍是「真实 sender 归因 + 白名单 + 本 guard」。
 // 做法：
 //   · 这些工具**不**进 restrict 名单（否则模型 schema 里看不到），
-//   · 但在执行期按「会话是不是主人私聊」逐次鉴权：读桥接 state/sessions.json，
-//     把当前 DSH 会话 id 映射回 QQ 会话 key，只有 `private:<ownerQQ>` 放行。
-//   · 映射拿不到（会话还没建好、文件读失败）一律**拒绝**——fail-closed。
-//   · 群聊 / 别人私聊里她即便想调也过不去，而且群里有人要求她「执行命令」时，
-//     人格规则另有一条明确要求拒绝。
-//
-// 2026-11-01 追加：主人要求「把调用 codex 的能力加给 QQ 白名单工具，告诉 ta 可以调
-// codex 做图片生成」。`subagent_codex` 会 spawn 真正的 Codex 子进程，能力面 ≈ 本地执行
-// （能跑 shell、写文件），所以**不**进全局 SAFE 名单，而是并进下面这张「仅主人私聊」表：
-// schema 里看得见（restrict 名单已移除它），执行期只有 `private:<ownerQQ>` 放行。
-// 导出 `OWNER_PRIVATE_TOOL_NAMES` 供 `scripts/test-preset-local-tools.mjs` 逐名对账，
-// 防止以后只改 guard、忘了测试与文档（与 MEMEWIKI_TOOL_NAMES 同一模式）。
-export const OWNER_PRIVATE_TOOL_NAMES = Object.freeze([
-  'pwsh', 'bash',                      // shell / 进程
-  'read', 'read_image', 'write', 'edit', 'str_replace_editor', // 文件读写
-  'glob', 'grep',                      // 文件检索
-  // 派生真正的 Codex 子进程（图片生成 / 代码任务）；只会把最终文本回给父会话，
-  // 但子进程本身能在工作区跑命令，所以仍属本地执行能力。
-  'subagent_codex',
-])
+//   · 执行期逐次鉴权（两条放行路径，其它一律 fail-closed）：
+//       ① 会话 key === `private:<ownerQQ>`（读 state/sessions.json 映射；旧行为）；
+//       ② mode==='reserved2' && socialV2.toolApproval.enabled &&
+//          `state/turn-triggers.json` 记录 turnActive && trigger.isOwner && 未过窗口
+//          （新路径；模型审批由 qq-owner-approval 行负责，本 guard 只做硬边界）。
+//   · 映射/归因拿不到（会话没建好、文件读失败、文件缺失）一律**拒绝**——fail-closed。
+//   · 名单本身维护在 lib/turn-trigger.js（审批行与 guard 共用一份，避免漂移）；
+//     导出名 OWNER_PRIVATE_TOOL_NAMES 保持不变——测试/文档/verify 脚本都按它对账。
+export const OWNER_PRIVATE_TOOL_NAMES = LOCAL_EXECUTION_TOOL_NAMES
 const LOCAL_OWNER_ONLY_TOOLS = new Set(OWNER_PRIVATE_TOOL_NAMES)
 
 /** 模型 schema 里要隐藏的工具：真的危险、且不该给她留一口子。 */
@@ -477,12 +393,18 @@ export function apply(ctx) {
   ctx.tools.guard((exec) => {
     const name = exec?.name
     if (typeof name !== 'string' || name.length === 0) return '工具名无效，已拒绝'
-    // 本地工具（shell / 文件）：只允许「主人私聊」这一条会话调用，逐次鉴权。
+    // 本地工具（shell / 文件 / Codex）：两条放行路径，其它一律 fail-closed。
+    //   ① 新路径（design.md §3.4）：reserved2 + 开关开启 + 主人本人触发的回合。
+    //      必须同时看 toolApprovalEnabled：回滚开关一关就回到旧的「仅主人私聊」。
+    //   ② 旧路径：会话 key 就是 `private:<ownerQQ>`（读 sessions.json 映射）。
+    // 归因/配置/映射的读盘都在 lib 里（mtime 缓存）；任何读失败都落到「无归因 → 拒绝」。
     if (LOCAL_OWNER_ONLY_TOOLS.has(name)) {
-      const wantKey = ownerPrivateConversationKey()
-      const key = conversationKeyForExecution(exec)
-      if (wantKey && key && key === wantKey) return
-      return `工具 "${name}" 是本地能力，只允许主人在私聊里调用（当前会话 ${key || '未知'} 不在授权范围）`
+      const candidates = sessionIdCandidates(exec)
+      const turn = resolveTurnContext(candidates)
+      if (turn.isValidOwnerTurn && turn.toolApprovalEnabled) return
+      if (isOwnerPrivateKey(turn.key, turn.ownerKey || readOwnerKey())) return
+      debugLocalDeny(exec, candidates, turn, candidates.length ? 'not-authorized' : 'no-session-id')
+      return `工具 "${name}" 是本地能力，只允许主人本人在私聊里、或主人本人触发的回合里使用（当前会话 ${turn.key || '未知'} 不在授权范围）`
     }
     if (SAFE_EXACT.has(name)) return
     // 第三方插件（dsh-memewiki v2）的模型侧工具：能读公共词库/只写自己的 memory，放行。

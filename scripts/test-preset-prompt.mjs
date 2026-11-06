@@ -39,8 +39,17 @@ test('每代内置预设都满足自己那一代的安全不变量', () => {
 test('一代与二代的硬性不变量清单确实不同（防止又合并成一份）', () => {
   assert.notDeepEqual(presetBlockingSubstrings('v1'), presetBlockingSubstrings('v2'));
   // 二代的工具面不变量不应该出现在一代清单里
-  assert.ok(!presetBlockingSubstrings('v1').includes('只在主人私聊里可用'));
-  assert.ok(PRESET_BLOCKING_SUBSTRINGS.includes('只在主人私聊里可用'));
+  assert.ok(!presetBlockingSubstrings('v1').includes('主人本人触发的回合'));
+  // 2026-11-06 场景放宽：不变量从「只在主人私聊里可用」换成「主人本人触发的回合」。
+  assert.ok(PRESET_BLOCKING_SUBSTRINGS.includes('主人本人触发的回合'));
+  assert.ok(!PRESET_BLOCKING_SUBSTRINGS.includes('只在主人私聊里可用'));
+});
+
+test('新不变量短句逐字出现在二代预设正文里，且旧「仅私聊」文案已移除', () => {
+  const prefix = extractPresetPrefix(source);
+  assert.equal(typeof prefix, 'string');
+  assert.ok(prefix.includes('主人本人触发的回合'), '二代预设必须包含新安全不变量短句');
+  assert.equal(prefix.includes('只在主人私聊里可用'), false, '旧「只在主人私聊里可用」必须被替换（场景已放宽）');
 });
 
 test('真实预设能定位到 persona 的 prefix 块', () => {

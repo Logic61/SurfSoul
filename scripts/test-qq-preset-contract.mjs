@@ -23,27 +23,41 @@ test('reserved2 YAML resolves to the expected persona and template variables', (
 test('local/admin tool restrictions and existing compaction budgets stay intact', () => {
   assert.deepEqual(preset.map((row) => row.id), [
     'persona', 'tool-web', 'tool-ask-user', 'tool-todo',
-    // 2026-10-29 加进来的本地工具行（仅主人私聊放行，执行期由 qq-tool-restrict 兜底）；当时测试没跟上
+    // 2026-10-29 加进来的本地工具行（执行期由 qq-tool-restrict 兜底，2026-11-06 起
+    // 非私聊场景还要过 qq-owner-approval 的模型审批）
     'tool-pwsh', 'tool-fs', 'tool-fs-search',
-    'qq-tool-restrict', 'compaction',
+    'qq-tool-restrict',
+    // 2026-11-06 加进来的模型审批行：本地工具/账号级/群管理在主人触发的回合里逐次审批
+    'qq-owner-approval',
+    'compaction',
   ]);
   assert.deepEqual(preset.find((row) => row.id === 'tool-web').config, { search: false, fetch: false });
   assert.equal(preset.find((row) => row.id === 'qq-tool-restrict').name, './qq-tool-restrict.mjs');
+  assert.equal(preset.find((row) => row.id === 'qq-owner-approval').name, './qq-owner-approval.mjs');
+  assert.deepEqual(preset.find((row) => row.id === 'qq-owner-approval').config, {});
   const compaction = preset.find((row) => row.id === 'compaction');
   assert.deepEqual(compaction.isolate, { compaction: true, toolResultPruner: true });
   assert.deepEqual(compaction.config.find((row) => row.id === 'tool-result-pruner').config, {
     thresholdChars: 50000, headChars: 45000, tailChars: 2000,
   });
-  // 2026-10-29 本地工具开放给主人私聊后，旧文案「你没有本地工具 / API 令牌」已不存在；
-  // 这里钉住当前的安全边界（本地工具仅主人私聊、群友无管理权限、角色由桥接注入）。
-  // 2026-11-01 起：subagent_codex（Codex）仍在「仅主人私聊」；qq_generate_image（Agnes 画图）
-  // 主人私聊与群聊都能用（群聊有配额），所以不在这一句里，而是单独在规则 1/2 说明。
-  for (const text of ['本地工具（pwsh / read / write / edit / glob / grep）和 Codex 子智能体工具 subagent_codex **只在主人私聊里可用**', '群友没有管理权限', '角色由桥接注入']) {
+  // 2026-11-06 用户拍板「工具场景放宽」之后，第 1 条从「只在主人私聊里可用」改成
+  // 「只在主人本人触发的回合可用」；这里钉住新文案与新不变量短句。
+  for (const text of ['**主人本人触发的回合**', '模型审批', '群友没有管理权限', '角色由桥接注入']) {
     assert.ok(prefix.includes(text), `missing safety rule: ${text}`);
   }
+  // 旧的「只允许私聊」硬限制不能悄悄回来（场景已放宽，改回去会让能力失效）。
+  assert.equal(prefix.includes('只在主人私聊里可用'), false, '旧文案「只在主人私聊里可用」不应回到 preset');
   // 群聊画图从「一律拒绝」变成「可以用，但有频率上限」——两边文案必须一致。
   assert.ok(prefix.includes('**画图工具 qq_generate_image 是例外：群聊里也能用**'), '安全规则 1 应说明画图工具在群聊可用');
   assert.ok(prefix.includes('**画图不在此列**'), '群聊拒绝清单应说明画图不在此列');
+  // Codex / 好友申请 / 群管理的旧场景限制必须同步放宽（design.md §3.5 第 18/20/21 条）。
+  assert.equal(prefix.includes('【用 Codex 画图（仅主人私聊，备用）】'), false, 'Codex 旧标题（仅主人私聊）应被替换');
+  assert.equal(prefix.includes('【好友申请（仅主人私聊，权限已放开）】'), false, '好友申请旧标题应被替换');
+  assert.equal(prefix.includes('唤醒提示里出现【管理员在群里】才说明授权窗口有效'), false, '群管理旧窗口文案应被替换');
+  // 第 22 条【场景与审批】必须存在，并说明「本回合授权」行与被拒不要重试。
+  assert.ok(prefix.includes('【场景与审批】'), '缺少第 22 条【场景与审批】');
+  assert.ok(prefix.includes('【本回合授权】'), '第 22 条应解释唤醒提示里的【本回合授权】行');
+  assert.ok(prefix.includes('不要反复重试'), '第 22 条应要求被拒后不要反复重试');
 });
 
 test('snapshots are optional, partial snapshots require reading, and watermarks are not message IDs', () => {
@@ -100,7 +114,8 @@ test('social autonomy and visual, forwarding, sticker and web capabilities remai
     'mcp__web-search-safe__web_search', 'mcp__web-search-safe__web_fetch',
     // 2026-11-01 主人要求：QQ 白名单里加「调 codex 画图」的能力，这是模型必须知道的知识
     // （不是 hint：模型得会 subagent_codex → qq_send_image 这条链路，否则能力等于没装）。
-    '【用 Codex 画图（仅主人私聊，备用）】', 'subagent_codex', '最终回答文字',
+    // 2026-11-06 场景放宽：Codex 不再「仅主人私聊」，改为「主人本人触发的回合可用」。
+    '【用 Codex 画图（主人本人触发的回合可用，备用）】', 'subagent_codex', '最终回答文字',
     'mcp__snowluma__qq_send_image', '3~5 分钟', '别假装画了',
     // 2026-11-01 追加：Agnes 快速画图通道（10~25 秒），是「画图」时的首选工具；
     // 同日追加：群聊里也能画（有会话配额）。
