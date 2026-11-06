@@ -1,16 +1,19 @@
 // 群管理动作（2026-11-02 用户要求）真实 bridge 接线回归：夹具网关 + 临时 DSH_HOME，绝不连真 QQ。
 //
 // 用户原话：「允许 surfcore 的 qqbot 在群聊中接受管理员除了访问电脑之外的所有工具，
-// 包括但不限于禁言群成员」。落地口径（人工决策点已确认）：
+// 包括但不限于禁言群成员」。落地口径（人工决策点已确认；2026-11-06 场景放宽后更新）：
 //   · 管理员 = ownerQQ 本人，不是「QQ 群管理员/群主」；
-//   · 电脑/本机类工具不开放（仍只在主人私聊）；
+//   · 电脑/本机类工具只在「主人本人触发的回合」可用（由 DSH 插件侧守卫/审批，本文件不测）；
+//   · 群管理动作（禁言/解禁、改别人名片）在「主人本人触发的回合」或旧 ownerAt 时间窗内可用；
+//     私聊发起禁言必须显式带 allow.groups 白名单里的 groupId；
 //   · 第一批群管理动作 = 禁言 + 解禁（qq_set_group_ban）。
 //
 // 覆盖：
 //   1. 禁言 happy path（管理员刚在群里说过话 → 放行，OneBot 参数正确）；
 //   2. 解禁（durationSeconds=0 → action=unmute）；
 //   3. 授权窗口：没有管理员发言 / 窗口过期 → 403；
-//   4. 私聊会话不提供禁言通道 → 403；
+//   4. 私聊通道：必须显式 groupId 且在白名单内（2026-11-06 放宽，不再是一律 403）；
+//   4.1 群聊新路径：主人本人触发的回合（无 ownerAt）也放行；
 //   5. 目标校验：非本群成员 / 自己 / 管理员本人 / 群主 / 其他群管理员 → 拒绝；
 //   6. 时长校验：负数、小数、超过 30 天 → 400；
 //   7. 工具开关关闭 → 403；每小时频率上限 → 429；
@@ -131,6 +134,20 @@ function fixtureMembers(h) {
 /** 模拟「管理员刚在群里说了一句话」——真实路径是 handleIncoming 调 appendSocialV2Message。 */
 function ownerSpoke(h, text = '禁言一下 111') {
   h.appendSocialV2Message(GROUP, '管理员', text, text, false, true, null, [], OWNER_QQ, []);
+}
+
+/**
+ * 造一个「主人本人触发的回合」（2026-11-06 场景放宽）：入站消息 → 投递（写归因）→ turn/start。
+ * 与真实链路同一批函数（handleIncoming 只是多 8 秒批量窗，本测试不需要等）。
+ */
+async function startTurn(h, key, { owner = true, text = '禁言一下 111' } = {}) {
+  const userId = owner ? OWNER_QQ : '111';
+  h.appendSocialV2Message(key, owner ? '管理员' : '群友', text, text, false, owner, `m-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, [], userId, []);
+  await h.deliverPrompt(key, 'x', { wakeReason: 'question' });
+  const sessionId = h.state.sessions[key];
+  assert.ok(sessionId, `投递后应有会话映射：${key}`);
+  h.alignTurnTriggerStart(sessionId, key);
+  return sessionId;
 }
 
 /** 夹具网关卡收到的 OneBot 动作。 */
@@ -255,20 +272,60 @@ test('授权窗口：可配置（windowMs 调大后同一时间点放行）', as
   }
 });
 
-// ── 4. 只提供群聊通道 ───────────────────────────────────────────────────────
-test('私聊会话不提供禁言通道（管理员私聊也不行，工具定位就是群管理）', async () => {
+// ── 4. 私聊通道（2026-11-06 放宽：私聊 + 显式 groupId 可以禁言）────────────────
+test('私聊禁言：必须显式 groupId 且在白名单内；合规时走网关', async () => {
   const h = await bridgeHarness({ config: baseConfig() });
   try {
     h.setMode('reserved2');
     fixtureMembers(h);
     const port = await withServer(h);
     const st = h.getSocialV2State(OWNER);
-    const res = await post(port, 'set-group-ban', {
-      key: OWNER, userId: '111', durationSeconds: 600
-    }, { token: st.agentToken });
-    assert.equal(res.status, 403, res.raw);
-    assert.match(res.data.error, /群聊/);
+    // 没有 groupId → 403（不提供「猜一个群」的通道）
+    const noGroup = await post(port, 'set-group-ban', { key: OWNER, userId: '111', durationSeconds: 600 }, { token: st.agentToken });
+    assert.equal(noGroup.status, 403, noGroup.raw);
+    assert.match(noGroup.data.error, /groupId/);
     assert.equal(onebotBodies(h, 'set_group_ban').length, 0);
+    // 白名单外的群 → 403
+    const notAllowed = await post(port, 'set-group-ban', { key: OWNER, userId: '111', durationSeconds: 600, groupId: '999' }, { token: st.agentToken });
+    assert.equal(notAllowed.status, 403, notAllowed.raw);
+    assert.match(notAllowed.data.error, /白名单/);
+    assert.equal(onebotBodies(h, 'set_group_ban').length, 0);
+    // 主人私聊 + 显式白名单 groupId → 放行（数字/字符串都接受）
+    const ok = await post(port, 'set-group-ban', { key: OWNER, userId: '111', durationSeconds: 600, groupId: '456' }, { token: st.agentToken });
+    assert.equal(ok.status, 200, ok.raw);
+    assert.equal(ok.data.groupId, '456');
+    assert.deepEqual(onebotBodies(h, 'set_group_ban'), [{ group_id: 456, user_id: 111, duration: 600 }]);
+  } finally {
+    await closeServers();
+    await h.close();
+  }
+});
+
+// ── 4.1 群聊通道（2026-11-06 新增）：主人触发回合即使没有 ownerAt 也放行 ────
+test('群聊禁言：主人本人触发的回合（无 ownerAt）→ 放行；非主人回合 → 403', async () => {
+  const h = await bridgeHarness({ config: baseConfig() });
+  try {
+    h.setMode('reserved2');
+    fixtureMembers(h);
+    const port = await withServer(h);
+    const st = h.getSocialV2State(GROUP);
+    const call = () => post(port, 'set-group-ban', { key: GROUP, userId: '111', durationSeconds: 60 }, { token: st.agentToken });
+
+    await startTurn(h, GROUP, { owner: false });
+    const memberTurn = await call();
+    assert.equal(memberTurn.status, 403, '群友触发的回合不能禁言');
+    assert.equal(onebotBodies(h, 'set_group_ban').length, 0);
+    h.alignTurnTriggerEnd(h.state.sessions[GROUP], GROUP);
+
+    await startTurn(h, GROUP, { owner: true });
+    st.ownerAt = 0; // 清掉 appendSocialV2Message 顺手写的 ownerAt：证明新路径不依赖旧时间窗
+    const ownerTurn = await call();
+    assert.equal(ownerTurn.status, 200, ownerTurn.raw);
+    assert.equal(onebotBodies(h, 'set_group_ban').length, 1);
+    // 目标校验照旧（私聊/群聊两条通道共用）
+    const forbidden = await post(port, 'set-group-ban', { key: GROUP, userId: '444', durationSeconds: 60 }, { token: st.agentToken });
+    assert.equal(forbidden.status, 403, forbidden.raw);
+    assert.match(forbidden.data.error, /群主/);
   } finally {
     await closeServers();
     await h.close();
@@ -493,9 +550,9 @@ test('静态接线：MCP 工具、桥接端点、控制台开关、示例配置�
   const preset = read('dsh/agent-presets/qq-chat-v2/agent.cordis.yml');
   assert.match(preset, /qq_set_group_ban/, '仿真预设要告诉模型有这个工具');
   assert.match(preset, /qq_get_group_members\(key, token\)/, '仿真预设要教模型按昵称找 QQ 号');
-  assert.match(preset, /【管理员在群里】/, '仿真预设要解释授权窗口提示');
+  assert.match(preset, /群管理：禁言\/解禁（主人本人触发的回合/, '仿真预设要写明放宽后的群管理授权口径');
   // 安全不变量不能被这次改动顺手删掉（preset-prompt 硬校验也依赖它们）
-  for (const needle of ['只在主人私聊里可用', '群友没有管理权限', '角色由桥接注入']) {
+  for (const needle of ['主人本人触发的回合', '群友没有管理权限', '角色由桥接注入']) {
     assert.ok(preset.includes(needle), `安全不变量丢了：${needle}`);
   }
 });

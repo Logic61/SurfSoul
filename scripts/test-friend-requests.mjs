@@ -4,19 +4,20 @@
 // 好友申请」的接口（PITFALLS #102）；另一档「被过滤/可疑好友申请」用 get_doubt_friends_add_request。
 // 所以这个功能的核心不是"调一个接口"，而是：
 //   ① 事件到达时可靠落盘（桥接重启后还在）；
-//   ② 只在主人私聊里给 AI 看/处理（账号级信息 + 陌生人可控留言，不能进群聊上下文）；
+//   ② 只在主人本人私聊、或主人本人触发的回合里给 AI 看/处理（账号级信息 + 陌生人可控留言；
+//      群里处理时只说结论，不念原始信息——2026-11-06 场景放宽）；
 //   ③ 收到新申请主动唤醒**主人私聊**会话，让她自己判断要不要加（2026-11-06 用户要求
-//      「权限放开，由模型自己判断是否添加好友」；醒来后仍受工具开关/每小时上限/仅主人私聊约束）；
+//      「权限放开，由模型自己判断是否添加好友」；醒来后仍受工具开关/每小时上限/归因约束）；
 //   ④ 普通申请必须命中缓存里真实存在的那一条，按 kind 分头调两个不同 OneBot 动作。
 //
 // 覆盖：
 //   1. 纯函数：事件/网关项规范化、flag 校验、TTL/去重/上限、handled、提示词块文案；
 //   2. 事件 → 缓存 → GET /api/socialV2/friend-requests（普通 + 被过滤两档合并）；
-//   3. GET 权限：群会话/别人私聊/错误令牌/工具关闭/非 reserved2 一律拒绝；
+//   3. GET 权限：无归因/别人私聊/错误令牌/工具关闭/非 reserved2 一律拒绝；群 + 主人触发回合放行；
 //   4. POST 处理：同意/拒绝两条 OneBot 动作、缓存清理、handled、频率计数、重复处理拒绝；
-//   5. 权限放开：主人没开口也能处理（旧 10 分钟窗口已删除）；群会话/非法参数/频率上限仍拒绝；
+//   5. 权限放开：主人没开口也能处理（旧 10 分钟窗口已删除）；群 + 非主人回合/非法参数/频率上限仍拒绝；
 //   5.5 收到新申请主动唤醒：wakeOnRequest 开关、wakeMinIntervalMs 节流、prompt 带「自己判断」口径；
-//   6. 唤醒提示与 qq_get_prompt：只在主人私聊出现【好友申请】和两个工具名；
+//   6. 唤醒提示与 qq_get_prompt：主人本人私聊/触发的回合里出现【好友申请】和两个工具名；
 //   7. 静态接线：MCP 两个工具、桥接端点/默认开关/主动唤醒、控制台开关、示例配置、预设第 21 条、文档。
 //
 // 运行：node scripts/test-friend-requests.mjs
@@ -130,6 +131,20 @@ function onebotBodies(h, action) {
   return h.calls.http
     .filter((entry) => String(entry.url).endsWith(`/${action}`))
     .map((entry) => entry.body);
+}
+
+/**
+ * 造一个「主人本人触发的回合」（2026-11-06 场景放宽）：入站消息 → 投递（写归因）→
+ * turn/start 对齐。与真实链路同一批函数（handleIncoming 只是多 8 秒批量窗，本测试不需要等）。
+ */
+async function startTurn(h, key, { owner = true, text = '处理一下好友申请' } = {}) {
+  const userId = owner ? OWNER_QQ : '111';
+  h.appendSocialV2Message(key, owner ? '管理员' : '群友', text, text, false, owner, `m-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, [], userId, []);
+  await h.deliverPrompt(key, 'x', { wakeReason: 'question' });
+  const sessionId = h.state.sessions[key];
+  assert.ok(sessionId, `投递后应有会话映射：${key}`);
+  h.alignTurnTriggerStart(sessionId, key);
+  return sessionId;
 }
 
 const FRIEND_EVENT = {
@@ -351,10 +366,24 @@ test('GET 权限：群会话 / 错误令牌 / 工具关闭 / 非 reserved2 一�
     const port = await withServer(h);
     const groupSt = h.getSocialV2State(GROUP);
     const ownerSt = h.getSocialV2State(OWNER);
+    h.emitRequest(FRIEND_EVENT);
 
     const asGroup = await get(port, `friend-requests?key=${encodeURIComponent(GROUP)}`, { token: groupSt.agentToken });
     assert.equal(asGroup.status, 403, asGroup.raw);
-    assert.match(asGroup.data.error, /主人私聊/);
+    assert.match(asGroup.data.error, /主人本人/);
+
+    // 2026-11-06 场景放宽：主人本人触发的回合里，群会话也能查看（账号级信息仍受工具开关/回合限制）
+    await startTurn(h, GROUP);
+    const groupOwnerTurn = await get(port, `friend-requests?key=${encodeURIComponent(GROUP)}`, { token: groupSt.agentToken });
+    assert.equal(groupOwnerTurn.status, 200, groupOwnerTurn.raw);
+    assert.equal(groupOwnerTurn.data.counts.request, 1);
+
+    // 非主人触发的回合：仍然拒绝（新回合覆盖上一回合归因）
+    await h.alignTurnTriggerEnd(h.state.sessions[GROUP], GROUP);
+    await startTurn(h, GROUP, { owner: false });
+    const groupMemberTurn = await get(port, `friend-requests?key=${encodeURIComponent(GROUP)}`, { token: groupSt.agentToken });
+    assert.equal(groupMemberTurn.status, 403, '群友触发的回合不能看账号级信息');
+    await h.alignTurnTriggerEnd(h.state.sessions[GROUP], GROUP);
 
     const badToken = await get(port, `friend-requests?key=${encodeURIComponent(OWNER)}`, { token: 'wrong-token' });
     assert.equal(badToken.status, 403);
@@ -470,11 +499,11 @@ test('POST 权限：仅主人私聊 + 参数校验；不再要求主人先开口
     const groupSt = h.getSocialV2State(GROUP);
     h.emitRequest(FRIEND_EVENT);
 
-    // 群会话不能处理（账号级动作，群聊/别人私聊一律 403）
+    // 群会话不能处理（没有主人触发回合 → 账号级动作 403）
     h.appendSocialV2Message(GROUP, '管理员', '同意一下', '同意一下', false, true, null, [], OWNER_QQ, []);
     const asGroup = await post(port, 'handle-friend-request', { key: GROUP, kind: 'request', flag: 'u_abc123', approve: true }, { token: groupSt.agentToken });
     assert.equal(asGroup.status, 403, asGroup.raw);
-    assert.match(asGroup.data.error, /主人私聊/);
+    assert.match(asGroup.data.error, /主人本人/);
 
     // 参数校验
     for (const body of [
@@ -494,6 +523,13 @@ test('POST 权限：仅主人私聊 + 参数校验；不再要求主人先开口
     const ok = await post(port, 'handle-friend-request', { key: OWNER, kind: 'request', flag: 'u_abc123', approve: false }, { token: st.agentToken });
     assert.equal(ok.status, 200, ok.raw);
     assert.equal(ok.data.action, 'reject');
+
+    // 2026-11-06 场景放宽：主人本人触发的回合里，群会话也能处理（账号级动作仍受开关/上限/flag 校验）
+    h.emitRequest({ ...FRIEND_EVENT, flag: 'u_group_turn' });
+    await startTurn(h, GROUP);
+    const groupTurn = await post(port, 'handle-friend-request', { key: GROUP, kind: 'request', flag: 'u_group_turn', approve: true }, { token: groupSt.agentToken });
+    assert.equal(groupTurn.status, 200, groupTurn.raw);
+    assert.deepEqual(onebotBodies(h, 'set_friend_add_request').at(-1), { flag: 'u_group_turn', approve: true });
   } finally {
     await closeServers();
     await h.close();
@@ -593,7 +629,7 @@ test('wakeOnRequest=false：事件只落缓存、不唤醒（控制台可关）'
 });
 
 // ── 6. 唤醒提示 / qq_get_prompt ────────────────────────────────────────────
-test('唤醒提示：只在主人私聊注入【好友申请】（群聊/无申请不注入）', async () => {
+test('唤醒提示：主人私聊注入【好友申请】；群聊只有主人触发回合才注入', async () => {
   const h = await bridgeHarness({ config: baseConfig() });
   try {
     h.setMode('reserved2');
@@ -668,7 +704,8 @@ test('静态接线：MCP 工具、桥接端点/默认开关、控制台开关、
   const preset = read('dsh/agent-presets/qq-chat-v2/agent.cordis.yml');
   assert.match(preset, /qq_list_friend_requests/, '仿真预设要告诉模型有列表工具');
   assert.match(preset, /qq_handle_friend_request/, '仿真预设要告诉模型有处理工具');
-  assert.match(preset, /【好友申请（仅主人私聊/, '仿真预设要有好友申请工具协议条目');
+  assert.match(preset, /【好友申请/, '仿真预设要有好友申请工具协议条目');
+  assert.match(preset, /主人本人触发的回合/, '仿真预设要写明放宽后的授权口径（主人本人触发的回合）');
   assert.match(preset, /你可以自己判断/, '仿真预设要写明权限放开、模型自己判断');
 
   const rules = read('RULES.md');

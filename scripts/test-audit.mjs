@@ -186,13 +186,13 @@ const tests = [
   'test-version.mjs',
   // B站分享去重：新鲜池空时不得回退旧素材（2026-10-26 修复的"同一条反复发"）。
   'test-bili-share-dedup.mjs',
-  // 群管理动作（2026-11-02 用户要求）：管理员（ownerQQ）在群里也能指挥禁言/解禁与改别人
-  // 群名片。桥接用「管理员最近在群里发言」的时间窗硬鉴权（只认真实 sender QQ，群友/
-  // 群主/其他管理员都不算）；本机工具仍只在主人私聊。真实 bridge.js + 夹具网关。
+  // 群管理动作（2026-11-02 用户要求；2026-11-06 场景放宽）：管理员（ownerQQ）本人触发即可
+  // （群聊/私聊都行，私聊要带白名单 groupId），旧「管理员最近在群里发言」时间窗保留。
+  // 只认真实 sender QQ 归因（群友/群主/其他管理员都不算）。真实 bridge.js + 夹具网关。
   'test-group-admin-tools.mjs',
   // 好友申请（2026-11-06 用户要求）：SnowLuma 只推 request 事件、没有「列出普通待处理好友申请」
-  // 的接口（PITFALLS #102），桥接自己落盘缓存；列表/处理只在主人私聊，处理动作有授权窗口
-  // 与每小时上限，普通申请与被过滤可疑申请分走两个 OneBot 动作。真实 bridge.js + 夹具网关。
+  // 的接口（PITFALLS #102），桥接自己落盘缓存；列表/处理在主人本人私聊或主人本人触发的回合里，
+  // 处理动作有每小时上限，普通申请与被过滤可疑申请分走两个 OneBot 动作。真实 bridge.js + 夹具网关。
   'test-friend-requests.mjs',
   // 唤醒决策流水（2026-11-03）：为什么醒/为什么没醒/为什么跳过，落 JSONL + 只读接口 +
   // 控制台「决策流水」；含重启恢复唤醒与「无行动且没静置」统计。真实 bridge.js + 夹具网关。
@@ -206,6 +206,13 @@ const tests = [
   // 模式矩阵（2026-11-03）：reserved2 / chat / reserved / closed-agent 的准入与 preset 选择；
   // 一代模式冻结后，矩阵行为必须保持稳定（改桥接模式逻辑时先看它）。
   'test-mode-matrix.mjs',
+  // 工具场景放宽 + 请求者归因（2026-11-06 用户拍板）：bridge 写 state/turn-triggers.json（只读给
+  // DSH 插件）、ownerTurnAllowed 端点闸门、唤醒提示【本回合授权】、安全姿态 toolApproval +
+  // GET /api/tool-approvals。真实 bridge.js + 夹具网关（不连真 QQ、不写真实 state/）。
+  'test-turn-triggers.mjs', 'test-owner-trigger-gates.mjs',
+  // DSH 侧内部模型审批（2026-11-06）：qq-owner-approval 插件 pre-execute 主门 + approval/request
+  // 领取 + fail-closed verdict；fake ctx/llm（不启动 DSH 进程）。
+  'test-owner-approval.mjs',
   // 文档数字防漂移（2026-11-03）：docs/guides/CURRENT-NUMBERS.md 由脚本生成并与代码比对；
   // 手写文档不得再自称「三个 MCP server / 约 15,000 行」。
   'test-doc-numbers.mjs',

@@ -42,6 +42,12 @@ import * as selfNotes from '../src/self-notes.js';
 import * as wakeDecisions from '../src/wake-decisions.js';
 // 好友申请（2026-11-06）：事件规范化/合并/TTL 是纯函数，桥接里 import 后用；VM 里要注入同名绑定。
 import * as friendRequests from '../src/friend-requests.js';
+// 本回合触发者归因（2026-11-06）：bridge.js import 的纯函数必须在 VM context 里提供同名绑定，
+// 否则 main() 里的配置归一化（normalizeToolApprovalConfig）直接 ReferenceError。
+import * as turnTriggers from '../src/turn-trigger.js';
+// SnowLuma 连接/token 自发现（bridge.js 的 /api/security-posture 会读它判断 token 是否 staged）：
+// 纯函数 + 文件读取，测试里注入桩后不会碰真实用户配置。
+import * as snowlumaConn from '../src/snowluma-conn.js';
 import { fetchVideoInfo } from '../src/bili-api.js';
 import * as stateAcl from '../src/state-acl.mjs';
 import { createBiliMemory } from '../src/bili-memory.js';
@@ -264,6 +270,12 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
       selfNickname = selfDisplayName.toLowerCase() || 'deepseek';
     },
     flushQueue, retireSession,
+    // 本回合触发者归因（2026-11-06）：测试直接驱动 turn/start·turn/end 对齐、读内存 map、
+    // 断言 ownerTurnAllowed / 安全姿态统计（不启服务、不连真 QQ、不写真实 state/）。
+    pendingTurnTriggers, activeTurnTriggers, lastTurnTrigger,
+    alignTurnTriggerStart, alignTurnTriggerEnd, forgetTurnTriggers, forgetAllTurnTriggers,
+    writeTurnTriggerState, ownerTurnAllowed, ownerTurnForDelivery, activeOwnerTurnCount,
+    toolApprovalCfg, buildTriggerRecordV2, readToolApprovalStats,
     // 上线补历史：测试可手动触发，不依赖真实 WebSocket / QQ。
     runHistoryCatchUp, historyCatchUpConfig, appendHistoryCatchupV2, fetchOneBotHistory,
     beginHistoryCatchupWindow, hasHistoryCatchupRetryTimer: () => historyCatchupRetryTimer !== null,
@@ -329,6 +341,11 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     ...wakeDecisions,
     // 好友申请（2026-11-06）：纯函数（事件规范化/合并/TTL/handled），桥接 import 后直接用。
     ...friendRequests,
+    // 本回合触发者归因（2026-11-06）：纯函数（选择最新入站/归一化/ownerTurn 判定），
+    // 桥接 import 后直接用；测试也可用 globals 覆盖做边界注入。
+    ...turnTriggers,
+    // SnowLuma 连接/token 自发现：/api/security-posture 会用到；纯函数 + 只读配置探测。
+    ...snowlumaConn,
     // 角色系统在 fixture 里等价于「没有角色」：当前角色 null，记忆卡指向 temp/dsh/surfcore/memory。
     // 不能直接用真实 character-store 的 DSH_HOME（它在主进程 import 时已固定）。
     readCurrentCharacter: () => null,

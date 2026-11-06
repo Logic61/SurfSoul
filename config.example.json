@@ -210,6 +210,16 @@
       "memoryRefreshMs": 43200000,
       "memorySourceMaxChars": 24000
     },
+    "toolApproval": {
+      "enabled": true,
+      "failClosed": true,
+      "model": "",
+      "maxTokens": 320,
+      "timeoutMs": 20000,
+      "maxReviewsPerTurn": 6,
+      "triggerWindowMs": 600000,
+      "claimSandboxApproval": true
+    },
     "tools": {
       "getPrompt": true,
       "getUnread": true,

@@ -23,12 +23,24 @@ const consoleHtml = fs.readFileSync(path.join(ROOT, 'public', 'console.html'), '
 check('桥接有只读接口，且包含关键检查项', () => {
   const start = bridgeSrc.indexOf("url.pathname === '/api/security-posture'");
   assert.ok(start > 0, '缺少 /api/security-posture 路由');
-  const block = bridgeSrc.slice(start, start + 9000);
-  for (const key of ['stateAcl', 'snowlumaToken', 'fishGuard', 'tokenGuard', 'sendRate', 'review', 'crossScene', 'allow', 'adminActions', 'disabledTools']) {
+  const block = bridgeSrc.slice(start, start + 12000);
+  for (const key of ['stateAcl', 'snowlumaToken', 'fishGuard', 'tokenGuard', 'sendRate', 'review', 'toolApproval', 'crossScene', 'allow', 'adminActions', 'disabledTools']) {
     assert.ok(block.includes(`key: '${key}'`), `安全姿态缺少检查项：${key}`);
   }
   assert.ok(block.includes('const alerts = items'), '应把 warn 项聚合成 alerts');
   assert.ok(block.includes('staged: Boolean('), '应检测 SnowLuma token 是否 staged');
+});
+
+check('工具模型审批（2026-11-06）：姿态项读审批流水，并有只读接口', () => {
+  assert.ok(bridgeSrc.includes("url.pathname === '/api/tool-approvals'"), '缺少 GET /api/tool-approvals 只读接口');
+  assert.ok(bridgeSrc.includes('readToolApprovalStats('), '姿态统计要复用同一份审批流水解析');
+  assert.ok(bridgeSrc.includes("decision === 'fail'"), 'fail（超时/异常）也要计入拒绝类统计');
+  assert.ok(bridgeSrc.includes("key: 'toolApproval'"), '姿态必须有 toolApproval 项');
+  // 只读接口不得进入 agent 白名单（否则群里的 AI 能读全局审批流水）
+  const agentAllowedStart = bridgeSrc.indexOf('const agentAllowed = url.pathname');
+  assert.ok(agentAllowedStart > 0);
+  const agentAllowedBlock = bridgeSrc.slice(agentAllowedStart, agentAllowedStart + 500);
+  assert.ok(!agentAllowedBlock.includes('tool-approvals'), 'tool-approvals 不能进 agent 白名单');
 });
 
 check('姿态接口不把 token 明文放进响应', () => {

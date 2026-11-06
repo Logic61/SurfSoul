@@ -103,6 +103,20 @@ const sentGroupBodies = (h) => h.calls.http
   .filter((entry) => String(entry.url).endsWith('/send_group_msg'))
   .map((entry) => entry.body);
 
+/**
+ * 造一个「主人本人触发的回合」（2026-11-06 场景放宽）：入站消息 → 投递（写归因）→ turn/start。
+ * 与真实链路同一批函数（handleIncoming 只是多 8 秒批量窗，本测试不需要等）。
+ */
+async function startTurn(h, key, { owner = true, text = '帮我把这句话发到群里' } = {}) {
+  const userId = owner ? OWNER_QQ : '111';
+  h.appendSocialV2Message(key, owner ? '管理员' : '群友', text, text, false, owner, `m-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, [], userId, []);
+  await h.deliverPrompt(key, 'x', { wakeReason: 'question' });
+  const sessionId = h.state.sessions[key];
+  assert.ok(sessionId, `投递后应有会话映射：${key}`);
+  h.alignTurnTriggerStart(sessionId, key);
+  return sessionId;
+}
+
 // ── 1. 场合卡 ───────────────────────────────────────────────────────────────
 test('场合卡：唤醒提示词里明确「在哪种场合」+ 配置档位覆盖', async () => {
   const h = await bridgeHarness({ config: baseConfig() });
@@ -283,7 +297,7 @@ test('跨场合投递：闸门（来源/令牌/开关/白名单/长度/敏感/�
     const call = (body, opts = {}) => post(port, 'send-cross', body, { token: ownerSt.agentToken, ...opts });
     const noSend = () => assert.equal(sentGroupBodies(h).length, 0, '被拒绝时不得发出任何群消息');
 
-    assert.equal((await call({ key: GROUP, target: GROUP, message: 'x' }, { token: groupSt.agentToken })).status, 403, '来源必须是主人私聊');
+    assert.equal((await call({ key: GROUP, target: GROUP, message: 'x' }, { token: groupSt.agentToken })).status, 403, '没有主人触发回合时，群会话不能发起（来源必须是主人本人）');
     noSend();
     assert.equal((await call({ key: OWNER, target: GROUP, message: 'x' }, { token: 'bad-token' })).status, 403, '坏令牌');
     noSend();
@@ -319,13 +333,42 @@ test('跨场合投递：闸门（来源/令牌/开关/白名单/长度/敏感/�
   } finally { await closeServers(); await h2.close(); }
 });
 
+// ── 5.5 跨场合投递：主人本人触发的回合也能发起（2026-11-06 场景放宽）─────────
+test('跨场合投递：群 + 主人触发回合 → 放行；群 + 非主人回合 → 403', async () => {
+  const h = await bridgeHarness({ config: baseConfig() });
+  try {
+    h.setMode('reserved2');
+    const port = await withServer(h);
+    const groupSt = h.getSocialV2State(GROUP);
+
+    await startTurn(h, GROUP, { owner: false });
+    const memberTurn = await post(port, 'send-cross', { key: GROUP, target: GROUP, message: '带句话' }, { token: groupSt.agentToken });
+    assert.equal(memberTurn.status, 403, '群友触发的回合不能跨场合投递');
+    assert.equal(sentGroupBodies(h).length, 0);
+    h.alignTurnTriggerEnd(h.state.sessions[GROUP], GROUP);
+
+    await startTurn(h, GROUP, { owner: true });
+    const ownerTurn = await post(port, 'send-cross', { key: GROUP, target: 'group:456', message: '帮我把这句带过去' }, { token: groupSt.agentToken });
+    assert.equal(ownerTurn.status, 200, JSON.stringify(ownerTurn.data));
+    assert.equal(ownerTurn.data.target, 'group:456');
+    assert.equal(sentGroupBodies(h).length, 1, '真的发出了一条群消息');
+    assert.equal(sentGroupBodies(h)[0].group_id, 456);
+
+    // 目标白名单 / 身份/敏感闸照旧（新路径不能绕过旧闸）
+    const notAllowed = await post(port, 'send-cross', { key: GROUP, target: 'group:999', message: 'x' }, { token: groupSt.agentToken });
+    assert.equal(notAllowed.status, 403, 'allowTargets 之外的目标仍拒绝');
+    const identityLeak = await post(port, 'send-cross', { key: GROUP, target: 'group:456', message: `他的QQ是 ${OWNER_QQ}` }, { token: groupSt.agentToken });
+    assert.equal(identityLeak.status, 403, '身份泄露仍拒绝');
+  } finally { await closeServers(); await h.close(); }
+});
+
 // ── 6. 静态接线 ────────────────────────────────────────────────────────────
 test('静态接线：端点/工具/示例配置/审计链', () => {
   const bridge = fs.readFileSync(path.join(ROOT, 'src/bridge.js'), 'utf8');
   for (const needle of [
     "url.pathname === '/api/socialV2/send-cross'",
     "normalizeCrossSceneTarget(body.target)",
-    "跨场合投递只允许从主人私聊发起",
+    "跨场合投递只允许由主人本人发起",
     "isCrossSceneTargetAllowed(csCfg, target)",
     "跨场合投递未开启",
     "crossSceneRateBlocked(st.crossSendTimes",
