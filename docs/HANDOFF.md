@@ -33,15 +33,19 @@
 
 ### 验证
 
-- `node plugins/surfcore/scripts/test-screen-watch.mjs` 全绿；`test-pet-api.mjs` 全绿；`scripts/test-purpose-wiring.mjs` 全绿；`test-client-contract.mjs` OK；`node scripts/test-audit.mjs` 全绿（见本次执行结果）。
-- **真机未验证**：代码只在 staging 工作副本 + 离线测试；没同步到 `C:\Users\32372\surfcore`、没重启 DSH、没在真实载体上跑过抽签。
+- `node plugins/surfcore/scripts/test-screen-watch.mjs` 全绿（含新增 §8/§9）；`test-pet-api.mjs` 全绿；`scripts/test-purpose-wiring.mjs` 全绿（含 4 条闸门接线）；`test-client-contract.mjs` OK；`node scripts/test-audit.mjs` **103/104**——唯一失败是 `test-preset-local-tools.mjs` #6：DSH 今天升级后 `schedule_update` / `schedule_delete` 两个工具名已不在已安装工具包里（restrict 名单会静默失效，属 **DSH 升级造成的既有漂移、与本次改动无关**，需下一轮核对工具名，见 PITFALLS #97 同类坑）；`node scripts/test-audit-regressions.mjs` 全绿；`node scripts/doc-numbers.mjs` 已重新生成（bridge.js 行数 18337→18427）。
+- **已同步真机**：`_recon/sync-to-real.mjs`（Node 版，替代 PS 5.1 跑不了的 .ps1）只同步「归一化后内容不同」的 17 个文件（跳过 24 个仅 EOL 不同的，避免整文件 diff 噪声），真实仓库提交 `377f8ea`；在真实仓库里重跑 test-screen-watch / test-pet-api / test-purpose-wiring 全绿。
+- **仍未重启 DSH**：运行中的插件/桥接还是旧代码，用户自己重启后新代码才生效。
+
 - 待验证（重启后）：① 设置页把策略切 leaky 并保存；② 等一次 purpose 出发，`plugin.log` 出现 `[pet-screen] 抽签 …`；③ QQ 载体时观察 `bridge.log` 的 `[目的] 看屏幕后暂不出发` 与 `state/purpose-outreach.json` 的 `lastSkip`；④ 一天内 `kind=leak` 的放行 ≤ `maxLeakPerDay`。
 
 ### 下一步 / 未做
 
-1. `_recon/sync-to-real.ps1 -Mode list|sync|verify` 同步到真机（`config.json` 不同步，需手动补 `purpose.screen` 新字段，或用设置页保存一次）。
+1. ~~同步真机~~ 已做（`_recon/sync-to-real.mjs`，真实仓库 commit `377f8ea`）；`config.json` 未动，新字段走默认值（`interruptPolicy=threshold`）。要启用 leaky：设置页「桌宠 → 看屏幕」切策略并保存（配置立即生效，不用重启）。
 2. 重启 DSH（插件代码改动生效），再按上面 ②③④ 验证；观察 1 周后再调 `rateBelow / maxLeakPerDay`。
+   ⚠️ 注意：`purpose.screen.enabled` 本来就是 true，重启后 **QQ 载体立刻开始走 threshold 硬闸**（可打扰度 <0.3 会被拦、3 分钟后重试）；想直接从概率行为开始，就重启后先切 leaky 再观察。
 3. 回滚：设置页策略切回 threshold（配置立即生效，不需要重启）；代码回退 core/service/pet-purpose/pet-api/bridge/client + 重启 DSH。
+4. **顺手要修（本次发现，未做）**：DSH 今天升级后 `test-preset-local-tools.mjs` #6 红 —— restrict 名单里的 `schedule_update` / `schedule_delete` 在已安装工具包里已不存在，「限制静默失效」；下一轮按新 DSH 工具名对账（PITFALLS #97 同类）。
 
 ### 已知取舍
 
