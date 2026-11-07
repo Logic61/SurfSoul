@@ -205,6 +205,52 @@ console.log('## 6. 音频与发现文件');
   ok(host.version === 1, 'host.json 带协议版本号（桌宠据此判断兼容）');
 }
 
+console.log('## 7. 看屏幕闸门端点（2026-11-07）：QQ 载体通过 pet-api 要决定');
+{
+  const noScreen = await call({ method: 'POST', pathname: '/purpose/screen/decide', headers: jsonPost(), body: '{}' });
+  ok(noScreen.res.statusCode === 503, '没装 screen 服务 → 503（桥接按 fail-open 继续）');
+
+  const callWith = async (instance, { method = 'GET', pathname = '/health', headers = {}, body = null } = {}) => {
+    const req = makeReq({ method, headers, body });
+    const res = makeRes();
+    const url = new URL(`${BASE}${PREFIX}${pathname}`);
+    const pending = instance.handle(req, res, url);
+    req.flush();
+    await pending;
+    let data = null;
+    try { data = JSON.parse(res.body); } catch {}
+    return { res, data };
+  };
+
+  const decisions = [];
+  const screen = {
+    decide: async ({ reason, ownerName }) => {
+      decisions.push({ reason, ownerName });
+      return { allow: false, reason: 'screen-lottery', kind: 'deny', retryMs: 900000, at: 123, p: 0.85, u: 0.93, x: 0.75, degraded: false };
+    },
+    status: () => ({ enabled: true, policy: { interruptPolicy: 'leaky' }, leak: { day: '2026-11-07', count: 0, lastAt: 0 } }),
+  };
+  const apiWithScreen = createPetApiService({
+    chat, purpose, petService, screen, stateDir, currentDshUrl: () => BASE, pluginLog: () => {}, version: 't',
+  });
+  const decided = await callWith(apiWithScreen, {
+    method: 'POST', pathname: '/purpose/screen/decide', headers: jsonPost(),
+    body: '{"reason":"bridge-gate","ownerName":"主人"}',
+  });
+  ok(decided.data?.ok === true && decided.data?.allow === false && decided.data?.reason === 'screen-lottery', 'decide 透传 allow/reason');
+  ok(decided.data?.retryMs === 900000 && decided.data?.p === 0.85, 'decide 透传 retryMs / p');
+  ok(decisions.length === 1 && decisions[0].reason === 'bridge-gate' && decisions[0].ownerName === '主人', 'reason / ownerName 透传给插件');
+  const screenStatus = await callWith(apiWithScreen, { pathname: '/purpose/screen', headers: loopback });
+  ok(screenStatus.data?.screen?.policy?.interruptPolicy === 'leaky', 'GET /purpose/screen 返回策略状态');
+
+  const boom = createPetApiService({
+    chat, purpose, petService, screen: { decide: async () => { throw new Error('boom'); } },
+    stateDir, currentDshUrl: () => BASE, pluginLog: () => {}, version: 't',
+  });
+  const failedDecide = await callWith(boom, { method: 'POST', pathname: '/purpose/screen/decide', headers: jsonPost(), body: '{}' });
+  ok(failedDecide.res.statusCode === 500, 'decide 抛错 → 500（让桥接 fail-open，而不是默认放行）');
+}
+
 fs.rmSync(stateDir, { recursive: true, force: true });
 console.log(failures === 0 ? '\n✅ pet-api 行为回归通过' : `\n❌ ${failures} 项失败`);
 process.exit(failures === 0 ? 0 : 1);

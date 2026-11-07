@@ -20,6 +20,7 @@ import {
   DEFAULT_SCREEN_CONFIG,
   buildScreenVisionPrompt,
   evaluateScreenGate,
+  evaluateScreenPolicy,
   formatScreenVerdict,
   intervalMs,
   normalizeScreenConfig,
@@ -71,6 +72,52 @@ export function createScreenWatchService({
   let lastError = '';
   let lastErrorAt = 0;
   let inFlight = null;
+
+  // ── 打扰概率策略的持久化状态（2026-11-07 leaky）─────────────────────────
+  // 为什么要落盘：screen 拒绝后排程会按 retryMin 反复重试，同一段低可打扰期会反复抽签；
+  // 泄漏次数/冷却不跨 tick 保留，「每天最多漏 1 次」就形同虚设。
+  // 同一张截图（hash+at）复用同一次抽签结果 —— 3 分钟重试不再重抽，概率才不会被重试磨平。
+  const policyFile = path.join(screenDir, 'policy.json');
+  let policyState = null;
+
+  function localDayKey(ms) {
+    const d = new Date(ms);
+    const pad = (n) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  }
+
+  function loadPolicyState(now = Date.now()) {
+    if (!policyState) {
+      try {
+        const raw = JSON.parse(fs.readFileSync(policyFile, 'utf8'));
+        policyState = {
+          day: String(raw?.day || ''),
+          leakCount: Math.max(0, Number(raw?.leakCount) || 0),
+          lastLeakAt: Number(raw?.lastLeakAt) || 0,
+          lastDraw: raw?.lastDraw && typeof raw.lastDraw === 'object' ? raw.lastDraw : null,
+        };
+      } catch {
+        policyState = { day: '', leakCount: 0, lastLeakAt: 0, lastDraw: null };
+      }
+    }
+    const day = localDayKey(now);
+    if (policyState.day !== day) {
+      policyState.day = day;
+      policyState.leakCount = 0;
+      policyState.lastLeakAt = 0;
+      policyState.lastDraw = null;
+    }
+    return policyState;
+  }
+
+  function savePolicyState() {
+    try {
+      fs.mkdirSync(screenDir, { recursive: true });
+      fs.writeFileSync(policyFile, `${JSON.stringify(policyState, null, 2)}\n`, 'utf8');
+    } catch (error) {
+      pluginLog('[pet-screen] 写抽签状态失败：', String(error?.message ?? error).slice(0, 120));
+    }
+  }
 
   function config() {
     let raw = {};
@@ -256,6 +303,86 @@ export function createScreenWatchService({
     return inFlight;
   }
 
+  /**
+   * 决定「这一轮要不要打扰」：看一眼（带节流/缓存）→ 硬闸 + 抽签 → 记录泄漏预算。
+   * 与 gate() 的区别：gate() 是纯阈值视角（设置页展示用），decide() 才会消耗随机数/泄漏预算。
+   *
+   * @param {{ownerName?:string, reason?:string, random?:()=>number, fresh?:boolean}} [options]
+   * @returns {Promise<{allow:boolean,reason:string,kind:string,retryMs:number,verdict:object|null,p:number|null,u:number|null,x:number|null,at:number,degraded:boolean}>}
+   */
+  async function decide({ ownerName = '', reason = 'gate', random = Math.random, fresh = false } = {}) {
+    const cfg = config();
+    if (!cfg.enabled && fresh !== true) {
+      return { allow: true, reason: 'screen-disabled', kind: 'disabled', retryMs: 0, verdict: null, p: null, u: null, x: null, at: Date.now(), degraded: false };
+    }
+    const lookResult = await look({ force: fresh === true, ownerName, reason });
+    const verdict = lookResult?.verdict || null;
+    const now = Date.now();
+    const st = loadPolicyState(now);
+    const lookKey = lookResult?.hash
+      ? `${lookResult.hash}:${Number(lookResult.at) || 0}`
+      : `at:${Number(lookResult?.at) || 0}`;
+    let decision;
+    if (st.lastDraw && st.lastDraw.key === lookKey && st.lastDraw.decision) {
+      // 同一张截图/同一次判定 → 沿用上一次抽签结果，不重抽（3 分钟重试不会把概率磨成必然）。
+      decision = st.lastDraw.decision;
+    } else {
+      const evaluated = evaluateScreenPolicy(verdict, cfg, {
+        random,
+        leakBudget: {
+          used: st.leakCount,
+          lastLeakAt: st.lastLeakAt,
+          maxPerDay: cfg.maxLeakPerDay,
+          cooldownMs: cfg.leakCooldownMin * ONE_MINUTE,
+          now,
+        },
+      });
+      decision = {
+        allow: evaluated.allow === true,
+        reason: evaluated.reason,
+        kind: evaluated.kind,
+        degraded: evaluated.degraded === true,
+        policy: evaluated.policy,
+        p: evaluated.p ?? null,
+        u: evaluated.u ?? null,
+        x: evaluated.x ?? null,
+        budgetBlocked: evaluated.budgetBlocked === true,
+      };
+      if (decision.kind === 'leak') {
+        st.leakCount = Math.max(0, Number(st.leakCount) || 0) + 1;
+        st.lastLeakAt = now;
+      }
+      st.lastDraw = { key: lookKey, at: now, x: decision.x, p: decision.p, u: decision.u, decision };
+      savePolicyState();
+      // 只记分数/概率/随机数，不记画面内容（隐私约定同截图）。
+      if (decision.p !== null) {
+        const score = decision.x === null ? '?' : Number(decision.x).toFixed(2);
+        pluginLog(
+          `[pet-screen] 抽签 ${decision.allow ? '放行' : '拦下'}（${decision.reason}）` +
+          ` x=${score} p=${Number(decision.p).toFixed(2)} u=${Number(decision.u).toFixed(2)}` +
+          (decision.budgetBlocked ? ' · 今日泄漏预算已用完' : ''),
+        );
+      }
+    }
+    let nextRetryMs = 0;
+    if (decision.allow !== true) {
+      const above = decision.x !== null && Number(decision.x) >= cfg.minInterruptible;
+      if (decision.reason === 'screen-lottery' && above) {
+        // ≥阈值但这次抽签没过：snooze 一下，别 3 分钟重抽把 0.85 磨成「必然打扰」。
+        nextRetryMs = cfg.lotterySnoozeMin * ONE_MINUTE;
+      } else {
+        nextRetryMs = retryMs(cfg);
+      }
+    }
+    return {
+      ...decision,
+      retryMs: nextRetryMs,
+      verdict,
+      at: Number(lookResult?.at) || now,
+      configured: true,
+    };
+  }
+
   /** 只取最近一次结果（不做新截图）；调用方用它做门控。 */
   function latest() {
     return last;
@@ -268,6 +395,7 @@ export function createScreenWatchService({
 
   function status() {
     const cfg = config();
+    const st = loadPolicyState();
     return {
       enabled: cfg.enabled,
       intervalMin: cfg.intervalMin,
@@ -276,6 +404,29 @@ export function createScreenWatchService({
       model: cfg.model,
       apiKeyRef: cfg.apiKeyRef,
       failOpen: cfg.failOpen,
+      // 打扰概率策略（2026-11-07）：设置页展示「现在是什么策略 / 最近一次抽签」。
+      policy: {
+        interruptPolicy: cfg.interruptPolicy,
+        rateAbove: cfg.rateAbove,
+        rateBelow: cfg.rateBelow,
+        softBand: cfg.softBand,
+        maxLeakPerDay: cfg.maxLeakPerDay,
+        leakCooldownMin: cfg.leakCooldownMin,
+        lotterySnoozeMin: cfg.lotterySnoozeMin,
+      },
+      leak: { day: st.day, count: st.leakCount, lastAt: st.lastLeakAt || 0 },
+      lastDraw: st.lastDraw
+        ? {
+            at: st.lastDraw.at || 0,
+            x: st.lastDraw.x ?? null,
+            p: st.lastDraw.p ?? null,
+            u: st.lastDraw.u ?? null,
+            allow: st.lastDraw.decision?.allow === true,
+            reason: st.lastDraw.decision?.reason || '',
+            kind: st.lastDraw.decision?.kind || '',
+            budgetBlocked: st.lastDraw.decision?.budgetBlocked === true,
+          }
+        : null,
       last: last
         ? {
             at: last.at,
@@ -299,6 +450,7 @@ export function createScreenWatchService({
     config,
     enabled,
     look,
+    decide,
     latest,
     gate,
     status,

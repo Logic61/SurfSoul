@@ -56,6 +56,24 @@ export const DEFAULT_SCREEN_CONFIG = {
   failOpen: true,
   // 排障才打开：把截图留在 pet/screen/ 下（默认用完即删）。
   keepScreenshots: false,
+  // ── 打扰概率策略（2026-11-07 用户要求：leaky 概率）──────────────────────
+  // threshold = 旧行为：≥阈值必放行、<阈值必拦（纯硬闸）。
+  // leaky     = 双侧抽签：≥阈值按 rateAbove 放行、<阈值按 rateBelow 泄漏。
+  // 实测视觉模型的可打扰度是 0.05 一档（0.25 / 0.30 / 0.35），阈值处是悬崖；
+  // 抽签把「0.25 vs 0.30」的硬切变成高/低两个概率。
+  interruptPolicy: 'threshold',
+  // ≥阈值时单次放行概率（其余这轮先不说，隔 lotterySnoozeMin 再试）。
+  rateAbove: 0.85,
+  // <阈值时的「泄漏」概率：最不该打扰的时刻也保留一点偶然性。
+  rateBelow: 0.05,
+  // 平滑带：0 = 纯分段；>0 时在 [阈值-band, 阈值+band] 之间用 smoothstep 过渡（消悬崖）。
+  softBand: 0,
+  // 泄漏预算：每天最多漏几次 + 两次泄漏的最小间隔（分钟）。
+  // 必须有：screen 拒绝后 nextFireAt 会按 retryMin 反复重试，纯 per-draw 概率会被重试磨成必然。
+  maxLeakPerDay: 1,
+  leakCooldownMin: 90,
+  // 双侧抽签里「≥阈值但抽签没过」建议多久后再试（分钟）；<阈值那侧仍用 retryMin 等更好的时机。
+  lotterySnoozeMin: 15,
 };
 
 const MINUTE = 60_000;
@@ -99,6 +117,14 @@ export function normalizeScreenConfig(input = {}) {
       : [...DEFAULT_SCREEN_CONFIG.blockActivities],
     failOpen: src.failOpen !== false,
     keepScreenshots: src.keepScreenshots === true,
+    // 概率策略：只有显式 "leaky" 才启用，其余一律回落阈值硬闸（默认保持旧行为）。
+    interruptPolicy: src.interruptPolicy === 'leaky' ? 'leaky' : 'threshold',
+    rateAbove: clamp01(src.rateAbove, DEFAULT_SCREEN_CONFIG.rateAbove),
+    rateBelow: clamp01(src.rateBelow, DEFAULT_SCREEN_CONFIG.rateBelow),
+    softBand: clamp01(src.softBand, DEFAULT_SCREEN_CONFIG.softBand),
+    maxLeakPerDay: clampInt(src.maxLeakPerDay, DEFAULT_SCREEN_CONFIG.maxLeakPerDay, 0, 10),
+    leakCooldownMin: clampInt(src.leakCooldownMin, DEFAULT_SCREEN_CONFIG.leakCooldownMin, 0, 1440),
+    lotterySnoozeMin: clampInt(src.lotterySnoozeMin, DEFAULT_SCREEN_CONFIG.lotterySnoozeMin, 1, 180),
   };
 }
 
@@ -274,6 +300,93 @@ export function evaluateScreenGate(verdict, config = DEFAULT_SCREEN_CONFIG) {
   if (cfg.blockActivities.includes(verdict.activity)) return { allow: false, reason: `screen-${verdict.activity}`, degraded: false };
   if (verdict.interruptible < cfg.minInterruptible) return { allow: false, reason: 'screen-low', degraded: false };
   return { allow: true, reason: 'screen-ok', degraded: false };
+}
+
+/** smoothstep：u∈[0,1] → 0..1 的 S 曲线（u 越界先 clamp）。 */
+function smoothstep01(u) {
+  const t = Math.min(1, Math.max(0, u));
+  return t * t * (3 - 2 * t);
+}
+
+/**
+ * 「这一轮打扰」的概率（0~1）：leaky 策略的核心分布函数。
+ *   · softBand = 0（默认）：纯分段 —— x ≥ 阈值 → rateAbove；x < 阈值 → rateBelow。
+ *   · softBand > 0：在 [阈值-band, 阈值+band] 内 smoothstep 过渡（消掉阈值悬崖）。
+ * 阈值策略（interruptPolicy=threshold）不消费这个函数，函数本身仍可被 UI/测试单独调用。
+ */
+export function screenInterruptProbability(interruptible, config = DEFAULT_SCREEN_CONFIG) {
+  const cfg = normalizeScreenConfig(config);
+  const x = clamp01(interruptible, 0.5);
+  const threshold = cfg.minInterruptible;
+  const band = cfg.softBand;
+  if (band > 0) {
+    const u = (x - (threshold - band)) / (2 * band);
+    const s = smoothstep01(u);
+    return clamp01(cfg.rateBelow + (cfg.rateAbove - cfg.rateBelow) * s, cfg.rateBelow);
+  }
+  return x >= threshold ? cfg.rateAbove : cfg.rateBelow;
+}
+
+/**
+ * 带概率的闸门判定（2026-11-07）：在 evaluateScreenGate 的硬闸之上加一层抽签。
+ *
+ * 硬闸（不抽签，永远按原判）：privacy / busy / blockActivities / 关闭 / 看不清(failOpen)。
+ * 软闸（interruptible 阈值）在 leaky 策略下换成概率：
+ *   · x ≥ 阈值：p = rateAbove，u < p 放行（reason=screen-ok），否则 screen-lottery；
+ *   · x < 阈值：p = rateBelow，u < p 记一次「泄漏」（reason=screen-leak），
+ *     但受 leakBudget 约束（每天次数 + 冷却），超了强制拒（reason=screen-leak-budget）。
+ *
+ * 纯函数：随机数可注入（random），泄漏预算由调用方通过 leakBudget 传入（持久化在 service 层）。
+ * @returns {{allow:boolean,reason:string,kind:string,degraded:boolean,p:number|null,u:number|null,x:number|null,above:boolean|null,threshold:number,policy:string,budgetBlocked?:boolean}}
+ */
+export function evaluateScreenPolicy(verdict, config = DEFAULT_SCREEN_CONFIG, { random = Math.random, leakBudget = null } = {}) {
+  const cfg = normalizeScreenConfig(config);
+  const gate = evaluateScreenGate(verdict, cfg);
+  const x = verdict && verdict.ok === true ? clamp01(verdict.interruptible, 0.5) : null;
+  const above = x === null ? null : x >= cfg.minInterruptible;
+  const base = { threshold: cfg.minInterruptible, x, above, p: null, u: null };
+
+  // 关闭 / 看不清 / 硬闸：不抽签，沿用硬闸结论。
+  if (gate.reason !== 'screen-ok' && gate.reason !== 'screen-low') {
+    const kind = gate.allow
+      ? (gate.reason === 'screen-disabled' ? 'disabled' : 'unavailable')
+      : 'hard';
+    return { ...gate, ...base, kind, policy: cfg.interruptPolicy };
+  }
+
+  // 阈值策略：完全保持旧行为（≥阈值必放行、<阈值必拦）。
+  if (cfg.interruptPolicy !== 'leaky') {
+    return { ...gate, ...base, kind: gate.allow ? 'ok' : 'deny', policy: 'threshold' };
+  }
+
+  const p = screenInterruptProbability(x, cfg);
+  // 泄漏预算只约束「低于阈值还想放行」的那一侧；硬闸/高于阈值不受影响。
+  let budgetBlocked = false;
+  if (above === false && leakBudget) {
+    const used = Math.max(0, Number(leakBudget.used) || 0);
+    const max = Math.max(0, Number(leakBudget.maxPerDay ?? cfg.maxLeakPerDay) || 0);
+    const lastLeakAt = Number(leakBudget.lastLeakAt) || 0;
+    const now = Number(leakBudget.now) || Date.now();
+    const cooldownMs = Math.max(0, Number(leakBudget.cooldownMs ?? cfg.leakCooldownMin * MINUTE) || 0);
+    if (used >= max) budgetBlocked = true;
+    else if (lastLeakAt > 0 && now - lastLeakAt < cooldownMs) budgetBlocked = true;
+  }
+  const u = clamp01(random(), 0.5);
+  const pass = u < p && budgetBlocked !== true;
+  const reason = pass
+    ? (above ? 'screen-ok' : 'screen-leak')
+    : (budgetBlocked ? 'screen-leak-budget' : 'screen-lottery');
+  return {
+    allow: pass,
+    reason,
+    kind: pass ? (above ? 'ok' : 'leak') : 'deny',
+    degraded: false,
+    policy: 'leaky',
+    ...base,
+    p,
+    u,
+    budgetBlocked,
+  };
 }
 
 /** 把「看到了什么」写进主动搭话提示词；只放摘要，不放敏感内容。 */

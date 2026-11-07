@@ -389,6 +389,13 @@ confidence = 0.15
 | `screen.minInterruptible` | `0.55` | 视觉模型给的「可打扰度」低于它就这轮不说话 |
 | `screen.blockActivities` | `["gaming","video","meeting"]` | 这些活动一律不搭话 |
 | `screen.failOpen` | `true` | 视觉失败时是否照常搭话（默认放行，避免排程停摆） |
+| `screen.interruptPolicy` | `threshold` | `threshold` = 阈值硬闸（旧行为）；`leaky` = 双侧概率抽签（2026-11-07） |
+| `screen.rateAbove` | `0.85` | leaky 下「≥阈值」时单次放行概率；其余先不说、隔 `lotterySnoozeMin` 再试 |
+| `screen.rateBelow` | `0.05` | leaky 下「<阈值」时的泄漏概率（最不该打扰的时刻也保留偶然性） |
+| `screen.softBand` | `0` | 平滑带：0 = 纯分段；>0 时在 `[阈值-band, 阈值+band]` 内 smoothstep 过渡 |
+| `screen.maxLeakPerDay` | `1` | 每天最多泄漏几次（0 = 不泄漏）；必须配合下面的冷却 |
+| `screen.leakCooldownMin` | `90` | 两次泄漏的最小间隔（分钟）；防 3 分钟重试把概率磨成必然 |
+| `screen.lotterySnoozeMin` | `15` | 「≥阈值但抽签没过」后多久再试（分钟）；<阈值那侧仍用 `retryMin` |
 
 > 改完保存后 **要点「重启 QQ 桥接」**：桥接只在启动时读 `config.json`。
 > 重启后会先看 `nextFireAt`；如果落在安静时段，会排到当天/次日 `quietEnd` 之后。
@@ -409,25 +416,33 @@ confidence = 0.15
 
 所有字段都写进根 `config.json` 的 `purpose`；保存后点底部「重启 QQ 桥接」生效。
 
-### 看屏幕：根据屏幕判断要不要搭话（2026-11-01）
+### 看屏幕：根据屏幕判断要不要搭话（2026-11-01；2026-11-07 起两个载体都接）
 
-载体 = 桌宠时，入口在 设置 → **桌宠** 页的「看屏幕再决定要不要搭话」卡片
-（2026-11-01 按用户要求从「目的」页移过去；「目的」页只保留指路和当前间隔）：
+入口在 设置 → **桌宠** 页的「看屏幕再决定要不要搭话」卡片
+（2026-11-01 按用户要求从「目的」页移过去；「目的」页只保留指路和当前间隔）。
+**载体 = QQ 时同样生效**：桥接在出发前通过 pet-api `/purpose/screen/decide` 向插件要同一个决定
+（截图/视觉/抽签/泄漏预算都在插件侧；调不通按 fail-open 继续排程）。
 
 ```
 每隔 intervalMin 分钟（默认 10；在桌宠页「每隔多久看一眼（分钟）」里改）截一张当前屏幕
   → JPEG 下采样到 maxWidth（默认 1280）
   → 发给配置的视觉模型（默认 DeepSeek `deepseek-flash`：声明支持图片输入），要一个 JSON：
     { summary / activity / busy / interruptible / privacy }
-  → 判定：
+  → 硬闸（永远不打扰，不参与抽签）：
        privacy=sensitive        → 不搭话，摘要也不进提示词
-       busy / 游戏 / 视频 / 会议 → 不搭话
-       interruptible < 阈值      → 不搭话
-       其余                     → 允许，摘要作为「你刚才瞥了一眼屏幕」写进提示词
+       busy / 游戏 / 会议       → 不搭话
+  → 软闸 interruptible（两种策略）：
+       threshold（默认，旧行为）→ interruptible < 阈值 必不打扰，≥阈值 必放行
+       leaky（2026-11-07）     → ≥阈值按 rateAbove(0.85) 放行；<阈值按 rateBelow(0.05) 泄漏；
+                                 泄漏受 maxLeakPerDay/leakCooldownMin 约束（默认每天 1 次、间隔 90 分钟）
+  → 放行时摘要作为「你刚才瞥了一眼屏幕」写进提示词；SILENT 仍是最后一道软出口
 ```
 
 要点：
 
+- **概率是「每次判定」的**：screen 拒绝后排程按 `retryMin` 重试，所以同一张截图复用同一次抽签
+  （`pet/screen/policy.json` 落盘），且「≥阈值但抽签没过」会 snooze `lotterySnoozeMin`（默认 15 分钟），
+  避免高概率被 3 分钟重试磨成必然。
 - **默认关**：截图会离开本机（发给你配置的视觉端点）；开关、模型、端点都在「目的」页的
   「看屏幕再决定要不要搭话」卡片里；密钥只存 DSH 凭据（默认 `DEEPSEEK_API_KEY`），不进配置文件/日志。
 - **省 token 的关思考**：请求带 `thinking:{type:'disabled'}`（DeepSeek：reasoning 0、约 40 completion tokens、~1.3s）

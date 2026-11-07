@@ -135,5 +135,80 @@ await test('关掉总开关：非强制不投递；模式不对也不投递', as
   assert.equal(r2.reason, 'mode');
 });
 
+// ── 看屏幕闸门（2026-11-07）：QQ 载体出发前通过 pet-api 问插件；拒绝就不投递，调不通 fail-open ──
+// 为什么要有这几条：闸门挂在 bridge.js 的目的出发链路里，插件侧看屏幕/抽签再稳，桥接这一跳
+// 断线（host.json 没写、pet-api 没起来、返回格式变了）都会让「QQ 载体不看屏幕」悄悄回退。
+const PET_SCREEN_HOST = JSON.stringify({
+  version: 1,
+  baseUrl: 'http://127.0.0.1:5999',
+  token: 'f'.repeat(48),
+  api: '/dsh-surfcore/pet-api',
+  pluginVersion: 'test',
+  updatedAt: '2026-11-07T00:00:00.000Z',
+});
+const screenGateOptions = (fetchImpl, screen = { enabled: true, retryMin: 10 }) => ({
+  config: {
+    purpose: {
+      enabled: true,
+      // 不落安静时段、不等主人空闲：让「自动轮次」在任意运行时刻都能走到闸门。
+      quietStart: '00:00', quietEnd: '00:00', idleThresholdMs: 0, dailyMax: 4,
+      screen,
+    },
+  },
+  files: { 'dsh/surfcore/pet/host.json': PET_SCREEN_HOST },
+  globals: { fetch: fetchImpl },
+});
+
+const gateUrls = [];
+await test('看屏幕闸门：插件拒绝 → 不建会话/不投递，lastSkip 记 screen-lottery', async (h) => {
+  seedOwner(h);
+  h.purposeState.nextFireAt = 0;
+  h.purposeState.countToday = 0;
+  gateUrls.length = 0;
+  const r = await h.runPurpose({});
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, 'screen-lottery');
+  assert.equal(gateUrls.length, 1, '出发前应向 pet-api 要一次决定');
+  assert.ok(gateUrls[0].endsWith('/dsh-surfcore/pet-api/purpose/screen/decide'), `闸门应走 pet-api：${gateUrls[0]}`);
+  assert.equal(h.calls.created.length, 0, '被闸门拦下时不应创建会话');
+  assert.equal(h.calls.prompts.length, 0, '被闸门拦下时不应投递提示词');
+  assert.equal(h.purposeState.lastSkip?.reason, 'screen-lottery', '拒绝原因要落进状态，便于排障');
+}, screenGateOptions(async (url) => {
+  gateUrls.push(String(url));
+  return {
+    ok: true,
+    status: 200,
+    json: async () => ({ ok: true, allow: false, reason: 'screen-lottery', kind: 'deny', retryMs: 900000, at: Date.now(), p: 0.85, u: 0.93, x: 0.75, degraded: false }),
+  };
+}));
+
+await test('看屏幕闸门：插件放行 → 返回决定对象（allow=true）', async (h) => {
+  const decision = await h.purposeScreenGateDecision();
+  assert.equal(decision?.allow, true);
+  assert.equal(decision?.reason, 'screen-ok');
+}, screenGateOptions(async () => ({
+  ok: true,
+  status: 200,
+  json: async () => ({ ok: true, allow: true, reason: 'screen-ok', kind: 'ok', retryMs: 0, at: Date.now() }),
+})));
+
+await test('看屏幕闸门：pet-api 调不通 → null（fail-open，不阻断排程）', async (h) => {
+  const decision = await h.purposeScreenGateDecision();
+  assert.equal(decision, null);
+}, screenGateOptions(async () => { throw new Error('connect ECONNREFUSED 127.0.0.1:5999'); }));
+
+let disabledFetchCalls = 0;
+await test('看屏幕闸门：screen 关闭时根本不发请求（返回 null）', async (h) => {
+  disabledFetchCalls = 0;
+  const decision = await h.purposeScreenGateDecision();
+  assert.equal(decision, null);
+  assert.equal(disabledFetchCalls, 0);
+}, screenGateOptions(async () => {
+  disabledFetchCalls += 1;
+  throw new Error('should not fetch');
+}, { enabled: false }));
+
 console.log(`\n${failures ? 'FAILED' : 'OK'}（purpose wiring）`);
 process.exitCode = failures ? 1 : 0;
+
+

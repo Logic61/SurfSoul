@@ -548,7 +548,14 @@
         "meeting"
       ],
       "failOpen": true,
-      "keepScreenshots": false
+      "keepScreenshots": false,
+      "interruptPolicy": "threshold",
+      "rateAbove": 0.85,
+      "rateBelow": 0.05,
+      "softBand": 0,
+      "maxLeakPerDay": 1,
+      "leakCooldownMin": 90,
+      "lotterySnoozeMin": 15
     }
   },
   "greetings": {

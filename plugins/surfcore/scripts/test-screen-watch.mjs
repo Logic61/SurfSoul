@@ -11,10 +11,12 @@ import {
   buildChatScreenBlock,
   buildScreenVisionPrompt,
   evaluateScreenGate,
+  evaluateScreenPolicy,
   extractJsonObject,
   formatScreenVerdict,
   normalizeScreenConfig,
   parseScreenVerdict,
+  screenInterruptProbability,
   screenPromptLines,
   wantsScreenLook,
 } from '../lib/screen-watch-core.js';
@@ -318,6 +320,115 @@ console.log('## 7. 宿主服务：节流 / 同画面缓存 / 用量 / fail-open'
   screenConfig = normalizeScreenConfig({ enabled: false });
   const disabled = await createScreenWatchService({ ctx: {}, stateDir, getConfig: () => screenConfig }).look({});
   ok(disabled.reason === 'screen-disabled', '关闭时自动轮次直接返回（不截图）');
+
+  fs.rmSync(stateDir, { recursive: true, force: true });
+}
+
+console.log('## 8. leaky 概率闸门（2026-11-07）：分布函数 / 双侧抽签 / 泄漏预算 / 硬闸不抽签');
+{
+  const v = (patch = {}) => ({ ok: true, summary: 'x', activity: 'working', busy: false, interruptible: 0.8, privacy: 'none', sensitive: '', ...patch });
+  const leaky = normalizeScreenConfig({
+    enabled: true, interruptPolicy: 'leaky', minInterruptible: 0.3, rateAbove: 0.85, rateBelow: 0.05,
+  });
+
+  ok(screenInterruptProbability(0.25, leaky) === 0.05, '低于阈值 → p=rateBelow（泄漏概率）');
+  ok(screenInterruptProbability(0.3, leaky) === 0.85, '等于/高于阈值 → p=rateAbove');
+  ok(screenInterruptProbability(0.85, leaky) === 0.85, '高可打扰度也是 rateAbove（不强制 1）');
+  const smooth = normalizeScreenConfig({ ...leaky, softBand: 0.1 });
+  const mid = screenInterruptProbability(0.3, smooth);
+  ok(Math.abs(mid - 0.45) < 0.001, '平滑带：阈值处 p 落在两端中间（smoothstep 0.5）');
+
+  const thresholdPolicy = normalizeScreenConfig({ enabled: true, minInterruptible: 0.3 });
+  const strictLow = evaluateScreenPolicy(v({ interruptible: 0.2 }), thresholdPolicy, { random: () => 0 });
+  ok(strictLow.allow === false && strictLow.reason === 'screen-low', 'threshold 策略保持旧行为（低分 → 拦）');
+  ok(strictLow.p === null && strictLow.kind === 'deny', 'threshold 策略不抽签（p=null）');
+
+  const abovePass = evaluateScreenPolicy(v({ interruptible: 0.8 }), leaky, { random: () => 0.84 });
+  ok(abovePass.allow === true && abovePass.reason === 'screen-ok' && abovePass.kind === 'ok', 'leaky：≥阈值 u<p → 放行');
+  const aboveDeny = evaluateScreenPolicy(v({ interruptible: 0.8 }), leaky, { random: () => 0.86 });
+  ok(aboveDeny.allow === false && aboveDeny.reason === 'screen-lottery', 'leaky：≥阈值 u≥p → 抽签拦下');
+  const leakPass = evaluateScreenPolicy(v({ interruptible: 0.25 }), leaky, { random: () => 0.04 });
+  ok(leakPass.allow === true && leakPass.reason === 'screen-leak' && leakPass.kind === 'leak', 'leaky：<阈值 u<p → 记一次泄漏放行');
+  const leakDeny = evaluateScreenPolicy(v({ interruptible: 0.25 }), leaky, { random: () => 0.06 });
+  ok(leakDeny.allow === false && leakDeny.reason === 'screen-lottery', 'leaky：<阈值 u≥p → 拦下');
+
+  for (const [label, verdict] of [
+    ['隐私', v({ privacy: 'sensitive' })],
+    ['打游戏', v({ activity: 'gaming' })],
+    ['会议', v({ activity: 'meeting' })],
+  ]) {
+    const d = evaluateScreenPolicy(verdict, leaky, { random: () => 0 });
+    ok(d.allow === false && d.p === null && d.kind === 'hard', `${label} → 硬闸拦下、不抽签`);
+  }
+
+  const budgetDenied = evaluateScreenPolicy(v({ interruptible: 0.25 }), leaky, {
+    random: () => 0,
+    leakBudget: { used: 1, maxPerDay: 1, lastLeakAt: 0, now: Date.now() },
+  });
+  ok(budgetDenied.allow === false && budgetDenied.reason === 'screen-leak-budget' && budgetDenied.budgetBlocked, '泄漏预算用完 → 强制拦下（reason 可观测）');
+  const cooling = evaluateScreenPolicy(v({ interruptible: 0.25 }), leaky, {
+    random: () => 0,
+    leakBudget: { used: 0, maxPerDay: 5, lastLeakAt: Date.now() - 60_000, now: Date.now(), cooldownMs: 90 * 60_000 },
+  });
+  ok(cooling.allow === false && cooling.reason === 'screen-leak-budget', '泄漏冷却期内 → 强制拦下');
+  const aboveBudget = evaluateScreenPolicy(v({ interruptible: 0.8 }), leaky, {
+    random: () => 0.5,
+    leakBudget: { used: 9, maxPerDay: 1, lastLeakAt: Date.now(), now: Date.now() },
+  });
+  ok(aboveBudget.allow === true, '预算只约束低于阈值那侧（≥阈值照常抽签）');
+}
+
+console.log('## 9. 服务层 decide()：抽签状态落盘 / 同图不重抽 / 预算跨重启保留');
+{
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'surfcore-screen-decide-'));
+  const screenConfig = normalizeScreenConfig({
+    enabled: true, intervalMin: 10, interruptPolicy: 'leaky', minInterruptible: 0.3,
+    rateAbove: 0.85, rateBelow: 0.05, maxLeakPerDay: 1, leakCooldownMin: 90,
+  });
+  const makeService = (interruptible = 0.25, cfg = screenConfig) => createScreenWatchService({
+    ctx: { get: () => ({ resolve: async () => ({ value: 'test-key' }) }) },
+    stateDir,
+    getConfig: () => cfg,
+    capture: async () => {
+      const buffer = Buffer.from(`screen-${interruptible}-${Math.random()}-${'x'.repeat(40)}`);
+      return { ok: true, buffer, mediaType: 'image/jpeg', width: 10, height: 10, bytes: buffer.length, ms: 1 };
+    },
+    fetchImpl: async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        choices: [{ message: { content: JSON.stringify({ summary: 'x', activity: 'working', busy: false, interruptible, privacy: 'none' }) } }],
+      }),
+      text: async () => '',
+    }),
+  });
+
+  const s1 = makeService(0.25);
+  const d1 = await s1.decide({ random: () => 0.01 });
+  ok(d1.allow === true && d1.reason === 'screen-leak', 'decide：低分 + u<p → 泄漏放行');
+  ok(d1.retryMs === 0, '放行时 retryMs=0');
+  ok(s1.status().leak.count === 1, '泄漏次数落进状态');
+  const policyFile = path.join(stateDir, 'pet', 'screen', 'policy.json');
+  ok(fs.existsSync(policyFile), '抽签状态写盘（跨重启保留预算）');
+
+  const d2 = await s1.decide({ random: () => 0.99 });
+  ok(d2.allow === true && d2.reason === 'screen-leak', '同一张截图不重抽（换随机数也沿用旧签）');
+  ok(s1.status().leak.count === 1, '复用旧签不重复记泄漏');
+
+  const s2 = makeService(0.25);
+  const d3 = await s2.decide({ random: () => 0.01 });
+  ok(d3.allow === false && d3.reason === 'screen-leak-budget', '新图：今日泄漏预算用完 → 低分强制拦下');
+  ok(d3.retryMs > 0, '拦下时给出重试间隔');
+
+  const s3 = makeService(0.8);
+  const d4 = await s3.decide({ random: () => 0.5 });
+  ok(d4.allow === true && d4.reason === 'screen-ok', '≥阈值不受泄漏预算限制');
+  ok(s3.status().leak.count === 1, '≥阈值放行不算泄漏');
+
+  const thresholdCfg = normalizeScreenConfig({ enabled: true, intervalMin: 10, minInterruptible: 0.3 });
+  const s4 = makeService(0.2, thresholdCfg);
+  const d5 = await s4.decide({ random: () => 0 });
+  ok(d5.allow === false && d5.reason === 'screen-low', 'threshold 策略下 decide 仍是硬阈值（兼容旧行为）');
 
   fs.rmSync(stateDir, { recursive: true, force: true });
 }

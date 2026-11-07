@@ -3724,3 +3724,47 @@ accessToken，随便连），紧接着 `[history] get_friend_msg_history 失败�
 
 **回链**：#81（`qq_send_image` 本机路径无目录白名单）、#88（场景放开模板：路由条件 + 配额 + preset 文案 + 契约测试两边钉）、
 #94（群管理动作不能只靠提示词 + 测试钉住 preset 短句）。
+
+## #104（2026-11-07）「看屏幕」的阈值闸门其实没在生产上消费过（QQ 载体不看屏幕），且概率闸门会被 3 分钟重试磨平
+
+**现象（用户问题）**：用户问「可打扰度大于阈值就打扰还是什么」，并提议做 leaky 概率。排查时发现两件事：
+① 今天桌宠载体 0 次 `[pet-purpose]` 触发、当前载体是 QQ，而 `src/bridge.js` 里没有任何 screen/可打扰度代码
+—— 看屏幕判定在生产上「只采集、不消费」；设置页「这里的主动搭话出发前也会参考那份看屏幕判定」与代码不符。
+② 即使接上，`pet-purpose.js` 在 screen 拒绝后 `nextFireAt = now + retryMin`（本机 3 分钟）会反复重试；
+如果按 per-draw 概率抽签，一天几百次重试会把 `rateBelow=0.05` 的泄漏磨成必然，`rateAbove=0.85` 也会在
+20 分钟内被重试磨成 ~99.9% 放行（概率变成「多久之后打扰」而不是「要不要打扰」）。
+
+**根因**：
+- 2026-11-01 只给桌宠载体的目的机制接了 `evaluateScreenGate`；2026-10-25 起的 QQ 载体目的机制在 `bridge.js` 里，
+  两边是**相互独立的两套出发链路**（共享 purpose 状态文件，但桥接侧没有 screen 依赖）。UI 文案写的是设计意图，不是实现。
+- 视觉模型的可打扰度是 0.05 一档输出（当天 370 次：0.25 有 155 次、0.35 有 101 次），阈值 0.3 正好在悬崖上；
+  用户要的是「把悬崖换成高/低两个概率」，但概率必须和重试语义一起设计。
+
+**修法**（默认关：`interruptPolicy=threshold` 保持旧行为）：
+1. core：新增 `evaluateScreenPolicy()` / `screenInterruptProbability()`：硬闸（privacy、游戏/会议、看不清、关闭）**永远不抽签**；
+   leaky 下 ≥阈值 → `rateAbove`、<阈值 → `rateBelow`（泄漏）；可选 `softBand` 用 smoothstep 消除阈值悬崖。
+2. service：新增 `decide()` = look（节流/缓存）→ 抽签 → 泄漏预算。预算 `maxLeakPerDay=1` / `leakCooldownMin=90`
+   落盘 `pet/screen/policy.json`（跨 DSH 重启）；**抽签结果按 `look.hash+at` 缓存** —— 3 分钟重试沿用旧签不重抽；
+   ≥阈值抽签拒绝给 `lotterySnoozeMin=15`，否则高概率会被重试磨平。`gate()` 保持纯阈值视角（设置页/旧调用方），
+   避免展示状态时消耗随机数与预算。
+3. 两个载体都接：桌宠载体 `pet-purpose.js` 用 `decide()`；QQ 载体在 `bridge.js` 目的出发前调 pet-api
+   `POST /purpose/screen/decide`（`~/.dsh/surfcore/pet/host.json` 发现 + `x-pet-token`，90s 超时，调不通 fail-open）。
+   注意桥接自己的 `STATE_DIR` 是仓库 `state/`，pet host.json 在 `~/.dsh/surfcore/pet/`，**别拼错根**。
+4. pet-api 出错必须回 500；只有 `{"ok":true,"allow":boolean}` 才算有效决定 —— 否则桥接会把「插件没起来」
+   当成放行或拦下（两种都是静默错误）。
+
+**验证**：
+- `node plugins/surfcore/scripts/test-screen-watch.mjs`（新增 §8/§9：分布函数、双侧抽签、硬闸不抽签、预算/冷却、
+  decide 落盘/同图不重抽/预算跨重启/阈值兼容）。
+- `node plugins/surfcore/scripts/test-pet-api.mjs`（§7：无 screen 服务 503、透传 allow/reason/retryMs、抛错 500）。
+- `node scripts/test-purpose-wiring.mjs`（4 条：拒绝不建会话不投递、放行返回决定、调不通 fail-open、关闭不发请求）。
+- `node scripts/test-audit.mjs`（全量离线门禁）。
+- **真机未验证**：未同步真机、未重启 DSH。重启后按 HANDOFF 顶部快照的 ②③④ 验证。
+
+**影响面 / 回滚**：
+- 默认策略 + 默认字段 = 旧行为（`threshold` 下 `decide()` 与旧 `gate()` 判定一致，有测试钉住）。
+- 泄漏预算文件坏了只影响预算（读失败回落 0），不影响截图/判定。
+- 回滚：设置页策略切回 `threshold`（配置立即生效，不需重启）；代码回滚 core/service/pet-purpose/pet-api/bridge/client + 重启 DSH。
+
+**回链**：#95（看屏幕一直不搭话：busy 硬闸 + 阈值）、#103（改行为要同时改测试期望与文档）。
+

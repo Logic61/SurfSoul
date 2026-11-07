@@ -1736,9 +1736,9 @@ F("toolsPath", "bili.mjs 路径", "留空 = 用合体插件自带的 tools/", "t
 
       const last = status?.last;
       const atText = (ms) => (ms ? new Date(ms).toLocaleString("zh-CN", { hour12: false }) : "—");
-      const numRow = (label, key, fallback, hint, { min = 1, max = 180 } = {}) => h(Row, { label, hint },
+      const numRow = (label, key, fallback, hint, { min = 1, max = 180, step = 1 } = {}) => h(Row, { label, hint },
         h("input", {
-          className: "qbw-input", type: "number", min, max,
+          className: "qbw-input", type: "number", min, max, step,
           value: pv(key, fallback),
           onChange: (e) => setS(key, e.target.value === "" ? undefined : Number(e.target.value)),
         }));
@@ -1765,6 +1765,14 @@ F("toolsPath", "bili.mjs 路径", "留空 = 用合体插件自带的 tools/", "t
             ? `最近一次：${atText(last.at)} · ${last.ok ? (last.summary || "（无摘要）") : `失败：${last.error || "不可用"}`}` +
               (last.ok ? ` · 可打扰度 ${last.interruptible === null ? "?" : Number(last.interruptible).toFixed(2)}${last.privacy === "sensitive" ? " · 私人内容" : ""}${last.cached ? " · 复用同一画面" : ""}` : "")
             : "还没有看过屏幕。",
+          status?.lastDraw
+            ? h("div", null,
+              `最近一次抽签：${status.lastDraw.allow ? "放行" : "拦下"}（${status.lastDraw.reason || "—"}）· ` +
+              `可打扰度 ${status.lastDraw.x === null ? "?" : Number(status.lastDraw.x).toFixed(2)} → ` +
+              `p=${status.lastDraw.p === null ? "—" : Number(status.lastDraw.p).toFixed(2)} ` +
+              `u=${status.lastDraw.u === null ? "—" : Number(status.lastDraw.u).toFixed(2)}` +
+              `${status.lastDraw.budgetBlocked ? " · 今日泄漏预算已用完" : ""}`)
+            : null,
           status?.lastError ? h("div", null, `最近错误：${status.lastError}`) : null),
         h("details", { style: { marginTop: "8px" } },
           h("summary", { style: { cursor: "pointer", fontWeight: 600 } }, "视觉模型与截图参数"),
@@ -1776,7 +1784,21 @@ F("toolsPath", "bili.mjs 路径", "留空 = 用合体插件自带的 tools/", "t
             h("input", { className: "qbw-input", value: pv("apiKeyRef", "DEEPSEEK_API_KEY"), onChange: (e) => setS("apiKeyRef", e.target.value) })),
           numRow("截图最大宽度（像素）", "maxWidth", 1280, "越小越省视觉 token；默认 1280", { min: 480, max: 2560 }),
           numRow("JPEG 质量", "quality", 70, "默认 70；40~90", { min: 40, max: 90 }),
-          numRow("可打扰度阈值（0~1）", "minInterruptible", 0.55, "低于这个值就不说话；默认 0.55（想让她多开口可调到 0.3）", { min: 0, max: 1 }),
+          numRow("可打扰度阈值（0~1）", "minInterruptible", 0.55, "低于这个值就不说话；默认 0.55（想让她多开口可调到 0.3）。leaky 策略下这个值就是抽签的分界线", { min: 0, max: 1, step: 0.01 }),
+          h(Row, { label: "打扰概率策略", hint: "threshold = 阈值硬闸（现状）；leaky = 双侧抽签：≥阈值按高概率放行、<阈值按低概率泄漏（2026-11-07）" },
+            h("select", {
+              className: "qbw-select",
+              value: pv("interruptPolicy", "threshold"),
+              onChange: (e) => setS("interruptPolicy", e.target.value),
+            },
+              h("option", { value: "threshold" }, "阈值硬闸（≥阈值必打扰 / <阈值必不打扰）"),
+              h("option", { value: "leaky" }, "概率抽签（leaky：高概率 / 低概率泄漏）"))),
+          pv("interruptPolicy", "threshold") === "leaky" ? h("div", null,
+            numRow("≥阈值时的放行概率", "rateAbove", 0.85, "0~1，默认 0.85；其余这轮先不说，隔「抽签拒绝后再试」分钟重抽", { min: 0, max: 1, step: 0.01 }),
+            numRow("<阈值时的泄漏概率", "rateBelow", 0.05, "0~1，默认 0.05；最不该打扰的时刻也保留一点偶然性", { min: 0, max: 1, step: 0.01 }),
+            numRow("每天最多泄漏几次", "maxLeakPerDay", 1, "默认 1；0 = 完全不泄漏（但 ≥阈值那侧仍可抽签）", { min: 0, max: 10 }),
+            numRow("两次泄漏最小间隔（分钟）", "leakCooldownMin", 90, "默认 90；防 3 分钟重试把概率磨成必然", { min: 0, max: 1440 }),
+            numRow("≥阈值抽签拒绝后再试（分钟）", "lotterySnoozeMin", 15, "默认 15；只作用于「≥阈值但抽签没过」，<阈值那侧仍按「觉得不适合时多久再看」重试", { min: 1, max: 180 })) : null,
           h(Row, { label: "忽略「忙」判定", hint: "默认关。视觉模型把学习/写代码也判成忙（实测 43/45 次拦截是它）；打开后忙只当参考，仍看活动类型和可打扰度" },
             h("input", { className: "qbw-switch", type: "checkbox", checked: S.ignoreBusy === true, onChange: (e) => setS("ignoreBusy", e.target.checked) })),
           h(Row, { label: "视觉失败也照常搭话", hint: "关掉 = 看不了屏幕就不搭话（不推荐：会让排程停摆）" },

@@ -5,6 +5,51 @@
 
 ---
 
+## 快照（2026-11-07 22:2x，看屏幕「leaky 概率闸门」+ QQ 载体接入）
+
+### 用户原话
+
+> 「现在是什么，可打扰度大于阈值就打扰还是什么？我设想的是，做一个 leaky 的概率：如果大于阈值，以一个相对高的概率分布函数抽签看是否打扰，低于的话用一个相对低的。」
+
+拍板：**双侧 leaky**（≥阈值 `rateAbove=0.85`、<阈值 `rateBelow=0.05`）/ **默认关**（`interruptPolicy=threshold` 保持旧行为）/ **桌宠 + QQ 两个载体都接** / 代码先改、重启 DSH 后由用户自己打开。
+
+### 先查了什么（只读）
+
+- 现状不是概率，是硬闸链（`screen-watch-core.js evaluateScreenGate`）：关闭 → 看不清(failOpen) → privacy → busy → blockActivities → `interruptible < minInterruptible`。本机 `minInterruptible=0.3`、`ignoreBusy=true`、`blockActivities=[gaming,meeting]`。
+- 今天 370 次判定的可打扰度分布：0.20:17 / 0.25:155 / 0.30:29 / 0.35:101 / 0.65:2 / 0.70:17 / 0.75:46 / 0.80:3 —— 模型是 0.05 一档输出，阈值 0.3 正好卡在 155 vs 130 的悬崖上。
+- 两个比概率更基本的事实：① 当前载体是 QQ、桌宠没连上（`presence.online=false`），今天 `[pet-purpose]` 触发 0 次，而 `src/bridge.js` **没有任何 screen 相关代码** —— 截图判定在生产上「只采集、不消费」；② 闸门拒绝后 `nextFireAt = now + retryMin`（本机 3 分钟）反复重试，纯 per-draw 概率会被重试磨成必然。
+- 既有约束：SILENT 是 allow 之后第二道软闸；排程本身 ≤4 次/天、2.5–5h 间隔。
+
+### 做了什么
+
+| 类别 | 内容 |
+| --- | --- |
+| core（纯逻辑） | `screen-watch-core.js` 新增 `interruptPolicy`（threshold/leaky，默认 threshold）、`rateAbove/rateBelow`、`softBand`（smoothstep 平滑带，默认 0=纯分段）、`maxLeakPerDay/leakCooldownMin/lotterySnoozeMin`；新增 `screenInterruptProbability()` 与 `evaluateScreenPolicy()`（硬闸不抽签；leaky 下 ≥阈值按 rateAbove、<阈值按 rateBelow 泄漏；预算用完 reason=`screen-leak-budget`）；`evaluateScreenGate()` 原样保留 |
+| service（宿主） | `screen-watch-service.js` 新增 `decide()`：look（节流/缓存）→ 抽签 → 泄漏预算落盘 `~/.dsh/surfcore/pet/screen/policy.json`（跨重启/跨载体共享）；**同一张截图（hash+at）不重抽**（3 分钟重试沿用旧签）；≥阈值抽签拒绝给 `lotterySnoozeMin`，其余拒绝按 retryMin；`status()` 带 policy/lastDraw/leak；`gate()` 保持纯阈值视角（设置页展示/旧调用方） |
+| 桌宠载体 | `pet-purpose.js` 把 `look()+gate()` 换成 `decide()`（保留旧 mock fallback：只有 look/gate 时退回阈值闸门） |
+| QQ 载体 | `pet-api.js` 新增 `POST /purpose/screen/decide`、`GET /purpose/screen`（令牌同 pet-api；出错回 500 让桥接 fail-open）；`src/bridge.js` 目的出发前调它（`purposeScreenGateDecision()`，host.json 发现 → x-pet-token → 90s 超时；调不通只记日志、继续排程；force/preview 不走闸门） |
+| 设置页 | 「桌宠 → 看屏幕」卡片新增策略下拉 + 五个参数（放行概率/泄漏概率/每日上限/冷却/抽签 snooze）+ 最近一次抽签展示；`config.example.json` 补默认段 |
+| 测试 | `test-screen-watch.mjs` 新增 §8（分布函数/双侧抽签/硬闸不抽签/预算/冷却）与 §9（decide 落盘/同图不重抽/预算跨重启/阈值兼容）；`test-pet-api.mjs` §7（503/透传/500）；`test-purpose-wiring.mjs` 4 条（桥接拒绝不投递、放行、调不通 fail-open、关闭不发请求）；`audit-bridge-harness.mjs` 暴露 `purposeScreenGateDecision` |
+
+### 验证
+
+- `node plugins/surfcore/scripts/test-screen-watch.mjs` 全绿；`test-pet-api.mjs` 全绿；`scripts/test-purpose-wiring.mjs` 全绿；`test-client-contract.mjs` OK；`node scripts/test-audit.mjs` 全绿（见本次执行结果）。
+- **真机未验证**：代码只在 staging 工作副本 + 离线测试；没同步到 `C:\Users\32372\surfcore`、没重启 DSH、没在真实载体上跑过抽签。
+- 待验证（重启后）：① 设置页把策略切 leaky 并保存；② 等一次 purpose 出发，`plugin.log` 出现 `[pet-screen] 抽签 …`；③ QQ 载体时观察 `bridge.log` 的 `[目的] 看屏幕后暂不出发` 与 `state/purpose-outreach.json` 的 `lastSkip`；④ 一天内 `kind=leak` 的放行 ≤ `maxLeakPerDay`。
+
+### 下一步 / 未做
+
+1. `_recon/sync-to-real.ps1 -Mode list|sync|verify` 同步到真机（`config.json` 不同步，需手动补 `purpose.screen` 新字段，或用设置页保存一次）。
+2. 重启 DSH（插件代码改动生效），再按上面 ②③④ 验证；观察 1 周后再调 `rateBelow / maxLeakPerDay`。
+3. 回滚：设置页策略切回 threshold（配置立即生效，不需要重启）；代码回退 core/service/pet-purpose/pet-api/bridge/client + 重启 DSH。
+
+### 已知取舍
+
+- 概率是「每次判定」的概率，但 screen 拒绝后每 3 分钟重试 → 单日抽签次数不少；泄漏预算就是给这件事兜底的。≥阈值那侧若没有 snooze，0.85 会在 20 分钟内被重试磨成 ~99.9% 放行，所以加了 `lotterySnoozeMin`。
+- 现在 `purpose.carrier=qq`：桌宠载体那条 `decide()` 路径暂时不会被调用；QQ 载体这条本次已接上，重启后即生效。
+
+---
+
 ## 快照（2026-11-06 18:0x，工具场景放宽 + ownerQQ 归因 + 内部模型审批）
 
 ### 用户原话

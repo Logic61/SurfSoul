@@ -2033,6 +2033,80 @@ async function main() {
     log('[目的] 专注模式开着：暂停自动主动搭话（QQ / 桌宠都不会发；手动试一次仍可用）');
   }
 
+  // ── 看屏幕闸门（2026-11-07）：QQ 载体出发前也要过同一道闸门 ──────────────
+  // 截图 / 视觉判定 / 概率抽签 / 泄漏预算都在插件侧（它本来就每 2 分钟看一眼），
+  // 桥接只通过 pet-api 要一个决定。任何失败都 fail-open（别因为插件没起来就不主动搭话）。
+  const PET_SCREEN_HOST_FILE = path.join(SURFCORE_DIR, 'pet', 'host.json');
+  let petScreenHostCache = { at: 0, host: null };
+  function petScreenHost() {
+    if (Date.now() - petScreenHostCache.at < 30_000) return petScreenHostCache.host;
+    let host = null;
+    try {
+      const raw = readJsonSafe(PET_SCREEN_HOST_FILE, null);
+      const baseUrl = String(raw?.baseUrl ?? '').replace(/\/+$/, '');
+      const token = String(raw?.token ?? '');
+      const api = String(raw?.api ?? '').replace(/\/+$/, '') || '/dsh-surfcore/pet-api';
+      if (baseUrl && token) host = { baseUrl, token, api };
+    } catch {}
+    petScreenHostCache = { at: Date.now(), host };
+    return host;
+  }
+
+  // 每次出发前重读 config.json 的 purpose.screen（30 秒缓存）：开关/参数改了不必重启桥接。
+  let petScreenCfgCache = { at: 0, screen: {} };
+  function purposeScreenConfigNow() {
+    if (Date.now() - petScreenCfgCache.at < 30_000) return petScreenCfgCache.screen;
+    let screen = {};
+    try {
+      const raw = readJsonSafe(PURPOSE_CONFIG_FILE, null);
+      screen = raw?.purpose?.screen && typeof raw.purpose.screen === 'object' ? raw.purpose.screen : {};
+    } catch {}
+    petScreenCfgCache = { at: Date.now(), screen };
+    return screen;
+  }
+
+  let petScreenGateWarnAt = 0;
+  function notePetScreenGateIssue(message) {
+    if (Date.now() - petScreenGateWarnAt < 10 * 60_000) return;
+    petScreenGateWarnAt = Date.now();
+    log(`[目的] 看屏幕闸门不可用（按 fail-open 继续）：${String(message ?? '').slice(0, 160)}`);
+  }
+
+  /**
+   * 向插件要一次「这一轮要不要打扰」的决定。
+   * @returns {Promise<null|{allow:boolean,reason:string,retryMs:number}>} null = 没启用 / 调不通（fail-open）
+   */
+  async function purposeScreenGateDecision() {
+    const screenCfg = purposeScreenConfigNow();
+    if (screenCfg.enabled !== true) return null;
+    const host = petScreenHost();
+    if (!host) {
+      notePetScreenGateIssue('没找到 pet-api 的 host.json（插件还没起来？）');
+      return null;
+    }
+    try {
+      const response = await fetch(`${host.baseUrl}${host.api}/purpose/screen/decide`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-pet-token': host.token },
+        body: JSON.stringify({ reason: 'bridge-gate', ownerName: String(adminIdentity()?.displayName || '').trim() }),
+        signal: AbortSignal.timeout(90 * 1000),
+      });
+      if (!response.ok) {
+        notePetScreenGateIssue(`pet-api HTTP ${response.status}`);
+        return null;
+      }
+      const data = await response.json().catch(() => null);
+      if (!data || data.ok !== true || typeof data.allow !== 'boolean') {
+        notePetScreenGateIssue('pet-api 返回的不是有效决定');
+        return null;
+      }
+      return data;
+    } catch (error) {
+      notePetScreenGateIssue(error?.message ?? error);
+      return null;
+    }
+  }
+
   function savePurposeState() {
     try {
       atomicWriteJson(PURPOSE_FILE, purposeState);
@@ -13311,6 +13385,22 @@ async function main() {
       savePurposeState();
       log('[目的] 这轮没有提炼出可执行的目的，先不打扰');
       return { ok: false, reason: 'no-purpose' };
+    }
+
+    // 看屏幕闸门（2026-11-07）：QQ 载体出发前也要过同一道闸门（截图在插件侧每 2 分钟已经在看）。
+    // 手动「试一次」与预览不走闸门；调用失败一律 fail-open（不看屏幕也不阻断排程）。
+    if (!preview && !force) {
+      const screenDecision = await purposeScreenGateDecision();
+      if (screenDecision && screenDecision.allow !== true) {
+        const retryMs = Number(screenDecision.retryMs) > 0
+          ? Number(screenDecision.retryMs)
+          : Math.max(3, Number(purposeScreenConfigNow()?.retryMin) || 10) * 60 * 1000;
+        const at = Date.now();
+        markPurposeSkip(purposeState, { now: at, reason: screenDecision.reason || 'screen-gate', nextFireAt: at + retryMs });
+        savePurposeState();
+        log(`[目的] 看屏幕后暂不出发：${screenDecision.reason || 'screen-gate'}（${Math.round(retryMs / 60000)} 分钟后再试）`);
+        return { ok: false, reason: screenDecision.reason || 'screen-gate', screen: screenDecision };
+      }
     }
 
     const token = currentMode === 'reserved2' ? String(st.agentToken || '') : '';

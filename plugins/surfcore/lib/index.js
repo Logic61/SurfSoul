@@ -228,6 +228,8 @@ export function apply(ctx) {
     chat: petChat,
     purpose: petPurpose,
     petService,
+    // 看屏幕闸门（2026-11-07）：QQ 载体出发前通过 pet-api /purpose/screen/decide 要决定。
+    screen: screenWatch,
     stateDir: STATE_DIR,
     currentDshUrl,
     pluginLog,

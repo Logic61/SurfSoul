@@ -4,6 +4,35 @@
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 发布规则见 [docs/guides/VERSIONS.md](docs/guides/VERSIONS.md)。
 
+## [未发布] - 2026-11-07（看屏幕 leaky 概率闸门 + QQ 载体接入）
+
+### 新增
+
+- **看屏幕「leaky 概率闸门」**（默认关，`purpose.screen.interruptPolicy=threshold` 保持旧行为）：用户原话「可打扰度大于阈值就
+  打扰还是什么…我设想的是做一个 leaky 的概率，大于阈值以相对高的概率抽签、低于用相对低的」。`plugins/surfcore/lib/screen-watch-core.js`
+  新增 `interruptPolicy`（threshold/leaky）、`rateAbove`（默认 0.85）、`rateBelow`（默认 0.05，泄漏）、`softBand`（可选的
+  smoothstep 平滑带）、`maxLeakPerDay`（默认 1）、`leakCooldownMin`（默认 90）、`lotterySnoozeMin`（默认 15）；新增
+  `screenInterruptProbability()` / `evaluateScreenPolicy()`：硬闸（privacy、游戏/会议、看不清、关闭）**永远不抽签**。
+- **`screen-watch-service.decide()`**：look（节流/缓存）→ 抽签 → 泄漏预算落盘 `~/.dsh/surfcore/pet/screen/policy.json`
+  （跨重启、跨载体共享）；同一张截图（`hash+at`）**不重抽**，3 分钟重试沿用旧签；≥阈值抽签拒绝按 `lotterySnoozeMin` snooze，
+  其余按 `retryMin`。`status()` 增加 policy / lastDraw / leak；`gate()` 保持纯阈值视角。
+- **QQ 载体接入同一条闸门**：`pet-api` 新增 `POST /purpose/screen/decide` 与 `GET /purpose/screen`；`src/bridge.js` 目的出发前
+  通过 `~/.dsh/surfcore/pet/host.json` + `x-pet-token` 调 pet-api 要决定（90s 超时），调不通/非有效决定一律 fail-open；
+  手动「试一次」与预览不走闸门。此前 `bridge.js` 没有任何 screen 相关代码（看屏幕判定只在桌宠载体生效）。
+- **设置页**「桌宠 → 看屏幕」卡片新增策略下拉与五个参数输入 + 最近一次抽签展示；`config.example.json` 补默认段。
+
+### 测试
+
+- `plugins/surfcore/scripts/test-screen-watch.mjs` 新增 §8（分布函数/双侧抽签/硬闸不抽签/泄漏预算/冷却）与 §9
+  （decide 落盘/同图不重抽/预算跨重启/阈值策略兼容）；`test-pet-api.mjs` §7（无服务 503、透传、抛错 500）；
+  `scripts/test-purpose-wiring.mjs` 新增 4 条桥接接线用例（拒绝不投递、放行、调不通 fail-open、关闭不发请求）；
+  `scripts/audit-bridge-harness.mjs` 暴露 `purposeScreenGateDecision`。
+
+### 文档
+
+- `docs/HANDOFF.md` 顶部快照、`docs/PITFALLS.md` **#104**、`docs/guides/PURPOSE_OUTREACH.md` 配置表与看屏幕章节。
+- **真机未验证**（未同步真机、未重启 DSH）；生效步骤见 HANDOFF 顶部快照。
+
 ## [未发布] - 2026-11-06（工具场景放宽 + ownerQQ 归因 + 内部模型审批）
 
 ### 新增

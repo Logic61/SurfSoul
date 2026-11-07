@@ -30,7 +30,7 @@ const PET_BODY_LIMIT = 256 * 1024;
  * @param {() => string} opts.currentDshUrl   DSH 当前 Web 地址
  * @param {(msg:string, ...args:any[])=>void} [opts.pluginLog]
  */
-export function createPetApiService({ chat, purpose, petService, stateDir, currentDshUrl, pluginLog = () => {}, version = '' }) {
+export function createPetApiService({ chat, purpose, petService, screen = null, stateDir, currentDshUrl, pluginLog = () => {}, version = '' }) {
   const root = path.join(stateDir, 'pet');
   const hostFile = path.join(root, 'host.json');
   let lastHostWrite = 0;
@@ -143,6 +143,42 @@ export function createPetApiService({ chat, purpose, petService, stateDir, curre
     // （以及本地排障）用的同一份能力，令牌与其它 pet-api 一样。
     if (req.method === 'GET' && suffix === '/purpose/status') {
       json(res, 200, purpose?.status ? purpose.status() : { ok: false, error: 'purpose 服务不可用' });
+      return;
+    }
+    // 看屏幕闸门（2026-11-07）：QQ 载体出发前由桥接调用。截图/视觉/抽签/泄漏预算都在插件侧
+    // （插件每 2 分钟已经在看），桥接只要一个决定；任何异常返回非 200，让桥接按 fail-open 继续。
+    if (req.method === 'GET' && suffix === '/purpose/screen') {
+      json(res, 200, { ok: true, screen: screen?.status ? screen.status() : null });
+      return;
+    }
+    if (req.method === 'POST' && suffix === '/purpose/screen/decide') {
+      if (typeof screen?.decide !== 'function') {
+        json(res, 503, { ok: false, error: 'screen 服务不可用（插件版本太旧？）' });
+        return;
+      }
+      let body = {};
+      try { body = JSON.parse((await readBody(req, PET_BODY_LIMIT)) || '{}'); } catch {}
+      try {
+        const decision = await screen.decide({
+          ownerName: String(body?.ownerName ?? '').slice(0, 40),
+          reason: String(body?.reason ?? 'bridge-gate').slice(0, 40),
+        });
+        json(res, 200, {
+          ok: true,
+          allow: decision?.allow === true,
+          reason: String(decision?.reason ?? ''),
+          kind: String(decision?.kind ?? ''),
+          retryMs: Number(decision?.retryMs) || 0,
+          at: Number(decision?.at) || 0,
+          p: decision?.p ?? null,
+          u: decision?.u ?? null,
+          x: decision?.x ?? null,
+          degraded: decision?.degraded === true,
+        });
+      } catch (error) {
+        // 不泄露细节；桥接拿到非 200 就 fail-open。
+        json(res, 500, { ok: false, error: String(error?.message ?? error).slice(0, 120) });
+      }
       return;
     }
     if (req.method === 'POST' && suffix === '/purpose/preview') {

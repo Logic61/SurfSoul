@@ -475,20 +475,27 @@ export function createPetPurposeService({ chat, tokenBudget = null, pluginLog = 
         }
       }
 
-      // 看屏幕（2026-11-01）：自动轮次在真正要出发前先看一眼屏幕，判断此刻适不适合打扰。
-      // 视觉/截图失败按 fail-open 继续（不能因为看不了屏幕就永远不说话）。
+      // 看屏幕（2026-11-01；2026-11-07 起由 gate() 换成 decide()）：
+      // 自动轮次在真正要出发前先看一眼屏幕，由 screen.decide() 一次完成「截图（带节流）/ 视觉判定 /
+      // 硬闸 / 概率抽签 / 泄漏预算」。硬闸（隐私、游戏/会议）不参与抽签；视觉失败按 fail-open 继续。
       let screenVerdict = null;
       if (!previewOnly && force !== true && screen?.enabled?.()) {
         try {
-          const look = await screen.look({ ownerName: chat.ownerInfo().name, reason: 'purpose-gate' });
-          const gate = screen.gate();
-          const verdict = look?.verdict || null;
-          if (!gate.allow) {
-            const retry = screen.retryMs?.() || 10 * MINUTE;
-            markPurposeSkip(state, { now, reason: gate.reason, nextFireAt: now + retry });
+          const decision = typeof screen.decide === 'function'
+            ? await screen.decide({ ownerName: chat.ownerInfo().name, reason: 'purpose-gate' })
+            : (() => {
+              // 兼容注入的旧 mock（只有 look/gate）：行为退回纯阈值闸门。
+              const gate = screen.gate();
+              return { ...gate, verdict: screen.latest?.()?.verdict || null, retryMs: screen.retryMs?.() || 10 * MINUTE };
+            })();
+          const verdict = decision?.verdict || null;
+          if (decision?.allow !== true) {
+            const retry = Number(decision.retryMs) > 0 ? Number(decision.retryMs) : (screen.retryMs?.() || 10 * MINUTE);
+            const at = Date.now();
+            markPurposeSkip(state, { now: at, reason: decision.reason, nextFireAt: at + retry });
             saveState(state);
-            pluginLog(`[pet-purpose] 看屏幕后暂不出发：${gate.reason}（${screen.formatVerdict?.(verdict) || ''}）`);
-            return { ok: false, reason: gate.reason, screen: { gate, verdict } };
+            pluginLog(`[pet-purpose] 看屏幕后暂不出发：${decision.reason}（${screen.formatVerdict?.(verdict) || ''}）`);
+            return { ok: false, reason: decision.reason, screen: { gate: decision, verdict } };
           }
           if (verdict?.ok) screenVerdict = verdict;
         } catch (error) {

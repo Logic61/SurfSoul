@@ -291,6 +291,8 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     },
     // 目的机制：测试可只读预览 / 手动触发 / 模拟回合回执（不连真 QQ）。
     runPurpose, purposeState, notePurposeTurnEnded, notePurposeOutbound, startPurposeLoop, warmPurposeState,
+    // 看屏幕闸门（2026-11-07）：QQ 载体出发前通过 pet-api 要决定；测试可直接断言 fetch 失败时 fail-open。
+    purposeScreenGateDecision,
     // 对话收尾判断：测试可直接调内部函数（不连真 QQ）。
     closeConversationV2, assessClosureV2, closureConfigV2, closureSuppressesWake, noteClosureReopenV2,
     // 收尾后换会话（2026-11-01）：测试可检查挂起的定时器并手动清掉，避免 5s 后真的触发。
