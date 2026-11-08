@@ -1,21 +1,23 @@
-# SurfCore Fork — 基于 surfcore 的本地大改版
+# SurfSoul — 基于 SurfCore 的本地大改版（QQ × B站 × 桌宠）
 
-> 本仓库是 [Mieksido/surfcore](https://github.com/Mieksido/surfcore) 的**非官方衍生版（fork）**，与上游维护者无关，也未获上游背书。
+> **本仓库叫 SurfSoul**（[github.com/Logic61/SurfSoul](https://github.com/Logic61/SurfSoul)）：它是 [Mieksido/surfcore](https://github.com/Mieksido/surfcore)（下称 **SurfCore**）的**非官方衍生版（fork）**，与 SurfCore 维护者无关，也未获上游背书。
 >
-> - **分叉点：上游 v0.6.22（2026-10-28，MIT）**，commit `d7f6b33`（与上游同 tag 是同一个 commit）；
+> - **分叉点：SurfCore v0.6.22（2026-10-28，MIT）**，commit `d7f6b33`（与上游同 tag 是同一个 commit）；
 > - 分叉后本地累计 **56 个提交**（作者 `logic`，2026-10-30 ~ 2026-11-07），新增 65 个文件、修改 122 个文件；
 > - **版本号仍沿用 `0.6.22`**（未跟随上游 bump，`package.json` 未改）；上游同期已独立走到 **v0.8.9**（2026-11-07）；
-> - 上游的问题/功能请求请回[原仓库](https://github.com/Mieksido/surfcore)；本衍生版的问题、改动请找本仓库维护者；
+> - SurfCore 的问题/功能请求请回[原仓库](https://github.com/Mieksido/surfcore)；SurfSoul 的问题、改动请找 SurfSoul 维护者；
 > - 许可仍为 **MIT**，`LICENSE` 原样保留上游版权声明（`Copyright (c) 2026 Derpyu520 and qq-bridge / QSH contributors`）。
 >
-> **一句话**：这不是「原版加几个补丁」，而是从 v0.6.22 另起一条线（+56 提交、净 +30,724 / −1,267 行）——权限模型、记忆体系、工具面、桌宠/看屏幕、语音、工程门禁都做了大改。
+> **一句话**：SurfSoul 不是「SurfCore 加几个补丁」，而是从 v0.6.22 另起一条线（+56 提交、净 +30,724 / −1,267 行）——权限模型、记忆体系、工具面、桌宠/看屏幕、语音、工程门禁都做了大改。
+>
+> **名称对照**：**SurfSoul = 本仓库/本衍生版**（对外名称，仓库 [Logic61/SurfSoul](https://github.com/Logic61/SurfSoul)）；**SurfCore = 上游原项目**（[Mieksido/surfcore](https://github.com/Mieksido/surfcore)）。仓库内部标识仍是 `surfcore`（npm 包名、DSH 插件行 id、preset 里的 `surfcore/*` 说明符、`~/.dsh/surfcore` 状态目录、环境变量 `SURFCORE_ROOT`；DSH 设置页里目前也仍显示「SurfCore」）——这是 DSH 绑定与向后兼容、以及 UI 暂未改名的事实，**不随对外名称改**。
 
 ---
 
 ## 目录
 
 - [一、与原仓库的关系](#一与原仓库的关系)
-- [二、这个 fork 是什么](#二这个-fork-是什么)
+- [二、SurfSoul 是什么](#二surfsoul-是什么)
 - [三、差异总览（12 个主题）](#三差异总览12-个主题)
 - [四、新增功能（按主题）](#四新增功能按主题)
 - [五、行为改动：权限与安全模型](#五行为改动权限与安全模型)
@@ -31,7 +33,8 @@
 
 | 项 | 值 |
 | --- | --- |
-| 上游 | [Mieksido/surfcore](https://github.com/Mieksido/surfcore)（MIT） |
+| 上游 | [Mieksido/surfcore](https://github.com/Mieksido/surfcore)（MIT，下称 **SurfCore**） |
+| 本仓库 | **SurfSoul** — [github.com/Logic61/SurfSoul](https://github.com/Logic61/SurfSoul)；内部包名/插件 id 仍为 `surfcore`（见上方「名称对照」） |
 | 分叉点 | **v0.6.22**（2026-10-28），commit `d7f6b33`（与上游 v0.6.22 tag 同一 commit） |
 | 本地 HEAD | `060796c`（2026-11-07） |
 | 分叉后本地提交 | **56 个**（作者 `logic`，2026-10-30 ~ 2026-11-07；`git rev-list --count v0.6.22..HEAD`） |
@@ -41,15 +44,15 @@
 | 标签情况 | 本地只有 `v0.6.22` 一个 tag；上游共 **79 个** tag（含 v0.6.0–v0.8.9 与 dev 预发布） |
 | 版本策略 | **仍写 0.6.22**，不跟上游版本号比较；见 [§十](#十维护策略) |
 | 许可证 | MIT（`LICENSE` 原样保留上游版权声明） |
-| 演进关系 | v0.6.22 是共同祖先，之后**两条线独立演进**：上游继续 0.7.x / 0.8.x，本 fork 从 v0.6.22 往前改自己的方向 |
+| 演进关系 | v0.6.22 是共同祖先，之后**两条线独立演进**：上游继续 0.7.x / 0.8.x，SurfSoul 从 v0.6.22 往前改自己的方向 |
 
-> ⚠️ 不要用「落后上游 34 个版本」理解本仓库：本地没有 merge 过上游 v0.7.0–v0.8.9 的任何提交，两边是**分叉后的两条独立线**，差异是功能取向不同，不是简单的版本落后。具体缺什么见 [§六](#六与上游当前版-v089-的差异)。
+> ⚠️ 不要用「落后上游 34 个版本」理解 SurfSoul：本地没有 merge 过上游 v0.7.0–v0.8.9 的任何提交，两边是**分叉后的两条独立线**，差异是功能取向不同，不是简单的版本落后。具体缺什么见 [§六](#六与上游当前版-v089-的差异)。
 
 ---
 
-## 二、这个 fork 是什么
+## 二、SurfSoul 是什么
 
-一句话：**这是一个把 surfcore 往「更像真人、更敢在群里干活、但权限收得更硬」方向推的个人向大改版。**
+一句话：**这是一个把 SurfCore 往「更像真人、更敢在群里干活、但权限收得更硬」方向推的个人向大改版。**
 
 相比原版 v0.6.22，它主要多了这些方向的能力：
 
@@ -80,7 +83,7 @@
 
 > 口径：按「提交归属」把 56 个提交归入唯一主域，行数为毛增删（同一文件反复改动会累加，故合计略大于整仓净 diff；12 域合计 +31,531 / −2,074）。逐主题的提交清单与改动行数可用 `git show <hash> --stat` 直接核对。
 
-| # | 领域 | 原版 v0.6.22 | 本 fork 现在 | 关键提交 / 文件 |
+| # | 领域 | 原版 v0.6.22 | SurfSoul 现在 | 关键提交 / 文件 |
 | ---: | --- | --- | --- | --- |
 | 1 | **QQ 权限/审批/出站闸门** | 本机/账号级/群管理动作只认「主人私聊」；无审批；无好友申请/禁言/跨场合/出站评审 | 「主人本人触发的回合」临时可用 + **逐次内部模型审批**（fail-closed）+ 审批流水/安全姿态；好友申请、群管理、跨场合、发送前评审全新增 | `fb99c7a` `0c2705b` `5565afb`；`src/turn-trigger.js`、`plugins/surfcore/qq-owner-approval.mjs` |
 | 2 | **QQ 桥接核心/运维** | token 失配后全天 401 直到人工重启；断线期间消息补不回；每轮重发全量记忆卡；收尾即换会话 | 401 自愈重试；断线按旧水位 60/240/600s 幂等补历史；唤醒提示瘦身 45%；收尾后静置 5 分钟再换 session | `82ed8dc` `231ad32` `e3e1064` `a8bce77`；`src/bridge.js`、`src/conversation-closure.js` |
@@ -91,7 +94,7 @@
 | 7 | **看屏幕** | **完全没有 screen 代码** | 截屏 → 视觉判定 `{summary,activity,busy,interruptible,privacy}` → 决定要不要搭话；阈值 / **leaky 概率**双策略；桌宠 + QQ 两条载体共享同一闸门 | `377f8ea` `1df9b9f`；`plugins/surfcore/lib/{screen-capture,screen-watch-core,screen-watch-service}.js` |
 | 8 | **语音** | 合成超时被中文正则兜底成 HTTP 400，模型反复重试 | 失败结构化（超时 504 / 连不上 502 / 空音频 502）+ 耗时日志 + 改回文字提示；本机 TTS 预算 60s → 150s | `e16afcf` `8c34578`；`src/voice-tts.js`、`docs/cases/2026-10-31-voice-tts-timeout.md` |
 | 9 | **控制台/设置页** | 语音目录被旧草稿覆盖；切角色写错人格卡；保存成功显示红字；深色主题不可读 | 统一走草稿/warn 通道；切角色后重读人格卡；坏配置自动隔离 `.corrupt-<ts>`；深色主题 token 化；`/api/browse` 去掉 PowerShell 注入面 | `262010d` `e6b157e`；`public/console.html`、`plugins/surfcore/lib/{client,store}.js` |
-| 10 | **更新/打包** | 批量更新只落地最后一个 job；`ensureSession` 失败被缓存成 ready；只有仓库模式安装 | 更新改 jobs 队列逐 job 幂等落地、失败下 tick 重试；另提供 **Layout B 自包含 DSH 插件包**（整仓库即 npm 包，见 [§七 B](#b-自包含-dsh-插件包本-fork-新增建议优先)） | `246ca09`；`scripts/apply-update.mjs`、`plugins/surfcore/package.json` |
+| 10 | **更新/打包** | 批量更新只落地最后一个 job；`ensureSession` 失败被缓存成 ready；只有仓库模式安装 | 更新改 jobs 队列逐 job 幂等落地、失败下 tick 重试；另提供 **Layout B 自包含 DSH 插件包**（整仓库即 npm 包，见 [§七 B](#b-自包含-dsh-插件包surfsoul-新增建议优先)） | `246ca09`；`scripts/apply-update.mjs`、`plugins/surfcore/package.json` |
 | 11 | **安全/审计** | 唤醒为什么没醒只能翻日志；安全状态散落各处；MCP 可直连 OneBot 写动作 | 唤醒决策流水 + 安全姿态一屏 + 重启恢复唤醒 + OneBot 只读边界（5 个只读动作 + 运行时断言）+ 隐私闸私钥死循环 P0 修复 | `ccc177d` `cee8797` `9e44eec`；`src/{wake-decisions,onebot-readonly}.js`、`lib/privacy.js` |
 | 12 | **文档与内部工具** | 文档里的数字靠手写，漂过「3 个 MCP server / 15,000 行 / 47 个工具」 | `npm run docs:numbers` 生成 `CURRENT-NUMBERS.md` + 校验测试；`state:usage` / `config:check` 只读报表 | `f6be196` `7aab19a`；`scripts/{doc-numbers,state-usage,config-check}.mjs` |
 
@@ -103,7 +106,7 @@
 
 ### 4.1 权限模型：主人回合归因 + 内部模型审批
 
-原版把「本机执行 / 账号级动作 / 群管理」锁死在 `private:<ownerQQ>`（主人私聊）；本 fork 放宽为「**本回合的触发消息发送者是 ownerQQ 本人**」时临时可用，并在 DSH 插件层对每次特权调用做**内部模型审批**。授权只认桥接按真实 `event.user_id` 写下的归因事实（模型无法伪造），审批只是启发式安全层。
+原版把「本机执行 / 账号级动作 / 群管理」锁死在 `private:<ownerQQ>`（主人私聊）；SurfSoul 放宽为「**本回合的触发消息发送者是 ownerQQ 本人**」时临时可用，并在 DSH 插件层对每次特权调用做**内部模型审批**。授权只认桥接按真实 `event.user_id` 写下的归因事实（模型无法伪造），审批只是启发式安全层。
 
 | 能力 | 是什么 | 入口（设置/工具/配置） | 证据文件 |
 | --- | --- | --- | --- |
@@ -139,7 +142,7 @@
 
 ### 4.4 场合作用域与受控跨场合投递
 
-原版「记忆共同、分清场合」只靠提示词自律；本 fork 落成结构化作用域，并新增一条默认关闭的跨场合投递通道。
+原版「记忆共同、分清场合」只靠提示词自律；SurfSoul 落成结构化作用域，并新增一条默认关闭的跨场合投递通道。
 
 | 能力 | 是什么 | 入口（设置/工具/配置） | 证据文件 |
 | --- | --- | --- | --- |
@@ -148,7 +151,7 @@
 
 ### 4.5 发送前评审
 
-原版没有出站评审；本 fork 把评审搬进桥接，在 `send-message` / `send-burst` 真正发送前先打分，低于阈值**不发**，把理由作为工具错误回给模型改写——修掉「回合结束才评审 → 已发出的消息只能补一条更正版」造成的连发。
+原版没有出站评审；SurfSoul 把评审搬进桥接，在 `send-message` / `send-burst` 真正发送前先打分，低于阈值**不发**，把理由作为工具错误回给模型改写——修掉「回合结束才评审 → 已发出的消息只能补一条更正版」造成的连发。
 
 | 能力 | 是什么 | 入口（设置/工具/配置） | 证据文件 |
 | --- | --- | --- | --- |
@@ -159,7 +162,7 @@
 
 ### 4.6 看屏幕与桌宠目的机制
 
-原版**没有任何 screen 代码**；本 fork 新增「截屏 → 视觉判定 → 决定要不要主动搭话」，并把桌宠的目的机制收口。
+原版**没有任何 screen 代码**；SurfSoul 新增「截屏 → 视觉判定 → 决定要不要主动搭话」，并把桌宠的目的机制收口。
 
 | 能力 | 是什么 | 入口（设置/工具/配置） | 证据文件 |
 | --- | --- | --- | --- |
@@ -210,15 +213,15 @@
 | state 治理 | `state/` 恢复「只放桥接运行时数据」：本机把 DSH 会话工作区根移出 `state/`（新会话生效，旧工作区保留待人工清）；`state:usage` 报表只读、不删任何东西 | `npm run state:usage` | `scripts/state-usage.mjs`、`docs/PITFALLS.md` #100 |
 | 更新器 P1 | 批量更新只落地最后一个 → 改 jobs 队列逐 job 幂等落地；`ensureSession` 创建失败不再缓存成 ready | 自动（更新卡片） | `scripts/apply-update.mjs`、`plugins/surfcore/lib/updates.js` |
 | 控制台稳定性 | 语音目录草稿覆盖、切角色写错人格卡、保存红字、深色主题不可读等一批 P1 修复 | 设置页/控制台 | `public/console.html`、`plugins/surfcore/lib/{client,store}.js` |
-| 打包 | 提供 **Layout B「整仓库即 npm 包」** 的自包含 DSH 插件包：包内带 `plugins/surfcore/`、`src/`、4 个 MCP server、`scripts/setup-plugin.mjs`；不再依赖 fork 仓库目录与仓库根 `node_modules` | 产物 `dist/plugin/surfcore-0.6.22-fork-plugin.tgz`；安装见 [§七 B](#b-自包含-dsh-插件包本-fork-新增建议优先) | `scripts/setup-plugin.mjs`、`plugins/surfcore/package.json` |
+| 打包 | 提供 **Layout B「整仓库即 npm 包」** 的自包含 DSH 插件包：包内带 `plugins/surfcore/`、`src/`、4 个 MCP server、`scripts/setup-plugin.mjs`；不再依赖 fork 仓库目录与仓库根 `node_modules` | 产物 `dist/plugin/surfcore-0.6.22-fork-plugin.tgz`；安装见 [§七 B](#b-自包含-dsh-插件包surfsoul-新增建议优先) | `scripts/setup-plugin.mjs`、`plugins/surfcore/package.json` |
 
 ---
 
 ## 五、行为改动：权限与安全模型
 
-这一节是本 fork 最需要「先读懂再装」的部分。
+这一节是 SurfSoul 最需要「先读懂再装」的部分。
 
-| 维度 | 原版 v0.6.22 | 本 fork 现在 | 回滚方式 |
+| 维度 | 原版 v0.6.22 | SurfSoul 现在 | 回滚方式 |
 | --- | --- | --- | --- |
 | 本机工具权限 | 只有 `private:<ownerQQ>`（主人私聊）可用 | 主人私聊 **或** reserved2 下「主人本人触发的回合」临时可用，且逐次过内部模型审批（fail-closed） | `socialV2.toolApproval.enabled=false` |
 | 群友权限 | 群友没有特权工具 | **不变**：群友自己触发的回合对本地/账号级/群管理工具直接 deny（有意从严）；主人触发回合里群友追加的要求不算授权 | — |
@@ -240,13 +243,13 @@
 
 ## 六、与上游当前版 v0.8.9 的差异
 
-上游在 v0.6.22 之后独立发布了 **34 个正式 Release**（v0.7.0–v0.7.23 共 24 个 + v0.8.0–v0.8.9 共 10 个，另有 13 个 `-dev` 预发布），累计 **491 个文件 / +82,718 / −30,968 行**；本 fork 同期是 **56 个提交 / 187 个文件 / +30,724 / −1,267 行**。
+上游在 v0.6.22 之后独立发布了 **34 个正式 Release**（v0.7.0–v0.7.23 共 24 个 + v0.8.0–v0.8.9 共 10 个，另有 13 个 `-dev` 预发布），累计 **491 个文件 / +82,718 / −30,968 行**；SurfSoul 同期是 **56 个提交 / 187 个文件 / +30,724 / −1,267 行**。
 
-> 两条线方向不同：上游把产品往「可安装、可更新、可计费、省 token 的本地 AI 陪伴应用」推；本 fork 往「QQ 人格/记忆/权限/表达 + 桌宠看屏幕」深挖。**本地不是落后 34 个版本，而是 v0.6.22 的双向分叉。**
+> 两条线方向不同：上游把产品往「可安装、可更新、可计费、省 token 的本地 AI 陪伴应用」推；SurfSoul 往「QQ 人格/记忆/权限/表达 + 桌宠看屏幕」深挖。**本地不是落后 34 个版本，而是 v0.6.22 的双向分叉。**
 
-### 6.1 本地没有跟进的（上游有、本 fork 没有）
+### 6.1 本地没有跟进的（上游有、SurfSoul 没有）
 
-| 上游能力 | 上游实现证据 | 本 fork 现状 |
+| 上游能力 | 上游实现证据 | SurfSoul 现状 |
 | --- | --- | --- |
 | 向量记忆 + 成本/上下文体系 | `src/vector-memory.js`(629)、`embedding-packs`、`runtime/embedding-service.mjs`（本地 bge-small/qwen3/bge-m3 + 四家云端 embedding）；`context-telemetry`/`billing-report`/`context-snapshot` + 会话滚动 `session-rollover` | 无；本地只有「原文库 bigram 召回」与 token 额度闸，换会话靠「收尾 5 次 + 静置 5 分钟」 |
 | 人格/群行为分层 | `persona-layers`/`persona.tone.md`/`persona-identity`/智能拆分；`group-policy` 小群积极大群收紧 + `command-spam` 刷屏短指令过滤 | 无；本地自我叙述走 selfNote + 叙事层，权限走回合归因 + 审批 |
@@ -261,7 +264,7 @@
 
 > 判定口径：先取双方相对 v0.6.22 的改动文件交集（**70 个文件双方都改**），再对该能力在对方树里 grep 关键函数/文件名；「无」= 对侧业务代码 0 命中。关系：`divergent` = 同一子系统两边各做一套、互不兼容；`duplicate` = 同类问题各自独立修，代码不共享。
 
-| 领域 | 本 fork 实现 | 上游实现 | 关系 / 合并成本 |
+| 领域 | SurfSoul 实现 | 上游实现 | 关系 / 合并成本 |
 | --- | --- | --- | --- |
 | 更新系统 | 批量更新 jobs 队列 + `ensureSession` 失败不缓存 ready（`updates.js` +105/−36） | 0.7.1–0.8.2 全面重写：版本发现/失败分类/流式下载/暂存/回滚/清单校验/进度（`updates.js` +2020/−1031） | divergent；以上游为基座补本地队列修复，冲突在 `updates.js`/`apply-update.mjs` |
 | 记忆 | 叙事层 + selfNote + 文档记忆 + 原文库/`qq_recall` + audience | 向量记忆（本地/云端 embedding、多索引）+ 多群隔离/互通圈 | divergent；**成本最高**，需先定长期记忆主库 |
@@ -276,7 +279,7 @@
 **结论**
 
 - 双方在**更新、语音、SnowLuma 连通、记忆、唤醒/会话、B站、控制台、预设、桌宠、隐私** 10 个领域都动了手，但实现互不兼容（divergent）；唯一「各自独立修了同类 bug」的是语音页保存提示（duplicate，本地 `262010d` warn 通道 vs 上游 v0.7.8 toast 修复）。
-- 本 fork 有 **8 类上游完全没有的能力**：好友申请、看屏幕、内部模型审批/回合归因、群管理动作、画图/签名/空间/表情包软策略、场合作用域/跨场合投递、发送前评审、可引用分镜。
+- SurfSoul 有 **8 类上游完全没有的能力**：好友申请、看屏幕、内部模型审批/回合归因、群管理动作、画图/签名/空间/表情包软策略、场合作用域/跨场合投递、发送前评审、可引用分镜。
 - 上游有 **12 类本地完全没有的能力**：向量记忆、上下文成本遥测/会话滚动、人格分层、群分层、一键启动、插件体检/闸门事件、白名单归一/唤醒策略、语音包体系、SnowLuma 健康/安装、DSH 基建、发布体系、成本账单。
 - 想把上游能力搬进来：按主题 cherry-pick/重写，**不要整仓 merge**——冲突集中在 `src/bridge.js`、`src/mcp-snowluma-safe.js`、`plugins/surfcore/lib/*`、`dsh/agent-presets/*`。
 
@@ -284,27 +287,27 @@
 
 ## 七、安装
 
-> 前置（两种方式相同）：Windows + Node ≥ 22.13 + DSH 0.2.1-rc.2 或更新 + SnowLuma（第三方专有运行时，本仓库不随附、需自己安装并扫码登录）。概览与详细步骤见 `docs/guides/INSTALL.md`。
+> 前置（两种方式相同）：Windows + Node ≥ 22.13 + DSH 0.2.1-rc.2 或更新 + SnowLuma（第三方专有运行时，SurfSoul 不随附、需自己安装并扫码登录）。概览与详细步骤见 `docs/guides/INSTALL.md`。
 
 ### A. 仓库模式（沿用上游方式）
 
 ```powershell
-git clone <你的 fork 仓库地址>
+git clone https://github.com/Logic61/SurfSoul.git
 cd surfcore
 npm install                     # 没有 npm 可用 DSH 自带的 pnpm
 node scripts/setup-dsh.mjs      # 自动判断 DSH profile，注册 preset / MCP / bundle
-# 完全退出并重新打开 DSH → 设置 → SurfCore → 诊断 → 一键安装（全部）
+# 完全退出并重新打开 DSH → 设置 → SurfCore（插件当前显示名）→ 诊断 → 一键安装（全部）
 ```
 
 注意事项（沿用上游结论）：
 
 - **必须从仓库根目录安装**：插件里有多处 `../../../src/xxx.js` 引用、且 junction 安装时模块从仓库真实路径解析，仓库根必须有 `node_modules`；只装 `plugins/surfcore` 会报模块不存在。
-- 装完要**刷新页面或重启 DSH**：客户端模块图是页面加载时的快照，否则设置里暂时看不到 SurfCore。
+- 装完要**刷新页面或重启 DSH**：客户端模块图是页面加载时的快照，否则设置里暂时看不到 SurfCore（插件当前显示名）。
 - 仓库模式会注册：`qq-chat` / `qq-chat-v2` 两套 agent preset、4 条 MCP server（`snowluma` / `snowluma-host` / `web-search-safe` / `stock-safe`）与 `surfcore` bundle。
 
-### B. 自包含 DSH 插件包（本 fork 新增，建议优先）
+### B. 自包含 DSH 插件包（SurfSoul 新增，建议优先）
 
-本 fork 提供 **Layout B「整仓库即 npm 包」** 的自包含分发包：包名 `surfcore`，装进任意 DSH profile 后，**插件代码、preset、4 个 MCP server、静态资源都在包内**，不再依赖 fork 仓库目录与仓库根 `node_modules`。
+SurfSoul 提供 **Layout B「整仓库即 npm 包」** 的自包含分发包：包名 `surfcore`，装进任意 DSH profile 后，**插件代码、preset、4 个 MCP server、静态资源都在包内**，不再依赖 fork 仓库目录与仓库根 `node_modules`。
 
 - **产物**：`dist/plugin/surfcore-0.6.22-fork-plugin.tgz`（或同名目录 `dist/plugin/surfcore/`）。包内布局：`plugins/surfcore/`（插件本体）+ `src/`（桥接 + MCP）+ `scripts/setup-plugin.mjs`（接线脚本）+ `config.example.json`。
 - **前置**：Windows 10/11、Node ≥ 22.13、DSH 0.2.x（`dsh.cmd` 在 PATH）、pnpm 可用；SnowLuma 仍是第三方外装（只影响 QQ 功能）。
@@ -320,7 +323,7 @@ dsh.cmd plugin --profile <profile> add file:C:\...\dist\plugin\surfcore-0.6.22-f
 # 3) 给 profile 接 4 个 MCP server 行 + 首次数据引导（幂等；先加 --check 可只报告）
 node "%USERPROFILE%\.dsh\profiles\<profile>\node_modules\surfcore\scripts\setup-plugin.mjs" --profile <profile>
 
-# 4) 完全退出并重开 DSH → 设置 → SurfCore 验收（版本 0.6.22、各分页可正常加载）
+# 4) 完全退出并重开 DSH → 设置 → SurfCore（插件当前显示名）验收（版本 0.6.22、各分页可正常加载）
 ```
 
 - `setup-plugin.mjs` **不会启动/重启 DSH**：它维护 `<profile>/cordis.patch.yml` 的 4 个 MCP 行（写前备份 `cordis.patch.yml.bak-<时间戳>`），并在包根缺文件时引导 `config.json`/`state/`/`roles/`。
@@ -337,7 +340,7 @@ node "%USERPROFILE%\.dsh\profiles\<profile>\node_modules\surfcore\scripts\setup-
 
 | 文件 | 看什么 |
 | --- | --- |
-| [`README.md`](README.md) / [`README.en.md`](README.en.md) | 原版 README（安装/能力/FAQ 大部分仍适用；安全承诺已按本 fork 口径更新） |
+| [`README.md`](README.md) / [`README.en.md`](README.en.md) | 原版 README（安装/能力/FAQ 大部分仍适用；安全承诺已按 SurfSoul 口径更新） |
 | [`CHANGELOG.md`](CHANGELOG.md) | **改动一手记录**：顶部 26 段 `## [未发布]`（2026-10-30 ~ 11-07），含用户原话、修法、安全、测试、回滚 |
 | [`RULES.md`](RULES.md) | 权限分层与 QQ agent 硬边界 1–15（含 2026-11-06 放宽后的口径） |
 | [`docs/guides/SECURITY_BASELINE.md`](docs/guides/SECURITY_BASELINE.md) | 威胁模型、已实现边界、残余风险 R1–R13、发布前检查清单 |
@@ -348,7 +351,7 @@ node "%USERPROFILE%\.dsh\profiles\<profile>\node_modules\surfcore\scripts\setup-
 | [`docs/guides/SUBSYSTEM-PET.md`](docs/guides/SUBSYSTEM-PET.md) / [`SUBSYSTEM-VOICE.md`](docs/guides/SUBSYSTEM-VOICE.md) / [`SUBSYSTEM-BILI.md`](docs/guides/SUBSYSTEM-BILI.md) | 桌宠 / 语音 / B站 三套子系统 |
 | [`docs/guides/CURRENT-NUMBERS.md`](docs/guides/CURRENT-NUMBERS.md) | 当前规模数字（自动生成，**不要手改**；引用它而不是抄数字） |
 | [`docs/guides/INSTALL.md`](docs/guides/INSTALL.md) | 仓库模式安装细节 |
-| [`docs/guides/PLUGIN_INSTALL.md`](docs/guides/PLUGIN_INSTALL.md) | **本 fork 新增**：自包含 DSH 插件包安装（打包脚本生成） |
+| [`docs/guides/PLUGIN_INSTALL.md`](docs/guides/PLUGIN_INSTALL.md) | **SurfSoul 新增**：自包含 DSH 插件包安装（打包脚本生成） |
 | [`docs/HANDOFF.md`](docs/HANDOFF.md) | 最近做到哪、哪些还没验证（真机状态看这里） |
 | [`docs/PITFALLS.md`](docs/PITFALLS.md) | 踩过的坑与复现命令（#90–#104 多为本次新增） |
 | [`docs/ROADMAP.md`](docs/ROADMAP.md) | 路线与模式冻结（`reserved2` 是唯一演进模式） |
@@ -357,10 +360,10 @@ node "%USERPROFILE%\.dsh\profiles\<profile>\node_modules\surfcore\scripts\setup-
 
 ## 九、许可与致谢
 
-- 本衍生版基于 **[Mieksido/surfcore](https://github.com/Mieksido/surfcore)**（MIT）。感谢上游作者 **Mieksido** 以及 `qq-bridge / QSH` 的贡献者——没有这个底子就没有本 fork。
-- `LICENSE` **原样保留**上游版权声明：`Copyright (c) 2026 Derpyu520 and qq-bridge / QSH contributors`；本 fork 的改动（+56 提交）作者为 `logic`，同样以 MIT 授权。
-- **SnowLuma** 是第三方专有运行时，**不随本仓库分发**（只探测、不部署）；语音包等配套仓库（[surfvoicelocal](https://github.com/Mieksido/surfvoicelocal)、[surfvoicecloud](https://github.com/Mieksido/surfvoicecloud)、[surfpet](https://github.com/Mieksido/surfpet)）也是独立分发物。
-- 如果你基于本 fork 再分发：请保留 `LICENSE` 与上游版权声明，并注明「基于 surfcore 的衍生版」以及本 fork 的仓库地址。
+- SurfSoul 基于 **[Mieksido/surfcore](https://github.com/Mieksido/surfcore)**（MIT）。感谢上游作者 **Mieksido** 以及 `qq-bridge / QSH` 的贡献者——没有这个底子就没有 SurfSoul。
+- `LICENSE` **原样保留**上游版权声明：`Copyright (c) 2026 Derpyu520 and qq-bridge / QSH contributors`；SurfSoul 的改动（+56 提交）作者为 `logic`，同样以 MIT 授权。
+- **SnowLuma** 是第三方专有运行时，**不随 SurfSoul 分发**（只探测、不部署）；语音包等配套仓库（[surfvoicelocal](https://github.com/Mieksido/surfvoicelocal)、[surfvoicecloud](https://github.com/Mieksido/surfvoicecloud)、[surfpet](https://github.com/Mieksido/surfpet)）也是独立分发物。
+- 如果你基于 SurfSoul 再分发：请保留 `LICENSE` 与上游版权声明，并注明「基于 surfcore 的衍生版」以及 SurfSoul 的仓库地址（https://github.com/Logic61/SurfSoul）。
 
 ---
 
@@ -387,7 +390,7 @@ git diff v0.6.22..upstream/main --stat          # 看改动面
 **回滚**
 
 - 单功能：优先用配置开关回滚——`socialV2.toolApproval.enabled=false`（审批/放宽）、`socialV2.review.enabled=false`（出站评审）、`socialV2.crossSceneSend.enabled=false`（跨场合）、`purpose.screen.interruptPolicy=threshold`（看屏幕回阈值策略）。
-- 整体：按提交 `git revert <hash>` 后重启桥接/DSH；升级前备份 `config.json`、`state/`、`memory/`（本 fork 的 `docs/HANDOFF.md` 有对应的备份/恢复步骤）。
+- 整体：按提交 `git revert <hash>` 后重启桥接/DSH；升级前备份 `config.json`、`state/`、`memory/`（SurfSoul 的 `docs/HANDOFF.md` 有对应的备份/恢复步骤）。
 - 生效矩阵（沿用上游）：桥接代码 → 重启桥接；插件行/preset/MCP 工具描述 → **重启 DSH**；正在进行的 QQ 会话需 `/reset` 一次。
 
 **真机状态**：CHANGELOG 有多个「真机未验证（未重启 DSH）」标注——以 `docs/HANDOFF.md` 顶部快照为准，不要把未验证能力当成已上线。

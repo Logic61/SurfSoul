@@ -3,7 +3,7 @@
   "version": "0.6.22",
   "private": true,
   "license": "MIT",
-  "description": "SurfCore — QQ ↔ DeepSeek Harness bridge + QQ/B站 merged plugin: one repo, one settings window, QQ + Bilibili + QQ presets.",
+  "description": "SurfSoul（基于 SurfCore） — QQ ↔ DeepSeek Harness bridge + QQ/B站 merged plugin: one repo, one settings window, QQ + Bilibili + QQ presets.",
   "type": "module",
   "main": "./plugins/surfcore/lib/index.js",
   "exports": {

@@ -1,4 +1,4 @@
-# SurfCore — 给 DSH agent 一个真实的身份：QQ × B站 × 桌宠
+# SurfSoul — 基于 SurfCore 的 DSH agent 身份层：QQ × B站 × 桌宠
 
 **中文** | [English](README.en.md)
 
@@ -16,9 +16,9 @@
 > 🔒 **本仓库不含任何真实数据**：角色卡是脱敏示例（`roles/`），记忆卡是空壳（`examples/`），
 > 群号 / 群友名单 / QQ 号 / B站 mid 全部为占位符。运行时数据永远只在你自己的机器上。
 
-> 🧬 **本仓库有本地衍生版说明**：本仓库是 [surfcore](https://github.com/Mieksido/surfcore) 的本地大改版
-> （基于上游 `v0.6.22` 分叉、本地 +56 提交）；与原版的全部差异、新增能力、与上游 `v0.8.9` 的关系，
-> 以及**自包含 DSH 插件包**的安装方式，见 **[README.fork.md](README.fork.md)**。
+> 🧬 **SurfSoul = 本仓库**：[SurfCore](https://github.com/Mieksido/surfcore) 的本地大改版（基于上游 `v0.6.22` 分叉、本地 +56 提交）。
+> 与原版的全部差异、新增能力、与上游 `v0.8.9` 的关系，以及**自包含 DSH 插件包**的安装方式，见 **[README.fork.md](README.fork.md)**。
+> 仓库内部 npm 包名 / DSH 插件 id / 状态目录仍叫 `surfcore`，DSH 设置页里当前也仍显示「SurfCore」（DSH 绑定与兼容约束 + UI 暂未改名），对外名称是 **SurfSoul**。
 
 ---
 
@@ -26,7 +26,7 @@
 
 把这句话发给 DSH：
 
-> 帮我安装 https://github.com/Mieksido/surfcore ，按 README 的步骤来。
+> 帮我安装 https://github.com/Logic61/SurfSoul ，按 README 的步骤来。
 
 **顺序很重要**（DSH 常常先 install_bundle、后装依赖，结果激活时报 `Cannot find module '@deepseek-ai/schemastery'`）：
 
@@ -46,7 +46,7 @@
 ## 第一次装（4 条命令）
 
 ```powershell
-git clone --depth 1 https://github.com/Mieksido/surfcore.git
+git clone --depth 1 https://github.com/Logic61/SurfSoul.git
 cd surfcore
 npm install
 node scripts/setup-dsh.mjs      # 自动判断 DSH 用的 profile，不用填
@@ -54,7 +54,7 @@ node scripts/setup-dsh.mjs      # 自动判断 DSH 用的 profile，不用填
 
 重启 DSH → 设置 → SurfCore → **诊断 → 一键安装（全部）**（自动发现 SnowLuma、写白名单、起桥接）。
 
-> 不想敲命令：`powershell -ExecutionPolicy Bypass -c "irm https://raw.githubusercontent.com/Mieksido/surfcore/main/scripts/bootstrap.ps1 | iex"`
+> 不想敲命令：`powershell -ExecutionPolicy Bypass -c "irm https://raw.githubusercontent.com/Logic61/SurfSoul/main/scripts/bootstrap.ps1 | iex"`
 
 前置：Windows + Node ≥22.13 + DSH 0.2.1-rc.2 或更新（rc.3 已能安装，功能未完整回归） + SnowLuma（第三方，需自己装并扫码）。详见 [INSTALL.md](docs/guides/INSTALL.md)。
 
@@ -117,7 +117,7 @@ node scripts/setup-dsh.mjs      # 自动判断 DSH 用的 profile，不用填
 
 ```bash
 # 1) 取代码
-git clone https://github.com/Mieksido/surfcore.git
+git clone https://github.com/Logic61/SurfSoul.git
 cd surfcore
 
 # 2) 装依赖（postinstall 会自动修补 @snowluma/sdk 的 ESM bug）

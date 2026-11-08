@@ -1,13 +1,15 @@
-# SurfCore DSH 插件包 —— 安装 / 卸载 / 回滚说明
+# SurfSoul DSH 插件包 —— 安装 / 卸载 / 回滚说明
 
 > 本文件是**分发包内 `INSTALL.md` 的源文件**：`node scripts/build-plugin-package.mjs` 构建时会把本文件
 > 复制为包根 `INSTALL.md`。仓库里改了安装流程，记得同步改这里再重新构建。
 
-本文针对 **Layout B（整仓库即 npm 包）** 的 SurfCore fork 插件包：
+本文针对 **Layout B（整仓库即 npm 包）** 的 SurfSoul 插件包（SurfSoul = 基于 [SurfCore](https://github.com/Mieksido/surfcore) 的衍生版，仓库 [Logic61/SurfSoul](https://github.com/Logic61/SurfSoul)）：
 一个自包含的 npm 包（包名 `surfcore`），装进任意 DSH profile 后，插件代码、preset、MCP server、
 静态资源都在包内，**不再依赖 fork 仓库目录 + 仓库根 node_modules**。
 
-- 包版本：`0.6.22`（fork，基于上游 surfcore v0.6.22 + 本地 56 个提交）
+> 名称对照：对外叫 **SurfSoul**；内部包名 / DSH 插件 id / 环境变量 / 状态目录仍是 `surfcore`（DSH 绑定与兼容约束，不随改名变化）。
+
+- 包版本：`0.6.22`（SurfSoul，基于 SurfCore v0.6.22 + 本地 56 个提交）
 - 产物两种，任选其一：
   1. 目录：`dist/plugin/surfcore/`（未压缩的完整包，适合 `link:`/本地目录安装）
   2. 压缩包：`dist/plugin/surfcore-0.6.22-fork-plugin.tgz`（`npm pack` 产物，适合直接分发/一键安装）
@@ -45,7 +47,7 @@ node scripts/build-plugin-package.mjs        :: 默认输出到 dist/plugin/（�
 
 | 项 | 要求 |
 |---|---|
-| 操作系统 | Windows 10/11（本 fork 的 QQ 桥接/语音/桌宠只在 Windows 实测） |
+| 操作系统 | Windows 10/11（SurfSoul 的 QQ 桥接/语音/桌宠只在 Windows 实测） |
 | Node.js | **>= 22.13.0**（`package.json` engines；实测 22.23 / 24.x 均可） |
 | DSH | DeepSeek Harness 0.2.x（本包按 0.2.2-rc.1 的 bundle/patch 机制验证）；`dsh.cmd` 在 PATH 里 |
 | pnpm | DSH 的插件管理/`dsh plugin` 背后就是 pnpm，请保证 `pnpm` 可用（DSH 自带 runtime 里也有一份） |
@@ -70,7 +72,7 @@ node scripts/build-plugin-package.mjs        :: 默认输出到 dist/plugin/（�
    ```
    - 若装的是「目录」，把上面的包根换成你安装时用的那个目录绝对路径。
    - 先干跑检查：追加 `--check`，只报告不写文件。
-3. 重启 DSH（或重载 profile），打开 SurfCore 设置窗口确认版本号与配置页正常。
+3. 重启 DSH（或重载 profile），打开 SurfSoul 设置窗口确认版本号与配置页正常。
 
 ### 方式 B：命令行（`dsh plugin`，等价于在 profile 目录跑 pnpm）
 
@@ -132,7 +134,7 @@ node "<包根>\scripts\setup-plugin.mjs" --profile <p> --no-bootstrap --no-mcp  
 ### 首次启动后的最小验收
 
 1. DSH 插件列表里 surfcore 为启用状态，版本 `0.6.22`；
-2. 打开 SurfCore 设置窗口，各分页能加载（配置 API 通）；
+2. 打开 SurfSoul 设置窗口，各分页能加载（配置 API 通）；
 3. 若用 QQ：启动 SnowLuma，并在设置窗口里配置 SnowLuma 目录/端口；
 4. `%USERPROFILE%\.dsh\surfcore\plugin.log` 出现 `已激活 v0.6.22` 且 `surfcore=<包根>` 指向新包。
 
@@ -217,5 +219,5 @@ dsh.cmd plugin --profile <profile> remove surfcore
 1. 在 DSH 插件管理页安装本地 target：`<仓库根>\dist\plugin\surfcore-0.6.22-fork-plugin.tgz`。
 2. 若提示构建被忽略：在插件管理页允许 surfcore 的构建（或手动 `node "<包根>\scripts\patch-snowluma-sdk.mjs"`）。
 3. 终端执行：`node "%USERPROFILE%\.dsh\profiles\<profile>\node_modules\surfcore\scripts\setup-plugin.mjs" --profile <profile>`。
-4. （QQ 用户）启动 SnowLuma，在 SurfCore 设置窗口配置路径/端口。
-5. 重启 DSH，打开 SurfCore 设置窗口验收（建议长期用户先设置 `SURFCORE_ROOT` 再迁移数据，见第 2 节）。
+4. （QQ 用户）启动 SnowLuma，在 SurfSoul 设置窗口配置路径/端口。
+5. 重启 DSH，打开 SurfSoul 设置窗口验收（建议长期用户先设置 `SURFCORE_ROOT` 再迁移数据，见第 2 节）。

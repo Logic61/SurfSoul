@@ -1,6 +1,6 @@
-# SurfCore（surfcore）—— QQ × B站 合体插件
+# SurfSoul（基于 SurfCore）—— QQ × B站 合体插件
 
-> SurfCore = 表层（QQ / B站 / 贴吧）× 内核（统一人格卡、双向脱敏记忆、身份对齐、扩展接口）。
+> SurfSoul = 基于 SurfCore 的本地大改版：表层（QQ / B站 / 贴吧）× 内核（统一人格卡、双向脱敏记忆、身份对齐、扩展接口）。
 > 一个仓库、一个设置窗口、一套人格卡：QQ 的桥接、B站养鱼参数、双向脱敏记忆与身份对齐，以及后续功能/平台的接入接口。
 
 ![设置窗口](docs/ui-overview.png)
