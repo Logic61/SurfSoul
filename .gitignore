@@ -72,3 +72,5 @@ audio/
 /roles/小咪.md
 /plugins/surfcore/scripts/merge-agents-persona.mjs
 dist/*.zip
+# 自包含 DSH 插件包构建产物（scripts/build-plugin-package.mjs 生成；分发包另存/另传）
+/dist/plugin/

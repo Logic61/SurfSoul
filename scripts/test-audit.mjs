@@ -216,6 +216,10 @@ const tests = [
   // 文档数字防漂移（2026-11-03）：docs/guides/CURRENT-NUMBERS.md 由脚本生成并与代码比对；
   // 手写文档不得再自称「三个 MCP server / 约 15,000 行」。
   'test-doc-numbers.mjs',
+  // 自包含 DSH 插件包（Layout B，2026-11-08）：整仓库即 npm 包（包根 dsh.bundle.patch + exports
+  // + dsh.client）；构建产物 + 伪造 profile 的 setup 接线 + exports 解析全部离线校验，
+  // 不启动 DSH、不碰真实 profile。
+  'test-plugin-package.mjs',
 ];
 let failed = 0;
 for (const test of tests) {
