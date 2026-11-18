@@ -32,12 +32,7 @@ export const DEFAULT_NARRATIVE_CONFIG = Object.freeze({
   batchRecords: 24,
   /** 一轮（一个定时 tick）最多连着压几批：积压多的时候一次清完，不用每 45 分钟挤一点。 */
   maxBatchesPerTick: 6,
-  /**
-   * 长期保留多少条回忆。
-   * 2026-11-01：120 → 300。旧值在 2026-10-31 11:14 就满了，之后每轮都打「已达回忆上限」，
-   * 叙事层（以及只读叙事的桌宠侧）永久停在旧内容；300 条足够再覆盖几个月的记录。
-   * 注入条数不变（maxEpisodesInPrompt=16 + 标题 40），所以提示词预算不受影响。
-   */
+  /** 兼容手动有界合并；后台整理保留全部来源引用。 */
   maxEpisodes: 300,
   /** 注入提示词时最多带几条「完整回忆」（新的在前）。 */
   maxEpisodesInPrompt: 16,
@@ -130,6 +125,7 @@ export function loadNarrative(memoryDir) {
         id: String(ep.id || `ep_${hash(`${ep.date}|${ep.title}|${ep.text}`)}`),
         date: /^\d{4}-\d{2}-\d{2}$/.test(String(ep.date ?? '')) ? String(ep.date) : dateKey(Date.now()),
         conv: ['私聊', '群里'].includes(String(ep.conv ?? '')) ? String(ep.conv) : '',
+        sceneKey: String(ep.sceneKey || ''),
         title: safeSlice(String(ep.title ?? '').trim(), 30),
         text: safeSlice(String(ep.text).trim(), 600),
         covers: Array.isArray(ep.covers) ? ep.covers.map((id) => String(id ?? '')).filter(Boolean) : [],
@@ -243,15 +239,30 @@ function isNarratable(record, covered, cfg, now) {
   return true;
 }
 
+export function sceneOfRecord(record) {
+  if (!record || record.sensitive) return '';
+  const key = record.conversationKey || (record.groupId ? 'group:' + record.groupId : '');
+  if (!/^(private|group):\d+$/.test(key)) return '';
+  if (record.private && key.startsWith('group:')) return '';
+  if (record.audience === 'private-only' && !key.startsWith('private:')) return '';
+  if (record.audience === 'group-only' && !key.startsWith('group:')) return '';
+  return key;
+}
+
 /** 挑出这次要压的记录（最老的先）。 */
 export function pickNarratableRecords(card, narrative, config = {}, now = Date.now()) {
   const cfg = { ...DEFAULT_NARRATIVE_CONFIG, ...(config || {}) };
   const covered = coveredRecordIds(narrative);
-  const records = Array.isArray(card?.records) ? card.records : [];
-  return records
-    .filter((record) => isNarratable(record, covered, cfg, now))
-    .sort((a, b) => timeOf(a.createdAt, 0) - timeOf(b.createdAt, 0))
-    .slice(0, Math.max(1, Number(cfg.batchRecords) || DEFAULT_NARRATIVE_CONFIG.batchRecords));
+  const groups = new Map();
+  for (const record of (card?.records ?? []).filter(r => isNarratable(r, covered, cfg, now))
+    .sort((a,b) => timeOf(a.createdAt, 0) - timeOf(b.createdAt, 0))) {
+    const key = record.conversationKey || (record.groupId ? 'group:' + record.groupId : '');
+    const bucket = JSON.stringify([key, sceneOfRecord(record), record.audience || 'any', conversationOf(record)]);
+    if (!groups.has(bucket)) groups.set(bucket, []);
+    groups.get(bucket).push(record);
+  }
+  const group = [...groups.values()].find(rows => rows.length >= Math.max(1, cfg.minRecords));
+  return (group || []).slice(0, Math.max(1, cfg.batchRecords));
 }
 
 /** 记录发生在哪段对话：私聊 / 群里（拿不到就空着）。 */
@@ -428,17 +439,15 @@ export async function runNarration({ memoryDir, config = {}, now = Date.now(), d
   if (!memoryDir) return { ok: false, error: 'memoryDir 为空' };
   const card = readJson(path.join(String(memoryDir), 'memory-card.json'));
   if (!card) return { ok: true, skipped: 'no-card' };
+  const file = resolveNarrativePath(memoryDir);
+  if (fs.existsSync(file) && !Array.isArray(readJson(file)?.episodes))
+    return { ok: false, error: 'invalid-narrative' };
   const narrative = loadNarrative(memoryDir);
-  // P2-1（2026-10-30）：到上限就明确返回 full，不再「压一批 → 挤掉最旧 → 原记录又能压」空转。
-  // 桥接看到 full 会立即停这一轮，避免每 tick 白烧最多 6 次 LLM 调用。
-  if (narrative.episodes.length >= Math.max(1, Number(cfg.maxEpisodes) || DEFAULT_NARRATIVE_CONFIG.maxEpisodes)) {
-    return { ok: true, skipped: 'full', total: narrative.episodes.length };
-  }
   const records = pickNarratableRecords(card, narrative, cfg, now);
   if (records.length < Math.max(1, Number(cfg.minRecords) || 1)) {
     return { ok: true, skipped: 'not-enough', picked: records.length };
   }
-  const { system, user } = buildNarrationPrompt(records, narrative.episodes, { selfNames, ownerName: cfg.ownerName });
+  const { system, user } = buildNarrationPrompt(records, [], { selfNames, ownerName: cfg.ownerName });
   // 懒加载：memory-card.js 渲染时也会 import 本模块，但它用不到网络与凭据。
   const completeFn = complete || (await import('./llm-text.js')).completeText;
   const result = await completeFn({
@@ -455,7 +464,7 @@ export async function runNarration({ memoryDir, config = {}, now = Date.now(), d
   const episodes = parseEpisodes(result?.text, allowedIds, dateById);
   // 模型没写 conv 的：按覆盖记录来源补上；私聊和群里混合的降级为无标签（P2-5）。
   for (const ep of episodes) {
-    if (ep.conv) continue;
+    ep.sceneKey = sceneOfRecord(records[0]);
     ep.conv = resolveConvFallback(ep.covers, convById);
   }
   // 模型输出落盘前也过一遍外发脱敏（P2-22）：模型可能把 prompt 里的号码/邮箱写进回忆。
@@ -467,7 +476,7 @@ export async function runNarration({ memoryDir, config = {}, now = Date.now(), d
     log('[叙事] 模型没给出可用的回忆（输出无法解析或 covers 全空）');
     return { ok: false, error: 'no-episodes', picked: records.length, raw: String(result?.text ?? '').slice(0, 300) };
   }
-  const merged = mergeEpisodes(narrative, episodes, { max: cfg.maxEpisodes });
+  const merged = mergeEpisodes(narrative, episodes, { max: Infinity });
   const lastRun = {
     at: new Date().toISOString(),
     added: merged.added,
@@ -475,6 +484,10 @@ export async function runNarration({ memoryDir, config = {}, now = Date.now(), d
     total: merged.episodes.length,
     usage: result?.usage ?? null,
   };
+  // A second bridge or a manual edit may have finished during model inference.
+  const latest = loadNarrative(memoryDir);
+  if (JSON.stringify(latest.episodes) !== JSON.stringify(narrative.episodes))
+    return { ok: true, skipped: 'changed', added: 0 };
   if (!dryRun) saveNarrative(memoryDir, { episodes: merged.episodes, lastRun });
   return {
     ok: true,

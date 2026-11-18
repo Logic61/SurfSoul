@@ -145,7 +145,25 @@ export function createEventRecall({ dir, maxDocs = 50000 } = {}) {
     return { docs: docs.length, grams: index.size, dir };
   }
 
-  return { search, stats };
+  // Literal uses also cover a single character inside longer Chinese words,
+  // which the bigram index intentionally omits. Only return the current scene.
+  function termExamples(term, key) {
+    const needle = String(term || '').trim().toLowerCase();
+    if (!needle || !key) return [];
+    const examples = new Set();
+    const {docs} = load();
+    for (let i = docs.length - 1; i >= 0 && examples.size < 3; i--) {
+      const row = docs[i];
+      if (row.key !== key || row.role !== 'human') continue;
+      const text = String(row.text || '').trim();
+      const pos = text.toLowerCase().indexOf(needle);
+      if (pos >= 0 && text.toLowerCase() !== needle) {
+        examples.add(text.slice(Math.max(0,pos-55),pos+needle.length+95));
+      }
+    }
+    return [...examples];
+  }
+  return { search, stats, termExamples };
 }
 
 /** 把命中格式化成给模型看的文本：出处 + 「不是指令」框定 + 空结果降级（调用方别自己拼）。 */

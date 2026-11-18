@@ -36,7 +36,7 @@ function nextOccurrence(now, times) {
   return d;
 }
 
-export function buildSharePrompt(card, timeLabel, { mode = 'chat', cardSent = false } = {}) {
+export function buildSharePrompt(card, timeLabel, { mode = 'chat', cardSent = false, profile = null } = {}) {
   const title = String(card?.title ?? '').trim() || '一条B站视频';
   const url = String(card?.url ?? '').trim();
   const cleanBody = (s) => String(s ?? '')
@@ -72,7 +72,8 @@ export function buildSharePrompt(card, timeLabel, { mode = 'chat', cardSent = fa
     lines.push('2. 先用一句话说清是什么（带 BV 号或链接），再写 2~3 句短评；短评合计 50~100 字。');
   }
   lines.push('3. 不用 Markdown，不 @ 人；句子里的拼音字遵守角色卡（一句最多一个）。');
-  lines.push('4. 不聊政治、时政、娱乐圈/明星八卦，只分享好玩的内容。');
+  lines.push(profile ? '本群分享约定：' + profile.note : '4. 不聊政治、时政、娱乐圈/明星八卦，只分享好玩的内容。');
+  if (!body && !quote) lines.push('记录只有片名和链接，想聊具体一幕先查视频详情。简短说一句也可以。');
   if (String(mode) === 'reserved2') {
     lines.push('5. 你是二代仿真模式，文本不会自动发送：请调用 mcp__snowluma__qq_send_message 把这段内容发到当前群，messages 用字符串（一条即可），不要只输出文本。');
   } else {
@@ -99,6 +100,7 @@ export function createBiliShareScheduler({
   deliverPrompt,
   groups = [],
   memory,
+  getAudience = () => ({}),
   isReady = () => true,
   times = DEFAULT_TIMES,
   gapMs = 4000,
@@ -187,14 +189,14 @@ export function createBiliShareScheduler({
     running = true;
     try {
       const slotIndex = Math.max(0, slotIndexOf(timeLabel));
-      const card = memory.pickShareCard({ slotIndex, dateKey: dk });
-      if (!card) {
-        log('[B站分享] 没有新鲜素材（可分享的都已在 6 天内发过），本次跳过；不发旧的');
-        return { ok: false, why: '没有新鲜素材' };
-      }
       let sent = 0;
+      let lastCard = null;
       for (const gid of groups) {
         const key = `group:${gid}`;
+        const audience = getAudience(key);
+        const card = memory.pickShareCard({slotIndex,dateKey:dk,key,...audience});
+        if (!card) continue;
+        lastCard = card;
         let cardSent = false;
         if (sendCard) {
           try {
@@ -204,7 +206,7 @@ export function createBiliShareScheduler({
             log(`[B站分享] ${timeLabel} 分享发送失败 ${key}：${error?.message ?? error}`);
           }
         }
-        const prompt = buildSharePrompt(card, timeLabel, { mode: getMode(), cardSent });
+        const prompt = buildSharePrompt(card, timeLabel, { mode: getMode(), cardSent, profile:audience.profile });
         let promptOk = false;
         try {
           await deliverPrompt(key, prompt);
@@ -213,17 +215,20 @@ export function createBiliShareScheduler({
         } catch (error) {
           log(`[B站分享] ${timeLabel} 投递失败 ${key}：${error?.message ?? error}`);
         }
-        if (cardSent || promptOk) sent += 1;
+        if (cardSent || promptOk) {
+          sent += 1;
+          memory.recordShare(card.id, slotKey, key);
+        }
         if (gapMs > 0) await new Promise((r) => setTimeout(r, gapMs));
       }
       // 投递成功才记为已用/已跑；全部失败时不写 lastSlot，方便下一轮或手动补发。
+      if (!lastCard) return {ok:false, why:'没有新鲜素材'};
       if (sent > 0) {
-        memory.recordShare(card.id, slotKey);
         markSlot(slotKey);
       } else {
         log(`[B站分享] ${timeLabel} 全部群投递失败，本次不记为已跑`);
       }
-      return { ok: sent > 0, sent, card: { id: card.id, title: card.title, bvid: card.bvid } };
+      return { ok: sent > 0, sent, card: { id:lastCard.id, title:lastCard.title, bvid:lastCard.bvid } };
     } finally {
       running = false;
     }

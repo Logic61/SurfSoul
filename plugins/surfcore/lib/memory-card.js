@@ -23,7 +23,7 @@ import {
   maintainMemoryCard, markOwnerNotified, memoryCardStatus, memoryNarrativeSummary, mergeMemories, normalizeMemoryCardConfig,
   readAllFullRecords, readInboxSince, readMemoryNarrative, recallFullMemory, renderFullMemoryCard, renderMemoryCard,
   saveFullMemoryCard, saveMemoryCardOutputs, saveMemoryNarrative, shouldNotifyOwner,
-} from '../../../src/memory-card.js?rev=memfix-d913f4f63b';
+} from '../../../src/memory-card.js?rev=memfix-60b63add51';
 
 const EMPTY_CONFIG = normalizeMemoryCardConfig({});
 const TICK_MS = 10 * 60 * 1000;

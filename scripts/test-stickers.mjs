@@ -9,7 +9,7 @@ import {
   normalizeStickerEntry,
   mergeStickerLibrary,
   findSticker,
-  formatStickerList,
+  formatStickerList, stickerCandidates,
   buildStickerContext,
   buildStickerStrategyHint,
   applyStickerNote,
@@ -177,8 +177,8 @@ console.log('## bridge 路由/函数存在性');
   // 2026-10-24 实测：消息在 qq_wait_for_messages 期间到达时不会重建唤醒提示，
   // 所以 wait / unread 的返回也必须带同一份推荐，否则「表情匹配」只在一半路径上存在。
   ok(bridge.includes('function stickerMatchFor'), 'bridge 有统一的 stickerMatchFor');
-  ok(/const stickerMatch = newMessages\.length \? stickerMatchFor\(newMessages\) : null/.test(bridge), 'wait 返回带 stickerMatch');
-  ok(/const stickerMatch = stickerMatchFor\(messages\);/.test(bridge), 'unread 返回带 stickerMatch');
+  ok(/const stickerMatch = newMessages\.length \? stickerMatchFor\(key, newMessages, st\.recentMessages, scene\) : null/.test(bridge), 'wait 返回带 stickerMatch');
+  ok(/const stickerMatch = stickerMatchFor\(key, messages, st\.recentMessages, scene\);/.test(bridge), 'unread 返回带 stickerMatch');
   ok(bridge.includes('...(stickerMatch ? { stickerMatch } : {})'), 'wait/unread 响应序列化 stickerMatch');
   const hint = buildStickerStrategyHint();
   ok(hint.includes('stickerMatch'), '策略提示告知 wait/unread 也会带推荐');
@@ -214,5 +214,17 @@ if (process.env.QQ_BRIDGE_TEST_LIVE === '1') {
   }
 }
 
+{
+  const items = Array.from({length:54}, (_, i) => ({no:i+1, id:'id-' + i, url:'https://fixture.invalid/' + i, emotion:i===2?'shy':'neutral', content:i===2?'捂脸':'空碗'}));
+  const short = stickerCandidates(items);
+  ok(short.stickers.length === 5 && !Object.hasOwn(short.stickers[0], 'url'), '默认只给五张简卡');
+  for (const ref of ['#03','#3','3号']) {
+    const x = stickerCandidates(items, ref);
+    ok(x.matched === 1 && findSticker(items,x.stickers[0].ref) === findSticker(items,ref),'搜索和发送共用编号');
+  }
+  ok(stickerCandidates(items,'被说中了').stickers[0]?.ref === '#03','反应词可以找到害羞图');
+  ok(stickerCandidates(items,'#99').matched === 0,'不存在的编号不猜测');
+  ok(stickerCandidates(items,'#03',1,true).stickers[0].url === items[2].url,'按需查看完整资料');
+}
 console.log(`\n结果：${pass} 通过，${fail} 失败`);
 if (fail > 0) process.exit(1);

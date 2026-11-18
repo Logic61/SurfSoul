@@ -74,3 +74,6 @@ audio/
 dist/*.zip
 # 自包含 DSH 插件包构建产物（scripts/build-plugin-package.mjs 生成；分发包另存/另传）
 /dist/plugin/
+
+# Downloaded Bilibili video covers
+/plugins/surfcore/tools/covers/

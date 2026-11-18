@@ -229,19 +229,11 @@ test('没有匹配时返回空串（不占 token）', () => {
   assert.equal(buildStickerMatchHint([], {}), '');
 });
 
-test('高分推荐用强措辞，低分保留保守措辞（模型会自我审查）', () => {
-  const strong = buildStickerMatchHint([
-    { no: 6, emotionLabel: '委屈', content: '哭着求你们别再嘲笑我的回复', score: 0.83 }
-  ], {});
-  assert.ok(strong.includes('0.83'), strong);
-  assert.ok(strong.includes('很贴合'), '高分要说清「很贴合」');
-  assert.ok(!strong.includes('真的贴合才发一张'), '高分不应再用「才发」这种保守话术');
-  assert.ok(strong.includes('也可以只发这张表情'), '高分措辞允许只发表情、不配文字');
-
-  const weak = buildStickerMatchHint([
-    { no: 5, emotionLabel: '委屈', content: '抱着空碗', score: 0.4 }
-  ], {});
-  assert.ok(weak.includes('真的贴合才发一张'), weak);
+test('候选只给编号和画面，分数不替角色决定表达', () => {
+  for (const score of [0.4, 0.83]) {
+    const hint = buildStickerMatchHint([{ no: 5, emotionLabel: '委屈', content: '抱着空碗', score }]);
+    assert.equal(hint, '【表情匹配】#05 委屈｜抱着空碗（qq_send_sticker）');
+  }
 });
 
 console.log('## 编号引用');

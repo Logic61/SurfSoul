@@ -32,7 +32,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 // `?rev=` 和插件 lib 的引用保持同一取值：插件热重载时，只有 specifier 变了才会
 // 重新求值；本模块 import 的叙事层也必须挂同一个 rev，否则「引擎新、叙事旧」。
-import { coveredRecordIds, formatEpisodeLine, formatEpisodeTitleLine, loadNarrative, splitEpisodesForPrompt, resolveNarrativePath, saveNarrative, memoryNarrativeSummary } from './memcard-narrative.js?rev=memfix-d913f4f63b';
+import { coveredRecordIds, formatEpisodeLine, formatEpisodeTitleLine, loadNarrative, splitEpisodesForPrompt, resolveNarrativePath, saveNarrative, memoryNarrativeSummary } from './memcard-narrative.js?rev=memfix-60b63add51';
 // 场合作用域的标记字面量只维护一份（src/scene-scope.js）。渲染侧把标记写进行首，
 // 桥接注入时按当前场合整行过滤；这里用常量而不是再抄一遍字符串，避免两边漂移。
 import { AUDIENCE_GROUP_ONLY_TAG, AUDIENCE_PRIVATE_ONLY_TAG } from './scene-scope.js';

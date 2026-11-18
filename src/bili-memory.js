@@ -367,8 +367,23 @@ export function createBiliMemory({ stateDir, home = os.homedir(), log = () => {}
       }
     }
 
+    // The viewing ledger also contains metadata previews and undated imports.
+    // Only completed, dated views are evidence for "I watched this".
+    const watched = new Map();
+    let watchLog = '';
+    try { watchLog = fs.readFileSync(stateFile('watch-history.jsonl'), 'utf8'); } catch {}
+    for (const line of watchLog.trim().split('\n').reverse()) {
+      if (watched.size >= 120) break;
+      let row;
+      try { row = JSON.parse(line); } catch { continue; }
+      if (row?.mode !== 'full' || row.unknownDate || !Number.isFinite(Date.parse(row.at))
+          || !/^BV[0-9a-zA-Z]{10}$/.test(row.bvid) || watched.has(row.bvid)) continue;
+      const title = redactOwner(cleanText(row.title)).trim().slice(0,180);
+      if (title) watched.set(row.bvid,{bv:row.bvid,title,at:row.at});
+    }
     return {
       config,
+      watched,
       scoreItems,
       favoriteItems,
       commentItems,
@@ -435,6 +450,13 @@ export function createBiliMemory({ stateDir, home = os.homedir(), log = () => {}
       c.sources.push('diary');
     }
 
+    for (const w of data.watched.values()) {
+      const c = ensure(w.bv);
+      c.title ||= w.title;
+      c.dates.push(localDate(w.at));
+      c.ats.push(w.at);
+      c.sources.push('watch');
+    }
     const entries = [];
     for (const c of cards.values()) {
       const titleInfo = data.titles?.[c.bvid];
@@ -625,6 +647,7 @@ export function createBiliMemory({ stateDir, home = os.homedir(), log = () => {}
         anecdote: short(e.anecdote, 400),
         score: e.score,
         favorite: e.favorite,
+        ...(e.sources?.includes('watch') ? {watched:true} : {}),
         date: e.date,
         at: e.at,
         priority: e.priority,
@@ -669,7 +692,7 @@ export function createBiliMemory({ stateDir, home = os.homedir(), log = () => {}
         const cards = buildCards(data);
         // 只为分享池里可能用到的卡片补标题（最多 40 条，失败不阻塞）。
         const needTitles = [...new Set(cards
-          .filter((e) => e.bvid && e.shareable)
+          .filter((e) => e.bvid && e.shareable && !(e.title && e.sources?.length === 1 && e.sources[0] === 'watch'))
           .sort((a, b) => (b.priority || 0) - (a.priority || 0))
           .map((e) => e.bvid))]
           .slice(0, 40);
@@ -716,8 +739,9 @@ export function createBiliMemory({ stateDir, home = os.homedir(), log = () => {}
     return refreshing;
   }
 
-  function briefBlock() {
+  function briefBlock({identityOnly = false} = {}) {
     const brief = readBrief();
+    if (brief && identityOnly) return brief.split('最近在 B 站（')[0].trimEnd() + '\n';
     return brief ? `${brief}\n` : '';
   }
 
@@ -806,37 +830,45 @@ export function createBiliMemory({ stateDir, home = os.homedir(), log = () => {}
     try { atomicWriteText(paths.history, JSON.stringify(data, null, 2) + '\n'); } catch {}
   }
 
-  function pickShareCard({ slotIndex = 0, dateKey = new Date().toLocaleDateString('sv-SE'), historyDays = 6, allowReuse = false } = {}) {
+  function shareCandidates({ key = '', profile = null, recent = [], historyDays = 6, allowReuse = false, limit = 1 } = {}) {
     const index = readIndex();
-    if (!index || !Array.isArray(index.entries)) return null;
+    if (!index || !Array.isArray(index.entries)) return [];
     const hist = history();
     const used = hist.used ?? {};
     const cutoff = Date.now() - Math.max(1, historyDays) * 86400000;
+    const pastMessages = recent.filter(m=>m.isSelf && Number(m.time) >= cutoff).map(m=>String(m.plain || m.text || ''));
     const pool = index.entries
-      .filter((e) => e.shareable && e.type !== 'dynamic')
-      .filter((e) => !isBlocked(`${e.title} ${e.text} ${e.quote}`))
-      .filter((e) => e.score >= 12 || e.favorite || (e.quote && e.quote.length >= 18) || (e.anecdote && e.anecdote.length >= 60) || (e.reason && e.reason.length >= 24))
-      .filter((e) => (e.text || e.quote || e.reason || '').length >= 18)
+      .filter(e => {
+        if (e.type === 'dynamic') return false;
+        const text = [e.title,e.text,e.quote,e.reason].filter(Boolean).join(' ');
+        if (profile) {
+          if (!e.bvid || (profile.avoid || []).some(word => text.includes(word))) return false;
+          if (!profile.prefer.some(word => text.includes(word))) return false;
+          // A group may opt into specific public news topics. Only a verified public
+          // viewing record qualifies for that exception to the default topic filter.
+          if (!e.shareable || isBlocked(text)) return !!(e.watched && profile.news?.some(word=>e.title?.includes(word)));
+          if (e.watched) return true;
+        }
+        return e.shareable && !isBlocked(text) && (e.text || e.quote || e.reason || '').length >= 18
+          && (e.score >= 12 || e.favorite || e.quote?.length >= 18 || e.anecdote?.length >= 60 || e.reason?.length >= 24);
+      })
       .filter((e) => !e.date || Date.now() - Date.parse(`${e.date}T00:00:00+08:00`) < 21 * 86400000)
-      .sort((a, b) => (b.priority || 0) - (a.priority || 0) || (b.score || 0) - (a.score || 0) || String(b.date).localeCompare(String(a.date)))
-      .slice(0, 16);
-    if (!pool.length) return null;
-    const fresh = pool.filter((e) => !(Date.parse(used[e.id] ?? 0) > cutoff));
-    if (!fresh.length) {
-      // 2026-10-26 修：以前这里会回退到整个 pool，结果"最高分那条"在 N 天内被反复发。
-      // 现在默认**不发**（宁可空一档，也不重复）；确需复用才显式 allowReuse。
-      if (!allowReuse) return null;
-      return pool[0] ?? null;
-    }
-    // 永远取“还没用过里优先级最高”的那条：同一天不会因为 slotIndex 递增而跳过高分素材。
-    return fresh[0];
+      .sort((a, b) => (profile ? String(b.date).localeCompare(String(a.date)) : 0)
+        || (b.priority || 0) - (a.priority || 0) || (b.score || 0) - (a.score || 0) || String(b.date).localeCompare(String(a.date)));
+    const fresh = pool.filter(e => !(Date.parse(used[e.id]) > cutoff || Date.parse(used[key+'|'+e.id]) > cutoff)
+      && !pastMessages.some(text=>(e.bvid && text.includes(e.bvid)) || (e.title?.length >= 4 && text.includes(e.title))));
+    return (allowReuse && !fresh.length ? pool : fresh).slice(0,limit);
   }
 
-  function recordShare(id, slotKey) {
+  function pickShareCard(options) {
+    return shareCandidates(options)[0] || null;
+  }
+
+  function recordShare(id, slotKey, key = '') {
     if (!id) return;
     const hist = history();
     hist.used = hist.used ?? {};
-    hist.used[id] = new Date().toISOString();
+    hist.used[key ? key+'|'+id : id] = new Date().toISOString();
     const cutoff = Date.now() - 30 * 86400000;
     for (const [k, v] of Object.entries(hist.used)) {
       if (Date.parse(v) < cutoff) delete hist.used[k];
@@ -874,6 +906,7 @@ export function createBiliMemory({ stateDir, home = os.homedir(), log = () => {}
     refresh,
     briefBlock,
     recallBlock,
+    shareCandidates,
     pickShareCard,
     recordShare,
     lastSlot,

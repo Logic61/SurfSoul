@@ -18,13 +18,15 @@ const store = read('plugins/surfcore/lib/store.js');
 // 1) 桥接：消息进来写 inbox；QQ 提示词两条路径都注入记忆卡；有容量告警私聊端点。
 assert.match(bridge, /appendMemoryInboxEvent\(MEMORY_CARD_PATHS/, '桥接没有把消息写入记忆卡 inbox');
 assert.match(bridge, /recordMemoryInboxEvent\(\{ key, kind, event, plainContent, textContent, isOwner, quoteTargetIsSelf \}\)/, '桥接没有在 handleIncoming 里记录记忆');
-assert.match(bridge, /recordSelfMemoryEvent\(key, sent\.join\('\\n'\)\)/, 'v2 发送没有记录她自己的发言');
+// 2026-11-08：sendMessagesV2 改为返回 [{text, messageId}]（撤回要定位自己消息的 id），
+// 记录时若还直接 join 会写出 "[object Object]"；断言改为「取 text 后再 join」。
+assert.match(bridge, /recordSelfMemoryEvent\(key, sent\.map\(/, 'v2 发送没有记录她自己的发言');
 assert.match(bridge, /recordSelfMemoryEvent\(key, text\)/, 'v1 发送没有记录她自己的发言');
 assert.match(bridge, /isSelf: true/, '桥接 inbox 自发言没有 isSelf 标记');
-assert.match(bridge, /const memoryBlock = memoryCardPromptBlock\(\)/, 'v1/chat 角色提示没有注入记忆卡');
-assert.match(bridge, /const memoryCardText = memoryCardPromptBlock\((key|cfg\.ownerQQ)/, 'v2 唤醒提示没有注入记忆卡');
+assert.match(bridge, /mode === 'v2' \? '' : memoryCardPromptBlock\(\)/, 'v1/chat 角色提示没有注入记忆卡');
+assert.match(bridge, /const turnMemory = memoryContextForTurn\(key, st.recentMessages, deliveryRecord/, 'v2 唤醒提示没有注入记忆卡');
 assert.match(bridge, /\/api\/memory-card\/notify/, '桥接缺少记忆卡容量告警端点');
-assert.match(bridge, /memoryCard: memoryCardPromptBlock\(key\)/, 'qq_get_prompt 没有返回记忆卡');
+assert.match(bridge, /memoryCard: turnMemory\.episode/, 'qq_get_prompt 没有返回记忆卡');
 
 // 2) B站 调度器：每次醒来的统一上下文里有记忆卡（仅 B站 公开 scope）。
 assert.match(scheduler, /memoryCardPromptBlock\('bili'\)/, 'B站调度器没有注入记忆卡');

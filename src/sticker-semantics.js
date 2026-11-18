@@ -23,11 +23,11 @@
 // neighbors 用来兜「情绪相近」：委屈↔难过、嘲讽↔得意 这类相邻情绪给部分分。
 export const STICKER_EMOTIONS = [
   { key: 'happy', label: '开心', words: ['开心', '高兴', '好耶', '太好了', '爽', '幸福', '哈哈哈', '嘿嘿', '乐死', '棒', '快乐', '美滋滋'] },
-  { key: 'funny', label: '搞笑', words: ['搞笑', '好笑', '绷不住', '笑不活', '乐子', '整活', '离谱', '笑死', '草', '233', '段子'] },
+  { key: 'funny', label: '搞笑', words: ['搞笑', '好笑', '绷不住', '笑不活', '乐子', '整活', '离谱', '笑死', '草', '233', '段子', '看热闹', '吃瓜'] },
   { key: 'smug', label: '得意', words: ['得意', '嚣张', '小样', '拿捏', '稳了', '哼哼', '骄傲', '炫耀', '看我', '轻轻松松'] },
   { key: 'tease', label: '嘲讽', words: ['嘲讽', '嘲笑', '杂鱼', '就这', '菜鸡', '欠揍', '阴阳', '讽刺', '拉胯', '弱哎', '不行啊', '笑你'] },
   { key: 'tsundere', label: '傲娇', words: ['傲娇', '才不是', '才没有', '谁要', '口是心非', '别扭', '哼'] },
-  { key: 'shy', label: '害羞', words: ['害羞', '脸红', '不好意思', '羞耻', '捂脸', '别看', '害羞了'] },
+  { key: 'shy', label: '害羞', words: ['害羞', '脸红', '不好意思', '羞耻', '捂脸', '别看', '害羞了', '心虚', '被说中', '被戳中', '被发现了'] },
   { key: 'cute', label: '卖萌', words: ['可爱', '萌', '软乎乎', '贴贴', '抱抱', '亲亲', '撒娇', '嘤嘤', '乖', '摸摸'] },
   // 「别／再／嘲笑」中间常插字（别再嘲笑、别去嘲笑），所以长说法要单独列；
   // 只写「别嘲笑」会漏掉「别再嘲笑我的回复」这种最常见的委屈说法。
@@ -501,14 +501,13 @@ export function rankStickers(entries, context, opts = {}) {
     const emoScore = emotionSimilarity(entry, hits);
     const kwScore = keywordSimilarity(entry, lowered);
     let score = W_EMOTION * emoScore + W_CONTENT * contentScore + W_KEYWORD * kwScore;
-    // 使用倾向：用过的略优先（真人也是顺手的那张），但上限很小，不能压过语义
-    score += Math.min(0.03, (Number(entry.useCount) || 0) * 0.01);
-    // 刚发过同一张就降权，避免每轮都是同一张
-    const sinceUsed = now - (Number(entry.lastUsedAt) || 0);
-    if (sinceUsed >= 0 && sinceUsed < 15 * 60 * 1000) score -= 0.08;
-    else if (sinceUsed >= 0 && sinceUsed < 60 * 60 * 1000) score -= 0.03;
-    score = clamp01(score);
+    // Apply the relevance threshold before the reuse penalty: a unique good match
+    // stays available while a comparable, less recently used reaction can go first.
     if (score < minScore) continue;
+    const sinceUsed = now - (Number(entry.lastUsedAt) || 0);
+    if (sinceUsed >= 0 && sinceUsed < 86400000) score -= 0.14 * (1 - sinceUsed/86400000);
+    score -= Math.min(0.04,Math.log1p(Number(entry.useCount) || 0)*0.012);
+    score = clamp01(score);
     const parts = [];
     if (emoScore >= 0.5) parts.push(`情绪命中「${hits.find((h) => h.key === normalizeEmotionKey(entry.emotion))?.label || emotionLabel(entry.emotion)}」`);
     if (contentScore >= 0.3) parts.push('内容相近');
@@ -530,6 +529,20 @@ export function rankStickers(entries, context, opts = {}) {
   return ranked.slice(0, topK);
 }
 
+// These are possible reactions for library retrieval, never a sending decision.
+// Prefer the latest speaker's target over echoing the mood of their message.
+export function outgoingStickerQuery(text, media = []) {
+  const line = String(text || '').trim();
+  if (/怎么(?:办|做|处理)|(?:认真|正经)(?:问|的)|帮我(?:看|查|确认)|出了事|出事故/.test(line)) return '';
+  if (/(?:你|甘棠).{0,7}(?:甩锅给我|甩给我|背锅)|(?:他|她|我)(?:被|让人).{0,4}抓包/.test(line)) return '';
+  if (/这(?:口)?锅.{0,6}(?:归你|你背|给你)|甩锅给你|这锅你来/.test(line)) return '无语 背锅 被甩锅 一脸无辜 顶锅';
+  if (/^(?:哈+[，,！! ]*)?(?:抓包|逮到了)[，,！! ]*(?:你|你又)|(?:被我|把你|当场把你).{0,4}(?:抓包|逮到|抓到)|你.{0,5}露馅了/.test(line)) return '认怂 投降 放弃抵抗 委屈 被发现了';
+  const sticker = media.find(m => m?.kind === 'sticker' || m?.emojiId || Number(m?.subType) > 0);
+  if (sticker && /才不肥|大肥鱼/.test(sticker.summary || '')) return '自嘲 被叫大肥鱼 胖成一团 搞笑';
+  if (/叫你.{0,4}肥鱼|你(?:这只|个|是条?)大肥鱼/.test(line)) return '嘴硬 傲娇 才不肥 被说胖';
+  return '';
+}
+
 /**
  * 生成注入提示词的「当前语境匹配」段落。没有匹配时返回空串（不占 token）。
  */
@@ -537,26 +550,9 @@ export function buildStickerMatchHint(ranked, opts = {}) {
   const list = Array.isArray(ranked) ? ranked.filter(Boolean) : [];
   if (!list.length) return '';
   const max = Math.max(1, Math.min(5, Number(opts.max) || 2));
-  const mood = Array.isArray(opts.moods) && opts.moods.length
-    ? `当前语境情绪：${opts.moods.slice(0, 3).join(' / ')}。`
-    : '';
-  const top = list[0];
-  const topRef = `#${String(top.no).padStart(2, '0')}`;
-  const strongScore = Number.isFinite(Number(opts.strongScore)) ? Number(opts.strongScore) : 0.72;
-  const strong = Number(top.score) >= strongScore;
-  const lines = list.slice(0, max).map((item) => {
-    const label = `#${String(item.no).padStart(2, '0')}`;
-    return `- ${label} ${item.emotionLabel}｜${item.content || item.desc || '无描述'}`;
+  const options = list.slice(0, max).map((item) => {
+    const ref = '#' + String(item.no).padStart(2, '0');
+    return ref + ' ' + item.emotionLabel + '｜' + (item.content || item.desc || '无描述');
   });
-  // 措辞跟着匹配分走：0.72 以上算「很贴合」，把「可以发」写成更强的建议。
-  // 2026-10-24 实测：只写「真的贴合才发」，模型看到 0.83 的 #06 仍然自我审查
-  // （日志原话「sending #06 might read as mocking/repeating」）→ 最后只发了文字。
-  const tail = strong
-    ? `（${topRef} 和当前语境很贴合（${Number(top.score).toFixed(2)}）：发它用 qq_send_sticker stickerId="${topRef}"。接梗、被吐槽/撒娇时发这张本身就自然，不是只有文字才叫回复——也可以只发这张表情、不配文字；严肃/敏感话题、对方真的在生气时才别发。）`
-    : '（真的贴合才发一张：qq_send_sticker stickerId="#编号"；情绪不对/贴不上就别硬发。）';
-  return [
-    `【表情匹配】${mood}本地语义索引最贴合：`,
-    ...lines,
-    tail
-  ].join('\n');
+  return '【表情匹配】' + options.join(' / ') + '（qq_send_sticker）';
 }
