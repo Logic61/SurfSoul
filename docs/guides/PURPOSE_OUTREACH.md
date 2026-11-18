@@ -357,6 +357,12 @@ confidence = 0.15
 
 写进根 `config.json` 的 `purpose`（设置页 QQ 页「主动找主人 · 目的机制」卡片可改）：
 
+> **2026-11-08 起，以下字段可能被「生活参数」覆盖层接管**：`enabled` / `gapMinMs` / `gapMaxMs` / `quietStart` /
+> `quietEnd` / `idleThresholdMs` / `maxCandidates` / `pendingTtlDays`。agent 通过 `life_*` 工具改这些时，值写在
+> `~/.dsh/surfcore/life-settings.json`（不写本文件），bridge 每 5s 热采用，**下一次排程**使用新值（已有 `nextFireAt` 不强制重排）。
+> 设置页改同一字段不会取消受管覆盖——以 `life_state` 的 saved/effective 两层为准，回滚走 `life_rollback`。
+> 完整语义见 [LIFE-SETTINGS.md](LIFE-SETTINGS.md)。
+
 | 键 | 默认 | 说明 |
 | --- | --- | --- |
 | `enabled` | `true` | 总开关；关掉后定时器不出发（手动「试一次」仍可用） |
@@ -396,6 +402,9 @@ confidence = 0.15
 | `screen.maxLeakPerDay` | `1` | 每天最多泄漏几次（0 = 不泄漏）；必须配合下面的冷却 |
 | `screen.leakCooldownMin` | `90` | 两次泄漏的最小间隔（分钟）；防 3 分钟重试把概率磨成必然 |
 | `screen.lotterySnoozeMin` | `15` | 「≥阈值但抽签没过」后多久再试（分钟）；<阈值那侧仍用 `retryMin` |
+| `screen.interruptTrigger` | `departure` | 抽签时机：`departure` = 出发时抽一次（旧行为）；`perLook` = **每张截图判完就抽，抽中即尝试搭话**（2026-11-08） |
+| `screen.targetPerDay` | `6` | perLook 下每天目标搭话次数；概率自动换算成「每张截图 p = targetPerDay ÷ 每天截图次数」 |
+| `screen.triggerMinGapMin` | `20` | perLook 下两次截图触发之间的最小间隔（分钟），防连发 |
 
 > 改完保存后 **要点「重启 QQ 桥接」**：桥接只在启动时读 `config.json`。
 > 重启后会先看 `nextFireAt`；如果落在安静时段，会排到当天/次日 `quietEnd` 之后。
@@ -416,12 +425,24 @@ confidence = 0.15
 
 所有字段都写进根 `config.json` 的 `purpose`；保存后点底部「重启 QQ 桥接」生效。
 
-### 看屏幕：根据屏幕判断要不要搭话（2026-11-01；2026-11-07 起两个载体都接）
+### 看屏幕：根据屏幕判断要不要搭话（2026-11-01；2026-11-07 概率闸门；2026-11-08 每张截图抽签）
 
 入口在 设置 → **桌宠** 页的「看屏幕再决定要不要搭话」卡片
 （2026-11-01 按用户要求从「目的」页移过去；「目的」页只保留指路和当前间隔）。
 **载体 = QQ 时同样生效**：桥接在出发前通过 pet-api `/purpose/screen/decide` 向插件要同一个决定
 （截图/视觉/抽签/泄漏预算都在插件侧；调不通按 fail-open 继续排程）。
+
+**两种抽签时机（`screen.interruptTrigger`）**：
+
+| 值 | 行为 | 抽签频率 |
+| --- | --- | --- |
+| `departure`（默认） | 目的机制真正要出发那一刻抽一次；抽不中就按 `retryMin` 稍后再试 | ~3–4 次/天 |
+| `perLook`（2026-11-08） | **每张截图判完就抽**；抽中即尝试一次主动搭话（截图成为触发源），定时器让位 | ~每 2 分钟一次；p 按 `targetPerDay` 换算 |
+
+`perLook` 下：`pAbove = targetPerDay ÷ 每天截图次数`，`pBelow = maxLeakPerDay ÷ 每天截图次数`
+（每天截图次数 ≈ 清醒 900 分钟 ÷ (intervalMin+1)，intervalMin=1 时约 450 张/天）。
+所以 `targetPerDay=6` → 每张约 1.33%、泄漏每张约 0.22%；两次触发至少隔 `triggerMinGapMin`（默认 20 分钟），
+每天由 `purpose.dailyMax` 封顶。截图管道坏了（最近失败 / 超 30 分钟没新判定）时，定时器会重新兜底。
 
 ```
 每隔 intervalMin 分钟（默认 10；在桌宠页「每隔多久看一眼（分钟）」里改）截一张当前屏幕
@@ -433,16 +454,16 @@ confidence = 0.15
        busy / 游戏 / 会议       → 不搭话
   → 软闸 interruptible（两种策略）：
        threshold（默认，旧行为）→ interruptible < 阈值 必不打扰，≥阈值 必放行
-       leaky（2026-11-07）     → ≥阈值按 rateAbove(0.85) 放行；<阈值按 rateBelow(0.05) 泄漏；
+       leaky                   → ≥阈值按 pAbove 抽签放行；<阈值按 pBelow 泄漏；
                                  泄漏受 maxLeakPerDay/leakCooldownMin 约束（默认每天 1 次、间隔 90 分钟）
   → 放行时摘要作为「你刚才瞥了一眼屏幕」写进提示词；SILENT 仍是最后一道软出口
 ```
 
 要点：
 
-- **概率是「每次判定」的**：screen 拒绝后排程按 `retryMin` 重试，所以同一张截图复用同一次抽签
-  （`pet/screen/policy.json` 落盘），且「≥阈值但抽签没过」会 snooze `lotterySnoozeMin`（默认 15 分钟），
-  避免高概率被 3 分钟重试磨成必然。
+- **概率是「每次判定」的**：departure 下同一张截图复用同一次抽签（`pet/screen/policy.json` 落盘），
+  「≥阈值但抽签没过」会 snooze `lotterySnoozeMin`；perLook 下每张新截图 = 新一次抽签，
+  抽中后按 `triggerMinGapMin` 限频、`dailyMax` 封顶。
 - **默认关**：截图会离开本机（发给你配置的视觉端点）；开关、模型、端点都在「目的」页的
   「看屏幕再决定要不要搭话」卡片里；密钥只存 DSH 凭据（默认 `DEEPSEEK_API_KEY`），不进配置文件/日志。
 - **省 token 的关思考**：请求带 `thinking:{type:'disabled'}`（DeepSeek：reasoning 0、约 40 completion tokens、~1.3s）

@@ -10,28 +10,9 @@
 
 ---
 
-## 1. 判断看什么
+## 1. 谁决定收尾
 
-不是按「回了几条」算，而是看六类信号：
-
-| 信号 | 含义 | 从哪来 |
-| --- | --- | --- |
-| 我最后一句 | 嗯/好/哈哈/晚安 = 收尾式；提问 = 在等答案；实质内容 = 还在输出 | `recentMessages` 里最后一条 `isSelf` |
-| 对方最后一句 | 提问 / 请求 / 实质内容 / 附和 / 道别 | 最后一条非 `isSelf` 消息的分类 |
-| 我的继续意愿 | 还有想说没说的、有话题在等追问 | `pendingThoughts`、`activeTopics[].pendingQuestion` |
-| 对方的继续意愿 | 问句、@/引用、连续多条、最后一条是否有内容 | 消息分类 + 近 5 分钟条数 |
-| 话题闭环 | 事情办完、问题答完、约定说定、对方道别 | 分类 + 「说好了/扯平/一言为定」等收束语气 |
-| 未完成 | 对方明确在提问/求助、还没答 | 最后一条是否 question/request 且自己没有后续 |
-| 节奏疲劳 | 来回很多轮、双方越回越短、对方很久没接 | 近 10 分钟条数、近 3 条平均长度、静默时长 |
-
-输出三态：
-
-- `continue`：还在聊，正常接。
-- `linger`：先别急着补话，等对方补充或过一会儿再看。
-- `close`：可以自然收尾——不要再补一句。
-
-**代码只给建议。** 最终收不收由模型调用 `qq_close_conversation` 决定。
-这样不会因为一句「嗯」被误判而突然消失，也不会因为模型想偷懒而跳过该回的问题。
+甘棠读同一会话里最近的来回、说话人、引用和还有没有人等她答复，自己选择接话、发图、等待或收尾。群友互相提问和熟人说反话都需要这些上下文。控制台的本地节奏指标用于排障，聊天唤醒里只保留上次的结束点。
 
 ## 2. 三个动作别混
 
@@ -47,14 +28,9 @@
 
 ## 3. 硬规则与冷却
 
-### 3.1 不允许用收尾逃避
+### 3.1 先处理新来信
 
-对方最后一句明确在提问/求助、且自己还没接时，`close` 返回 **409 `open-question`**：
-
-> 对方最后一句是在提问/求助，还没回答；先用 qq_send_message 回完再收尾。
-
-配置项 `socialV2.closure.requireNoOpenQuestion` 默认开。关掉它等于允许「用结束逃避」，
-不建议。
+收到尚未向模型展示的新来信时，桥接返回 409 `unseen-messages`，保留所有未读；模型通过 `qq_get_unread_messages` 读完再决定。已经展示的问题由模型结合前文判断，`openQuestion=pending` 且 `requireNoOpenQuestion` 开启时会收到 409 `open-question`。反问、问旁人或已经回答的问题都可自然收尾。
 
 ### 3.2 冷却只压软唤醒
 
@@ -96,20 +72,35 @@
   有更新的一次收尾 / 会话映射已被别的路径换掉 / 等待 6 次（约 30s）仍在忙。
 - 只在 `reserved2` 的 `qq_close_conversation` 链路生效（v1 模式没有收尾概念）。
 
-### 3.5 不回复也要静置 5 分钟（2026-11-02 用户要求）
+### 3.5 上下文到阈值换 DSH 会话（2026-11-10 用户改口径：220k 一换）
 
-原来「这轮不想接」可以直接结束回合：下一句会以**新的唤醒**进来，而每次唤醒都要重发一份唤醒提示
-（旧实现里含记忆卡，实~12.7k 字）。用户原话：「可以不回，但是应该 wait 5 min，否则下次唤醒又要发一串 bootstrap」。
+用户原话：「要不改成上下文大小吧，220k 一换」——收尾次数太慢时（一段对话聊很久也不收尾，
+但每轮都在为几十万历史付费），直接按**当前上下文大小**换 session。
 
-现在唤醒提示里有一条硬规则（每轮都在，块头 `【不回复也要静置】`）：
+- 配置：`socialV2.closure.rotateAfterContextTokens`（默认 **0=关闭**；live 设为 **220000**）。
+- 口径：**当前这一轮真正带入模型的 input token**（最近一条 assistant usage 的
+  `cacheMiss + cacheHit + cacheWrite`），不是会话累计计费量——后者每轮把历史重发都叠加一次，
+  一条正常长会话几轮就能到几百万，阈值会退化成「每轮都换」。读不到采样（刚换过会话 /
+  DSH 还没上报 usage）时为 0，**不触发**（fail-open 到旧行为，宁可晚换也不误拆）。
+- 触发点：每个回合结束（`turn/end`）后判断；到阈值就挂 5s 定时器，定时器里
+  `isConversationBusyV2()` 为 false 才执行 `retireSession(key)`（会话忙最多重试 6 次，
+  放弃后下一次回合结束重新判断——上下文只会更大，不会漏）。
+  与 3.4 的「自然收尾 N 次」是**两个独立触发，谁先到算谁**；live 把 `rotateAfterClosures`
+  设成 0，就是纯上下文模式。
+- 为什么不在投递前当场换（上游 fork 的 session-rollover 做法）：本地桥接的 `deliverPromptNow`
+  可能和上一轮 turn 有交错，当场 retire 会轮换 agentToken、把在途回合的回复打成 403；
+  回合结束后 5s 换，会话里没有在途 turn，最安全。为什么不是「每轮都重发就重发」：
+  DSH 自动压缩阈值在 1M 窗口下高达 727k，等它压缩时上下文已经贵了一整天。
+- 换会话只换 DSH session：记忆卡/收尾记录/轻记忆/`recentMessages` 都在 `social-v2.json`，
+  下一段对话 `ensureSession` 懒创建、走 bootstrap 冷启动。
+- 可观测：`GET /api/socialV2/states` 每个会话带 `contextTokens`（当前上下文，离阈值还有多远）；
+  `bridge.log` 命中时打 `[轮换] … 上下文 N token ≥ 阈值，换新会话`。
+- 与 3.4 的静置窗口不同：上下文滚动**不受 `rotateIdleMs` 约束**（那边是为收尾场景设计的
+  「等对方真的不说话了」，这边是成本闸：到阈值就该换，否则下一轮又是几十万）。
 
-- 判断这一轮不需要发言 / 已经自然收尾 → 先 `qq_wait_for_messages(timeoutMs=300000)`；
-- 返回 `preSleepWaitSatisfied=true`（期间没人再说话）**才可以结束回合**；
-- 期间有人说话 → 看 `newMessages` 继续判断，能接就接；
-- 等待期间不花模型 token（只是把回合挂着），比下一条消息重新唤醒便宜得多。
+### 3.6 等补充、自然收尾与潜水
 
-配套：`replyCheck` 唤醒文案同步（不再写「不用为这个去等观察窗口」）；`socialV2.wake.bootstrapOnlyContext=true`
-把记忆卡等最大静态块改成只在 bootstrap 注入（见 PITFALLS #93）。
+对方还在分条打字，可以短等补充；聊完调用 `qq_close_conversation` 后就能结束回合。想暂时退出聊天并改唤醒策略时才走配置的潜水观察窗口。桥接维护已读水位、时间和下次唤醒，问句是否指向自己由聊天模型结合前文判断。
 
 ## 4. 结束点长什么样
 
@@ -149,18 +140,24 @@
   "maxSummaryChars": 160,
   "maxNextOpeningChars": 120,
   "rotateAfterClosures": 5,
-  "rotateIdleMs": 300000
+  "rotateIdleMs": 300000,
+  "rotateAfterContextTokens": 0
 }
 ```
 
 - `enabled=false`：不注入判断块、`close` 返回 403；工具也会在 MCP 注册期被过滤；
-- `promptInWake=false`：仍可 close，但唤醒不再带判断参数（不推荐）；
+- `promptInWake=false`：仍可 close，唤醒时省略上次的结束点；
 - `rotateAfterClosures`（默认 **5**，0=关闭）：本会话内自然收尾累计 ≥ 该次数 → 之后换 DSH 会话；
-  换完计数归零重新数；设为 0 关闭轮换（继续用单个长会话，靠 DSH 压缩兜底）。
+  换完计数归零重新数；设为 0 关闭「按收尾次数」轮换。
 - `rotateIdleMs`（默认 **300000 = 5 分钟**，0=不等）：收尾后要静置这么久没有新消息才真正换会话；
   期间对方又开口就继续用原会话。调大更省 bootstrap token，调小上下文更干净。
+- `rotateAfterContextTokens`（默认 **0=关闭**；live **220000**）：当前上下文（最近一轮 input token）
+  ≥ 该值 → 回合结束后换会话，见 §3.5。**不受 `rotateIdleMs` 约束**；与 `rotateAfterClosures`
+  是独立的两个触发（live 设 0 关闭收尾口径，只按上下文）。
 - 计数存在 `social-v2.json` 的会话状态 `sessionClosures`（跨桥接重启保留）；换会话/任何退役路径都会清零。
-- 设置页 QQ 页有「二代 · 对话收尾判断」卡片（`rotateAfterClosures`/`rotateIdleMs` 暂未做成 UI，改 `config.json` 生效）。
+  `contextTokens` 不落盘：每次都从 token 账本 `state/token-usage.jsonl` 的最近采样现算。
+- 设置页 QQ 页有「二代 · 对话收尾判断」卡片（`rotateAfterClosures`/`rotateIdleMs`/
+  `rotateAfterContextTokens` 暂未做成 UI，改 `config.json` 后重启桥接生效）。
 
 ## 6. 验证与回滚
 

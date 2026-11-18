@@ -374,7 +374,6 @@ TTS_EMPTY_AUDIO / 空文本     → 502 / 400
 | 9 | **先查额度再合成** | 避免超限还白烧一次 GPU | 429 | `:6695`、`:2143-2154` |
 | 10 | 合成 | `text` → `synthesizeVoiceText` | 502/400/429 | `:6696-6699` |
 | 11 | 解析库文件 | `voice` → `resolveVoicePathForV2` | 400 | `:6708-6712` |
-| 12 | 再查一次额度 | 合成可能耗时，防止期间被别的请求占满 | 429 | `:6715` |
 | 13 | `dryRun` | 只探测并返回摘要，不发 | — | `:6716-6721` |
 | 14 | 发送（`sendVoiceForV2`） | 见 5.2 | 500 | `:6722-6731` |
 | 15 | 记录「一条主人消息已换过语音」 | `voiceLastSentAt` | — | `:6732` |
@@ -386,7 +385,6 @@ TTS_EMPTY_AUDIO / 空文本     → 502 / 400
 voice.enabled 检查（仅这里，底层不查）          src/bridge.js:2323
   → resolveVoicePathForV2 / 已给的 resolved      :2325
   → 音量参数前置校验（给了 audio 才做）           :2327
-  → voiceBudgetCheck（只查不占）                  :2328 / :2143-2154
   → sendVoiceV2:
       ① 文件名审计（敏感信息/令牌）               :2176 / :1899-1907
       ② inspectAudio（大小/时长/编码）            :2178-2183 / voice-core:204-234
@@ -396,7 +394,7 @@ voice.enabled 检查（仅这里，底层不查）          src/bridge.js:2323
       ⑥ 入 sendChain 串行队列                     :2205-2209
       ⑦ POST OneBot send_*_msg，60s 超时          :2211-2223
       ⑧ finally 删临时音量文件                    :2249-2252
-  → voiceBudgetCommit（真正发出后才记账）          :2330 / :2157-2161
+  → 记录同一会话的成功发送时间，供下一条消息使用
   → recordVoiceSentV2（写 recentMessages）        :2331 / :2256-2276
   → log + activity                               :2332-2333
   → 可选转写回读 fetch_ptt_text                   :2336-2352
@@ -429,7 +427,7 @@ voice.enabled 检查（仅这里，底层不查）          src/bridge.js:2323
 | `voice.enabled` | 必须为真 | **不检查**（否则默认关闭时你连试发都做不了，`:6537-6540`） |
 | 目标语音库边界 | 只能库内 | 允许库外绝对路径（`resolveVoicePathForOperator`，`:2124-2135`） |
 | 触发规则（主人窗口） | 强制 | **不检查** |
-| 频率额度 | 按会话 key | 统一记在 `operator:cli` 桶（`:6603`、`:6613`） |
+| 发送间隔 | 普通消息间隔及本段语音时长 | 同左 |
 | `dryRun` | 支持 | 支持（`:6600`） |
 | 默认回执 | `autoReadback` 控制 | 默认做，`verify:false` 可关（`:6617`） |
 | 返回 | 多一个 `source`（`tts` / `library`）字段 | 额外的 `preview`（大小/时长/编码/上限）；没有 `source` |
@@ -491,12 +489,11 @@ voice.enabled 检查（仅这里，底层不查）          src/bridge.js:2323
 - 只有主人**新说一句**才会推进 `voiceOwnerAt`，从而重新放行。
 - 操作者通道不写这个时间戳，所以手动试发不会消耗 AI 的「一条」额度。
 
-### 6.4 频率上限
+### 6.4 与文字共用的发送间隔
 
-- 检查：`voiceBudgetCheck()`，每分钟 / 每小时两个桶（`src/bridge.js:2143-2154`）。
-- 记账：`voiceBudgetCommit()`，**只在发送成功后**（`:2157-2161`、`:2330`）。
-- 作用域：AI 通道按**会话 key** 分开计数；操作者统一记 `operator:cli`（`:6603`、`:6613`）。
-- `0` 表示不限制（`>0` 才判，`:2148`、`:2151`）；UI 把范围夹在 1–60 / 1–600（`src/bridge.js:6437-6438`、`plugins/surfcore/lib/client.js:3101-3102`）。
+同一会话逐条排队。上一条自己的消息收到成功回执后，记录并持久化时间。发送语音时还要满足「当前时间减去上次成功时间」严格大于本段音频时长，取普通发送间隔与时长要求中较晚的时间。无人发过时可以直接开口。合成和排队的耗时已包含在间隔中。群友来信、失败发送及预演不重置计时。不同会话共用网关的基础发送间隔。
+
+旧的语音分钟与小时额度已退出运行；AI 和操作者走桥接时都使用普通消息的发送策略。语音触发范围仍按控制台设置生效。
 
 ### 6.5 实际放行矩阵
 
@@ -581,7 +578,7 @@ voice.enabled 检查（仅这里，底层不查）          src/bridge.js:2323
 | `duration > 60s` | 警告「会被显示成长语音」（`:228`） |
 | 没有音频流 | 警告「网关转码可能失败」（`:229`） |
 
-这条「探测失败也放行」的策略是有意的：语音条最终由网关转码，桥接不该因为本机缺 ffprobe 就完全封死发送。代价是**没有时长护栏**（见 §10）。
+桥接收到未知时长时会尝试从 WAV 音频头恢复时长。仍不能确认就拒绝发送。
 
 ---
 
@@ -663,8 +660,6 @@ voice.enabled 检查（仅这里，底层不查）          src/bridge.js:2323
 | `dir` | string | `"audio"` | 语音库目录；相对**仓库根**解析，也可写绝对路径 | 重启桥接（`voiceCfg()` 读内存） |
 | `maxSeconds` | number | `300` | 单条音频时长上限；`<=0` 回落 300 | 重启桥接 |
 | `maxBytes` | number | `20971520`（20 MB） | 单条音频体积上限；`<=0` 回落 20 MB | 重启桥接 |
-| `maxPerMinute` | number | `2` | 每分钟语音条数上限；`0` = 不限 | 重启桥接 |
-| `maxPerHour` | number | `10` | 每小时上限；`0` = 不限 | 重启桥接 |
 | `allowAbsolutePath` | bool | `false` | **历史开关**：现在不影响 AI 通道，只在启动日志提示 | 重启桥接（仅提示） |
 | `defaultVolume` | number | `1` | 默认音量倍数；`<=0` 回落 1 | 重启桥接 |
 | `loudness` | string | `"normal"` | 智能音量档位 `quiet/normal/loud` | 重启桥接 |
@@ -734,7 +729,7 @@ voice.enabled 检查（仅这里，底层不查）          src/bridge.js:2323
 | 每张包卡片的「安装（大小）」/「卸载」 | `POST /api/voice/packs/install` 或 `/remove`；安装后每 1.5s 轮询一次，最多 240 次 | `plugins/surfcore/lib/client.js:3020-3031`、`:2989-3001`、`:3057-3059` |
 | 云端表单：AppID / Access Key / 音色 ID / 保存 / 测试连接 | `POST /api/voice/packs/cloud-config`、`POST /api/voice/packs/test` → 包内 `config.toml` 与 `voices/age12*/voice.json` | `plugins/surfcore/lib/client.js:2913-2964`；`src/voice-packs.js:313-338` |
 | 云端用量：今日/本月/估算费用/剩余额度；单价、额度输入框 | `POST /api/voice/rules` 的 `pricePerKChar` / `monthlyQuota`（存 `socialV2.voice.cloud.*`） | `plugins/surfcore/lib/client.js:2870-2909`；`src/bridge.js:6442-6444` |
-| 触发规则：允许谁触发 / 每分钟 / 每小时 / 允许 AI 主动发语音 / 保存 | `POST /api/voice/rules` → `trigger.who`、`maxPerMinute`、`maxPerHour`、`tts.enabled` | `plugins/surfcore/lib/client.js:3091-3108`；`src/bridge.js:6429-6447` |
+| 触发规则和 AI 主动语音开关 | `POST /api/voice/rules` 更新 `trigger.who`、`tts.enabled` | 语音设置页 |
 
 注意：语音页**没有** `baseUrl`、`character`、`cacheVersion`、`volume`、`loudness` 的输入框；这些只能改 `config.json`（或在「全部参数」页改 `socialV2.voice.*` 的那几项，见 `plugins/surfcore/lib/client.js:1707-1718`）。
 
@@ -782,7 +777,7 @@ voice.enabled 检查（仅这里，底层不查）          src/bridge.js:2323
 | `ffprobe` 缺失/超时 | 只警告，**不校验时长** | 可能发出超长音频（护栏失效） | `:220-224` |
 | 没有音频流 | 只警告「转码可能失败」 | 可能发不出去 | `:229` |
 | 网关不支持该编码/转码失败 | OneBot 返回失败 → 500，消息不会发出 | 换 mp3/wav 等常见格式 | `src/bridge.js:2224-2228` |
-| SILK 文件 | 跳过探测直接发 | 正常 | `:217-219` |
+| 无法测时长的 SILK | 桥接拒绝发送 | 改用可测时长的音频 | `inspectOutgoingVoice` |
 | 音量倍数越界（>4 或 <0.1） | 「音量倍数需在 0.1~4 之间」：AI 通道 500，操作者通道在预校验阶段就 400 | 修参数 | `src/voice-core.js:323-328`、`src/bridge.js:6577-6585` |
 | 响度档位写错 | 「未知的响度档位」→「音量处理失败」：AI 通道 500，操作者通道预校验 400 | 改成 quiet/normal/loud 或数字 | `src/voice-core.js:317-321`、`src/bridge.js:2194-2196`、`:6577-6585` |
 | 没有 ffmpeg | 「找不到 ffmpeg…」→ 500 | 装 ffmpeg 或设路径 | `src/voice-core.js:408-411` |

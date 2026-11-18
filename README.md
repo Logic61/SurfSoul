@@ -3,7 +3,7 @@
 > **本仓库叫 SurfSoul**（[github.com/Logic61/SurfSoul](https://github.com/Logic61/SurfSoul)）：它是 [Mieksido/surfcore](https://github.com/Mieksido/surfcore)（下称 **SurfCore**）的**非官方衍生版（fork）**，与 SurfCore 维护者无关，也未获上游背书。
 >
 > - **分叉点：SurfCore v0.6.22（2026-10-28，MIT）**，commit `d7f6b33`（与上游同 tag 是同一个 commit）；
-> - 分叉后本地累计 **56 个提交**（作者 `logic`，2026-10-30 ~ 2026-11-07），新增 65 个文件、修改 122 个文件；
+> - 截至 2026-11-07，分叉后本地累计 **56 个提交**（作者 `logic`，2026-10-30 ~ 2026-11-07），新增 65 个文件、修改 122 个文件；
 > - **版本号仍沿用 `0.6.22`**（未跟随上游 bump，`package.json` 未改）；上游同期已独立走到 **v0.8.9**（2026-11-07）；
 > - SurfCore 的问题/功能请求请回[原仓库](https://github.com/Mieksido/surfcore)；SurfSoul 的问题、改动请找 SurfSoul 维护者；
 > - 许可仍为 **MIT**，`LICENSE` 原样保留上游版权声明（`Copyright (c) 2026 Derpyu520 and qq-bridge / QSH contributors`）。
@@ -14,8 +14,21 @@
 
 ---
 
+## 当前 main 的用法
+
+| 项目 | 设置 |
+| --- | --- |
+| 版本 | `0.6.22` |
+| QQ 对话引擎 | 在 DSH 设置 → SurfCore → QQ → 连接与身份中选择 DeepSeek 或 Codex CLI。Codex 可选 Sol 或 Astra，并可调整思考强度。切换后，下一轮聊天的上下文和按需读取的图片会交给所选服务。Codex 使用本机已登录的账户。 |
+| QQ 会话与记忆 | 二代会话首次接入时加载一次总提示。可用 `socialV2.closure.rotateAfterContextTokens` 设置按当前输入长度换会话，默认 0 表示关闭此项。群友称呼、用词和分享偏好按群读取。陌生词可以从群内原话、记忆、网页和 B 站查证。[会话轮换](docs/guides/CONVERSATION_CLOSURE.md) |
+| 图片、表情与语音 | 可按消息查看图片和附件、收藏指定反应图，并结合近期使用记录选表情。AI 发语音默认关闭。启用后可用 `qq_list_voices` 查语音、用 `qq_send_voice` 回应。合成语音沿用消息发送间隔，同场上一次成功发言距今还须超过这条语音的时长。[语音设置](docs/guides/SUBSYSTEM-VOICE.md) |
+| 分享与旁白 | 群聊选片读取本群的 `shareTopics` 和已分享的视频。私聊主动开场优先接双方近况。角色旁白出现在 DSH 会话中，QQ 收件人只看到发给自己的消息。 |
+| 桌宠 | 键盘输入与语音转写共用聊天设置，开麦、朗读和共享屏幕可分别控制。共享时使用所选看图模型。 |
+| 生活参数与撤回 | 有权限的回合可预览、修改或回滚作息和主动频率。QQ 撤回按当前会话、消息归属和群权限检查，群聊与私聊分别配置时间窗口。[生活参数](docs/guides/LIFE-SETTINGS.md) · [QQ 规则](RULES.md) |
+
 ## 目录
 
+- [当前 main 的用法](#当前-main-的用法)
 - [一、与原仓库的关系](#一与原仓库的关系)
 - [二、SurfSoul 是什么](#二surfsoul-是什么)
 - [三、差异总览（12 个主题）](#三差异总览12-个主题)
@@ -31,12 +44,14 @@
 
 ## 一、与原仓库的关系
 
+下表和后文的提交数、差异统计取自 2026-11-07 的对照快照。
+
 | 项 | 值 |
 | --- | --- |
 | 上游 | [Mieksido/surfcore](https://github.com/Mieksido/surfcore)（MIT，下称 **SurfCore**） |
 | 本仓库 | **SurfSoul** — [github.com/Logic61/SurfSoul](https://github.com/Logic61/SurfSoul)；内部包名/插件 id 仍为 `surfcore`（见上方「名称对照」） |
 | 分叉点 | **v0.6.22**（2026-10-28），commit `d7f6b33`（与上游 v0.6.22 tag 同一 commit） |
-| 本地 HEAD | `060796c`（2026-11-07） |
+| 2026-11-07 快照 | `060796c`（2026-11-07） |
 | 分叉后本地提交 | **56 个**（作者 `logic`，2026-10-30 ~ 2026-11-07；`git rev-list --count v0.6.22..HEAD`） |
 | 相对分叉点差异 | **187 个文件**（新增 65 / 修改 122 / 无删除），净 **+30,724 / −1,267** 行 |
 | 上游最新 | **v0.8.9**（2026-11-07）；v0.6.22 之后上游独立走了 **34 个正式 Release**（v0.7.0–v0.7.23 共 24 个 + v0.8.0–v0.8.9 共 10 个，另有 13 个 `-dev` 预发布 tag） |
@@ -293,7 +308,7 @@
 
 ```powershell
 git clone https://github.com/Logic61/SurfSoul.git
-cd surfcore
+cd SurfSoul
 npm install                     # 没有 npm 可用 DSH 自带的 pnpm
 node scripts/setup-dsh.mjs      # 自动判断 DSH profile，注册 preset / MCP / bundle
 # 完全退出并重新打开 DSH → 设置 → SurfCore（插件当前显示名）→ 诊断 → 一键安装（全部）
@@ -303,7 +318,7 @@ node scripts/setup-dsh.mjs      # 自动判断 DSH profile，注册 preset / MCP
 
 - **必须从仓库根目录安装**：插件里有多处 `../../../src/xxx.js` 引用、且 junction 安装时模块从仓库真实路径解析，仓库根必须有 `node_modules`；只装 `plugins/surfcore` 会报模块不存在。
 - 装完要**刷新页面或重启 DSH**：客户端模块图是页面加载时的快照，否则设置里暂时看不到 SurfCore（插件当前显示名）。
-- 仓库模式会注册：`qq-chat` / `qq-chat-v2` 两套 agent preset、4 条 MCP server（`snowluma` / `snowluma-host` / `web-search-safe` / `stock-safe`）与 `surfcore` bundle。
+- 仓库模式会注册：`qq-chat` / `qq-chat-v2` 两套 agent preset、5 条 MCP server（`snowluma` / `snowluma-host` / `web-search-safe` / `stock-safe` / `life-settings`）与 `surfcore` bundle。
 
 ### B. 自包含 DSH 插件包（SurfSoul 新增，建议优先）
 

@@ -2,7 +2,7 @@
 
 ## 现象
 
-- 用户按文档装了 SnowLuma2（`D:\Tools\SnowLuma2`），QQ 也登录了；
+- 用户按文档装了 SnowLuma2（`<工具目录>/SnowLuma2`），QQ 也登录了；
 - 概览页点「检测已安装的 SnowLuma」→ 提示没找到 / 连接失败；
 - 控制台日志里 `[Hook] loaded` 正常，说明协议端本身没问题。
 
@@ -14,7 +14,7 @@
 if (sl.launcherPath) push(path.dirname(String(sl.launcherPath)));
 ```
 
-用户填的是**根目录** `D:\Tools\SnowLuma2`，取 `dirname` 得到 `D:\Tools` —— 而 OneBot 配置实际在
+用户填的是**根目录** `<工具目录>/SnowLuma2`，取 `dirname` 得到 `<工具目录>` —— 而 OneBot 配置实际在
 `SnowLuma2\app\config\onebot_<uin>.json`。候选目录全错，读不到 token，自然"识别不到"。
 
 ## 修法（v0.6.11）
@@ -30,5 +30,5 @@ if (sl.launcherPath) push(path.dirname(String(sl.launcherPath)));
 
 ## 遗留
 
-- 若用户把 SnowLuma 装在非标准位置（例如 `D:\SL\bin\SnowLuma2`），仍可能需要手动填 `homeDir`；
+- 若用户把 SnowLuma 装在非标准位置（例如 `<自选位置>/bin/SnowLuma2`），仍可能需要手动填 `homeDir`；
 - 建议后续加"检测失败时列出所有尝试过的目录"，方便用户自查。

@@ -3,6 +3,331 @@
 > 给「半天后的我」和接手的人：**现在做到哪、什么没验证、下一步按什么顺序做**。
 > 每次开工先读这里，收工前更新这里。时间一律写本地时间（Asia/Shanghai）。
 
+## 桌宠统一对话（2026-11-16）
+
+开麦只控制收音。语音输出控制回复是否朗读，共享屏幕需单独选源。键盘与转写共用普通聊天模型设置；共享期间两种输入均走所选看图模型。普通聊天协议的 modality 表示回复形式，inputModality 单独记录输入来源。统一入口未共享时跳过旧客户端的按问句截图。共享会话每帧读取当前朗读服务与音色，避免开关被锁在共享开始时的状态。
+
+## QQ 聊天引擎与重复打趣
+DSH 小记现在写成角色旁白，有戏时可展开两三句，Codex 的 note 最长 360 字符。仍用同一行标记和原有 QQ 隔离路径。
+二代 QQ 开场只带 B 站身份和口味，具体看片经历按来信召回。主动私聊优先接双方确有的近况。正常结束时在 DSH 会话中展示一行【DSH小记】，QQ 桥接在处理草稿、目的备忘和转发前剥离这一行。
+二代群聊的主动开场和定时选片都可读取角色记忆 qq-group-notes.json 里的本群 shareTopics。带偏好的群不再在开场收到通用片单，缺合适影片时定时分享跳过。正式观看进入索引，预览不算。按群记录发过的 BV。收藏浏览和情绪推荐会考虑最近使用时间。收到可复用的反应图时可以按消息和图片序号收藏。
+遇到陌生用词时，甘棠先看本群确认的释义。查词工具还可以就地查本会话的原话与有权读的记忆文档。仍拿不准时她可以查网页、B 站；两处都没找到贴合语境的证据才向发言人求证。这段指引放在 QQ 二代预设，普通来信无需额外检索。
+老版 QQ 配置仅存管理员号码时，桥接按同一 QQ 号从 SurfCore 统一设置读取主人称呼。
+图片工具会把图像交给当前模型。以文件形式收到的图片可通过 qq_get_message_detail 的 includeFiles 读取；同一入口能预览 UTF-8 文本、PDF 的文字层和 DOCX 正文。图片沿用看图开关。
+群成员称呼按当前群和发言账号匹配，可以在私有角色记忆目录的 qq-group-notes.json 存放已确认的称呼和用词。成员也可在群里用「以后叫我……」更新自己的叫法。快照、等消息和翻未读均读取当前约定。
+SurfCore 的 QQ 页「连接与身份」和桥接控制台都能改 Codex 思考强度。Sol 和 Astra 共用六档设置，旧配置默认为 low。现有群和私聊从下一次来信读取新值，DeepSeek 另存自己的档位。
+QQ 设置中的对话引擎可选 DeepSeek 和 Codex CLI，后者可选 Sol 或 Astra。二代会话在组装下一次请求时读取设置。DSH 维护历史、解析图片、校验和执行 QQ 工具。Codex 使用本机登录、临时无环境会话和结构化动作输出。检查时先用虚构会话，真实群无需收测试消息。
+熟人戳闹已经来回几次时，唤醒、等消息、翻未读共用反应提示。文字隔了一阵才跟进一个戳，可以一张收藏图收住。测试入口为 scripts/test-qq-codex.mjs。
+
+## 2026-11-15 QQ 语音按实测时长排队
+
+语音与文字共用发言间隔和会话发送次数设置。语音还须距离甘棠在本会话上一条成功发送的消息严格超过本段时长。等待只占用本会话的队列。群友插话、预演和失败发送都不会重置计时。发音示范或模仿腔调时提示优先开口。续聊中每六批可用语音的新来信才考虑追加一句选择提示，近三条自己的发言有语音便跳过。提示不强制出声。
+
+## 2026-11-15 QQ 自主语音
+
+甘棠可以在允许发言的群或私聊自主发一条语音。实际范围取决于本机语音触发设置。owner 在群里要求主人最近十分钟内说过话，anyone 才覆盖所有已获准发言的场合。现场合成的原话进入近期记录，可接着聊。发送成功计入本轮行动，合成期间暂缓同场待补的文字稿，网关确认接收即取消补发。
+
+## 2026-11-15 朗读插话与人声检测
+
+开麦后用随桌宠安装的 TEN VAD 模型在本机检测人声。朗读时连续检测到人声后短暂压低声音，确认麦克风还有人声即暂停朗读，保留句首，连续静音满一秒后送去转写。检测库版本固定于 TEN-framework/ten-vad 的 9a3f4b55467a3418f896044370cc7689f4b3b14a，许可证与第三方声明随模型分发。
+
+## 2026-11-15 桌宠 DeepSeek 音色
+
+普通语音和伴学共用「伴学 → 朗读 → DeepSeek 云端 → 音色」。可选海星 Stella 和暗潮 Tide。选择随桌宠设置保存，普通语音历史重播沿用原消息音色。回归覆盖流式朗读、整段朗读、音频缓存和旧记录。
+
+## 2026-11-15 伴学历史、独立窗口与 Codex 看图
+
+对话框首次打开时靠近桌宠，拖动角色只移动角色和气泡。点记录能重看普通聊天及带「伴学」标记的键盘、语音提问和实际显示过的提示。伴学文字按角色写入独立记录，在界面上按时间合并；不会进入 QQ 记忆或普通聊天提示词。旧版未保存的伴学回合没有可迁移的数据。
+
+Codex 看图使用现有登录态及低思考。在 Windows 上，未指定环境代理时检查系统给 Codex 服务选用的回环代理，按 CLI 的 turn.completed 事件返回结果。修改前两次直连都重连超时，合成图在修改后两次返回正确答案。离线历史回归见 test-pet-chat.mjs。
+
+## 2026-11-15 桌宠连续语音与截图时机
+
+语音模式点「开麦」启动，连续静音满 1 秒后整句送 DeepSeek ASR。甘棠朗读结束后继续听。普通语音使用原有角色、历史与记忆逻辑，回复可选 DeepSeek Flash 或 DSH，朗读可选 DeepSeek、桌宠 TTS 或关闭。语音和键盘提问共用发送流程。伴学默认在发送时取一帧，也可选定时观察。离线回归运行 node plugins/surfcore/scripts/test-voice-input.mjs 和 test-study-response.mjs。桌宠的已安装 dist 需要随宿主插件一起备份和恢复。
+
+## 2026-11-15 桌宠伴学响应时间
+
+Ollama 使用原生图像输入、关闭思考和 JSON schema。一次格式错误保留共享状态，手动提问可抢占自动观察。桌宠拿到文字即弹泡，朗读从受鉴权的短时音频地址加载，DeepSeek 的 WAV 可边接收边播放。本地 TTS 仍取决于当前服务生成整句语音的速度。旧桌宠客户端仍可使用原返回格式。回归命令为 node plugins/surfcore/scripts/test-study-response.mjs。
+
+## 2026-11-14 自己成了笑点时的表情回复
+
+接龙换帮手时保留动作对象。群聊里的甘棠可以只给一个反应，尤其在群友打趣她自己刚出的糗时。收藏表情取得发送成功回执后取消同场待补的退回文字。用桥接隔离测试覆盖发送失败重试和只送达图片。
+
+## 2026-11-14 QQ 群里泛用的求助句式
+
+按群友补充的语感改写了原有群聊提示和发送前评审。「豆包帮我」既能按普通求助来听，也能把修图以外的任何愿望塞进同一个句式。模型看前文和说的那件事，可以接一次或跟着接龙，群里不需要有人先示范。仍走原来的会话提示变更回执。本机 Qwen 对同一句「把周一去掉」在海报语境中理解成删字，在周日晚的语境中接了闹钟。前者仍会在没图时声称已删。讨债样本仍有颠倒债务的情况，评审也曾给纯纠名回复放行。以上是离线小样本。
+
+## 2026-11-14 QQ 群里的假命令
+
+群聊总提示补充熟人模仿助手口吻时的说话意图，沿用会话变更回执。原有发送前评审一并看候选有没有接住后半句的动作及方向。称呼不参与分流，也不授予新工具能力。本地 Qwen 虚构回放里，修模型和给别人五块均接后半句，真问官方客服时澄清身份。给五块的回复又添了利息，评审也有在理由里指出付收颠倒却打出通过分的情况。线上 DeepSeek 群聊效果待观察。
+
+## 2026-11-14 收尾后的新来信与多人连发
+
+群里发生模型流中断或投递被拒时可查本地活动日志。群聊唤醒、翻未读和等待消息在收尾后的第一条来信处给出时间间隔，群聊收尾摘要保留，预想中的下次开场留在记录里。评审把同一账号的连续短句放到同一行，给对话另一方留出位置。对方沿用先前措辞时，评审可在原有四行预算里找回近十分钟内的一句原话。收尾后直接点名或引用时，提示模型看当前问句。测试包括第三人表情、明确引用、同名账号和角色互换。
+
+## 2026-11-14 群聊省略主语
+
+群聊会话交付一次发言人、称呼对象和被谈论对象的区别。唤醒快照先展示背景。拍一拍保留双方身份，评审按动作读取；旧记录中的拍一拍不再显示成引用。换向回放覆盖被戳、回戳、旁观和后续澄清。
+
+## 2026-11-14 群友拆台与核实
+
+主聊天预设沿用上一版。新版预设在成对留出题上仍有把正事当玩笑和给玩笑做解释的反例。普通文字、群内引用和私聊文字在二代模式共用发送前评审，短句和每窗额度照旧，群里一条新的本人引用或明确 @ 会重新评审。模型耗尽输出预算时，按已有重试次数补一次判定。评审能读到最近消息里的引用摘录，结合聊天用途判断回复。普通唤醒只留草稿时，第一次原有提醒提示模型自行决定发送或收尾。桥接回归 R17 覆盖三条发送入口、引用及延迟退回稿。
+
+## 2026-11-14 QQ 梗图和熟人拆台
+
+QQ 二代预设按来信目的处理图片。单发梗图可以评论或反串；对方要读字、核实颜色时按图回答。熟人拆台和事实纠正由同一聊天模型结合前文判断，未增加逐轮分类请求。
+
+## 2026-11-14 QQ 纠正、回忆与单发表情
+
+纠正的落点放在 QQ 会话预设。明确问旧事时，同场摘要只负责定位，发给模型的是脱敏后的记忆卡片段。QQ 唤醒、翻未读和等待来信按当前消息找收藏候选，被抓包或被甩锅时从甘棠自己的反应检索。相关回归在 test-episode-recall、test-recall-calibration 和 test-qq-preset-contract。
+
+## 2026-11-14 QQ 人格去重与对话节奏
+
+QQ 主动联系使用同一会话的已提交角色卡；目的机制继续读取人格来形成动机。聊天模型结合消息上下文选择收尾，桥接检查未展示的新消息、负责计时和唤醒。工具查询可显式传 includeRole 重读人格。用 test-purpose-wiring 的真实投递夹具、test-closure-wiring 的晚到消息和 test-session-prompt 的会话回执验证。
+
+## 2026-11-14 QQ 会话、表达与动作
+
+reserved2 新会话先读角色和关系语感。常规唤醒只交付增量，总提示的版本取自 DSH 已加载的 preset 与 QQ 工具配置。旧会话在已确认空闲且没有排队输入时轮换，桥接保留未读。模型默认看到五张简表情候选，控制台继续使用完整条目。群内审批跟随真实主人的原消息，群友插话不能变更已审动作的参数。隐私标记缺失、修复或降级的视觉结果只返回占位语。
+
+---
+
+## 快照（2026-11-10 15:5x，会话轮换改口径：不再数收尾次数，改成「上下文 220k 一换」）
+
+### 用户原话
+
+> 「surfcore qq现在怎么没能到对应轮数自动切换会话」→ 排查后：「要不改成上下文大小吧，220k 一换」。
+
+### 先查了什么（只读，真机）
+
+- 规则没坏：live 生效配置是 `rotateAfterClosures=5 / rotateIdleMs=300000`；私聊 `sessionClosures=3→4/5`、群 `1/5`，
+  所以没换——它数的是**自然收尾次数**，不是聊天轮数。当前私聊 DSH 会话已 28 轮 / 群 37 轮，但自然收尾只有 4 次 / 1 次。
+- 上次真正换会话：私聊 11-08 12:58（新会话 13:11 起）、群 11-07 15:54（16:07 起）；`bridge.log.1` 里有 `[轮换]` 记录，链路是通的。
+- 真正的问题：收尾次数太慢（两天 4 次），但每轮都在为越滚越大的历史付费——用户要按**上下文大小**换。
+
+### 做了什么
+
+| 类别 | 内容 |
+| --- | --- |
+| 纯逻辑 | `src/conversation-closure.js`：`DEFAULT_CLOSURE_CONFIG.rotateAfterContextTokens`（默认 0=关闭）、`normalizeClosureConfig` 收敛 0..2M、新增 `shouldRotateSessionByContext(contextTokens, config)` |
+| 账本 | `src/token-ledger.js`：新增 `sessionContextTokens(sessionId)` —— 最近一条 assistant usage 的 input 桶之和（cacheMiss+cacheHit+cacheWrite），**不是**会话累计计费量；直接扫 samples，不新增 per-session 索引（少五处同步点） |
+| 桥接 | `src/bridge.js`：`按上下文长度轮换会话(key)`（turn/end 后判断；到阈值挂 5s 定时器，`isConversationBusyV2` 判忙最多重试 6 次，放弃后下一回合再判；与收尾口径独立）。`/api/socialV2/states` 每个会话新增 `contextTokens`/`sessionId`（看离阈值还有多远） |
+| 配置 | `config.example.json` 补 `rotateAfterContextTokens: 0`；**真机 `config.json`**：`rotateAfterContextTokens=220000`、`rotateAfterClosures=0`（纯上下文模式） |
+| 测试 | `test-conversation-closure`（默认/归一化/阈值边界/坏值）、`test-token-usage`（input 桶口径/取最新/覆盖/未知会话 0）、`test-closure-wiring`（默认关不换、差 1 token 不换、到阈值 5s 后真归档并清映射/计数） |
+
+### 验证
+
+- `node scripts/test-conversation-closure.mjs` 15 组全绿；`node scripts/test-token-usage.mjs` 全绿；
+  `node scripts/test-closure-wiring.mjs` 14 组全绿（含 5s 真实退役）。
+- `npm run test:audit` **111/112**（唯一红：既有 `test-preset-local-tools`「守卫名单里的名字不是 DSH 真实注册工具」
+  ——DSH 工具名漂移，与本次无关）；`npm run test:regressions` **全通过**。
+- 真机：桥接重启后 `GET /api/socialV2/config` 应见 `rotateAfterContextTokens: 220000`；
+  `GET /api/socialV2/states` 每个会话有 `contextTokens`；命中时 `bridge.log` 出现
+  `[轮换] … 上下文 N token ≥ 220000，换新会话`。
+
+### 下一步 / 未做
+
+1. 真机已同步并**重启桥接**（2026-11-10 16:14:57 新进程）：`/api/socialV2/config` 生效值
+   `rotateAfterClosures: 0, rotateAfterContextTokens: 220000`；`/api/socialV2/states` 已返回
+   `contextTokens`（重启时 private=86243、group=475797）。**群会话已超阈值**——下一次群回合结束 5s 后
+   会自动换新会话（预期 `bridge.log` 出现 `[轮换] group:… 上下文 475797 token ≥ 220000`），private 还远。
+2. 观察 1–2 天：`contextTokens` 涨到 220k 时是否自动换、换完 `state/sessions.json` 对应 key 换新 sessionId、
+   `bootstrapSent=false`；换会话后 `contextTokens` 归 0（新 sessionId 没有采样，不是账本坏了）。
+3. 想调阈值：改 `socialV2.closure.rotateAfterContextTokens`（0=关闭）后**重启桥接**（桥接只在启动时读 config.json）。
+4. 想同时保留「自然收尾 N 次」：把 `rotateAfterClosures` 调回 5 即可，两个触发谁先到算谁。
+5. 设置页暂未暴露这两个字段（同 `rotateAfterClosures` 的现状），改 `config.json`。
+6. ⚠️ **真机工作树现在同时有**：本批改动 + 另一会话未提交的撤回窗口改动（都在 `src/bridge.js`）——
+   本轮按「备份 → 覆盖 → 把撤回 patch 回打」的方式同步，两者都在，但**没有提交**（不替别的会话提交它的改动）。
+   下次同步前先决定这两份怎么提交（`git add` 具体文件 + 写清两条改动），否则 sync-to-real 仍会拒绝脏工作树。
+
+### 回滚
+
+- 立刻停用：`rotateAfterContextTokens: 0` + 重启桥接；或改回 `rotateAfterClosures: 5`（旧行为）。
+- 彻底回滚：`git revert` staging 提交 + 真机同步 + 重启桥接（净代价：`sessionContextTokens` 与一个定时器函数）。
+
+---
+
+## 快照（2026-11-08 23:4x，看屏幕改成「每张截图抽签 → 抽中即尝试搭话」）
+
+### 用户原话
+
+> 「我的意思每次截图完就打扰抽签，现在怎么是分开的」→ 拍板：**抽中即尝试主动搭话**（截图成为触发源）/ **每天 6 次**。
+
+### 先查了什么（只读）
+
+- 昨天的 leaky 把抽签挂在「目的机制真正要出发」那一刻（`runOnce`/桥接 `runPurposeOnce`），而每 2 分钟一次的截图只是感知：所以一天只有 3–4 次抽签机会，日志里自然几乎看不到。
+- 若直接把 `0.85/0.05` 套到每张截图：每天约 450 张 → 0.85×450 ≈ 每天 380 次放行，`dailyMax` 会在十几分钟内被打光；`0.05` 泄漏 ≈ 每天 22 次。所以 perLook 必须按「每天目标次数 ÷ 每天截图次数」换算概率。
+- 两套触发会打架：purpose 自己的 2.5–5h 定时器 + 截图抽签；QQ 载体的定时器在桥接里，桌宠载体在插件里。
+
+### 做了什么
+
+| 类别 | 内容 |
+| --- | --- |
+| core | `screen-watch-core.js` 新增 `interruptTrigger`（`departure` 旧行为 / `perLook` 每张截图抽）、`targetPerDay`（默认 6）、`triggerMinGapMin`（默认 20）、`screenLooksPerDay()`（清醒 900 分钟 ÷ (intervalMin+1)）、`screenPerLookRates()`（pAbove=targetPerDay/每天截图数、pBelow=maxLeakPerDay/每天截图数）；`screenInterruptProbability()` 在 perLook 下直接返回换算概率 |
+| service | `screen-watch-service.js` 新增 `scheduledFallback()`（perLook 下截图管道失败/超 30 分钟没新判定时才让定时器兜底）与 `status().trigger`（策略、每天目标、换算后的每张概率）；`decide()` 复用同一套抽签/预算 |
+| 桌宠载体 | `pet-purpose.js`：`lookScreen()` 在 perLook 下每张判定后抽签，抽中即 `triggerFromScreen()`（`canScreenTrigger` 先过每日上限/最小间隔/主人刚聊过/载体在线，不合格连抽都不抽）；`runOnce({screenTriggered})` 只越过 `nextFireAt`，其余硬闸照拦；定时器在 perLook 下让位 |
+| QQ 载体 | `pet-api` 无需改（桥接走 `/api/purpose/run`）；`bridge.js`：`runPurposeOnce({screenTriggered})` 越过排程、跳过重复抽签；perLook 下定时器不出发，但用 `purposeScreenHealth()`（GET pet-api `/purpose/screen`）发现截图管道坏了（最近失败/超 30 分钟）就重新让定时器兜底；`/api/purpose/run` 透传 `screenTriggered` |
+| 设置页 | 「看屏幕」卡片新增「什么时候抽签」下拉（出发时 / 每张截图都抽）+ perLook 的「每天目标次数」「两次触发最小间隔」；leaky 参数按模式显示，并展示换算后的每张概率 |
+| 配置 | `config.example.json` 补 `interruptTrigger/targetPerDay/triggerMinGapMin`；本机 `config.json`：`interruptTrigger=perLook`、`targetPerDay=6`、`triggerMinGapMin=20`、`purpose.dailyMax=6`（备份 `_backups/config.json.bak-20261108-233351`） |
+| 测试 | `test-screen-watch.mjs` 新增 §8b（换算/边界/硬闸）、§9 perLook decide；`test-purpose-wiring.mjs` 新增 4 条（定时器让位、管道坏了兜底、screenTriggered 越过排程投递、越过排程不越硬闸） |
+
+### 验证
+
+- `node plugins/surfcore/scripts/test-screen-watch.mjs` 全绿；`node scripts/test-purpose-wiring.mjs` 全绿（含 perLook 4 条）；`test-client-contract` OK；`test-pet-api` 全绿；`test-doc-numbers` 全绿；`node scripts/test-audit-regressions.mjs` 全绿。
+- `node scripts/test-audit.mjs` **110/112**：① `test-preset-local-tools` 既有 DSH 工具名漂移（#97 同类，与本次无关）；② `test-life-bili-wiring` 在 23:3x 跑时撞上「`nowMin+30` 跨 1440 取模」的时间边界（另一团队用例的 flake；同一份代码今天 22:0x 在真机仓库跑是绿的），与本次看屏幕改动无关。
+- **真机代码未重启**：插件/桥接还是旧进程，`interruptTrigger=perLook` 要到重启后才生效（旧代码忽略该字段，继续按出发时抽签）。
+
+### 下一步 / 未做
+
+1. **重启 DSH**（插件代码生效；桥接会被插件自动重启）→ 观察 `~/.dsh/surfcore/plugin.log`：每 ~2 分钟一张截图，随后一行 `[pet-screen] 抽签 …`；放行时 `[pet-purpose] 截图抽中（screen-ok/screen-leak）→ 尝试主动搭话`，QQ 载体时 bridge.log 出现 `[目的] 已投递`。
+   ⚠️ 真机仓库当前有**另一会话未提交的撤回窗口改动**（`src/bridge.js` 尾部 + `src/mcp-snowluma-safe.js`，对应测试尚未更新、跑 recall 测试会红 2 条）；本功能的提交 `ea4867b` 不含它们，已把它们原样留在真机工作树里。下次同步前先等那份改动提交（或先把它合进 staging），否则 `sync-to-real` 会因真机工作树不干净/内容被覆盖而丢改动。
+2. 预期频率：`pAbove = 6 / 450 ≈ 1.33%/张`、`pBelow ≈ 0.22%/张`；两次触发至少隔 20 分钟；每天由 `dailyMax=6` 封顶；23:30–08:30 安静时段不抽。
+3. 想调频率：设置页改「每天目标搭话次数」（或 `targetPerDay`）即可，概率自动换算；想回旧行为：`interruptTrigger=departure`（保存即生效，不用重启）或恢复上面的配置备份。
+4. 注意：perLook 下 `rateAbove/rateBelow` 不再生效（概率由 targetPerDay 换算）；抽签日志会变成每 ~2 分钟一行。
+
+---
+
+## 合并与真机同步记录（2026-11-08 22:2x，Lead 收口；结果状态）
+
+> 上方两个快照保留各自开发过程；本节记录「合并/同步/门禁」的最终结果。
+
+- **两批功能同日完成、此前分属两个隔离会话**：
+  1. **life-settings（生活参数自调 + 每日心跳）**：并行 Agent Team 在 staging 实现完成，收工时未提交（44 个文件悬在工作树）；
+  2. **QQ 消息撤回（`qq_recall_message`）**：在隔离 worktree `_work/recall-work`（分支 `feat/qq-recall-message`，19 用例）完成。
+- **合并（staging `surfcore-work`）**：先原样提交 life（`9ab38ae`）→ `git merge --no-ff feat/qq-recall-message`（`e6aeba6`）。冲突按预演解：RULES 硬边界**撤回=第 16 条、生活参数=第 17 条**；PITFALLS **撤回=#105、生活参数=#106**；HANDOFF 双快照；CHANGELOG 合成同一个 `[未发布] 2026-11-08`；test-audit 并集；CURRENT-NUMBERS 重新生成。随后 `f284cc3` 把真机独有的 Layout B/改名 12 个文件带回 staging（两边内容一致，避免下次 sync 用旧 README/package.json 盖掉改名）。
+- **同步真机**：真机仓库（`~\surfcore`，SurfSoul fork）提交 **`5efb670`**（61 files, +6177/-84）——**保留**今天已有的「Layout B 自包含插件包」与「改名 SurfSoul」：57 个文件按 CRLF 约定直接同步，README/package.json/test-audit 用三方合并叠加，CURRENT-NUMBERS 在真机侧重生成。回滚点：分支 `pre-merged-sync-20261108`（= `dbecafa`）。
+- **验证（真机仓库，2026-11-08）**：`npm run test:audit` → **111/112**（唯一红 = 既有 `test-preset-local-tools` 的 DSH 0.2.x 工具名漂移 `schedule_update`/`schedule_delete`，PITFALLS #97；与本次无关）；`npm run test:regressions` 全绿；`test-plugin-package` 19/19；`test:life` 全绿；`test-recall-message` 19/19；`test-agent-preset-patches` / `build-agent-preset-patches --check` / `test-qq-preset-contract` 9/9 / `config:check` / `test-doc-numbers` 均绿。
+- **live profile 已接线**：`node scripts/setup-dsh.mjs desktop` 已跑 → desktop profile 的 MCP 条目 4→5（新增 `mcp-life-settings`）、preset patch 最新、`dsh plugin --profile desktop install: OK`。另有误把 `--check` 当 profile 名的临时 profile 已挪到 `~/.dsh/_quarantine/<profile-backup>`。
+- **下一步（需要终端/用户，Lead 不能重启自己所在的 DSH）**：**重启 DSH** → 启动桥接（`start.bat`；当前桥接未运行）→ 进行中的 QQ 会话 `/reset` → 按上方两份快照的「真机验证/下一步」清单验收：
+  - 撤回：群里让她发一条（回执含 `messageIds`）→ 2 分钟内「撤掉你刚才那条」→ QQ 里真的消失；隔 3 分钟 → 400 `windowExpired`；群管理员撤别人成功、非管理员 403；群主消息 403；群友让她撤别人的 → 403 不重试。
+  - life：`life_state` → 一次低风险 `life_preview`/`life_apply`/`life_verify`/`life_rollback`。
+- **回滚**：真机 `git reset --hard pre-merged-sync-20261108`；staging `git reset --hard e6aeba6`（保留合并、退回对齐前）或 `9ab38ae`（只保留 life、不含撤回）；配置层各快照「回滚」段。
+
+---
+
+## 快照（2026-11-08 18:0x，生活参数自调「life-settings」：核心+bridge+插件已实现，staging 通过门禁，**未同步真机/未重启**）
+
+### 用户原话
+
+> 「学习 https://github.com/nefelibata5136-code/surfcore-life 的思路，让本地 surfcore agent 获得修改自己插件参数的能力，实现上例如把工具给到 qq 白名单什么的。……你可以列一个清单让我审阅哪些让他自己调整。」
+
+同时给了 5 组他认为可以自调的参数（B站探索 / QQ 安静 / 更容易参与聊天 / 目的节奏 / 少一点自动模型机会）。
+
+### 做到了哪（staging = `~\surfcore-workspaces\surfcore-work`）
+
+- 新增 `src/life-settings/`（catalog 30 参数 + constraints + file-store + manager + runtime + qq-runtime + budget + tools）
+  与 `src/mcp-life-settings.js`（MCP stdio 代理）、`src/life-bridge-api.js`（bridge HTTP 面：owner 闸/限频/审计）。
+- bridge：启动叠 sidecar 覆盖 → purpose 排程前生效；5s refresh（证据 45s 心跳）；`buildWakePromptV2` 尾部注入生活状态板；
+  `/api/life/*` 路由 + `agentAllowed`/`adminOnly`/暂停模式守卫；`lifeSettings.enabled=false` 回滚开关。
+- B站：`plugins/surfcore/lib/life-runtime.js`、scheduler overlay + 证据 + revision 变化触发 night plan、whale-night overlay/回执。
+- 工具面：`qq-tool-restrict` SAFE_PREFIXES 加 `mcp__life-settings__`；`lib/turn-trigger.js` 的 4 个写工具并入 `isPrivilegedTool`；
+  `setup-dsh.mjs` 第 5 条 MCP（env SURFCORE_ROOT/DSH_HOME、60s 超时）。
+- 文档：`docs/guides/LIFE-SETTINGS.md`（设计/运维）、`docs/guides/LIFE-PARAMS-CHECKLIST.md`（**给用户审阅的开放清单**）、
+  本文件、PITFALLS #106、AGENT-TOOLS/DATA-AND-CONFIG/RULES/SECURITY_BASELINE/ARCHITECTURE/README 同步。
+- **每日生活参数心跳**（用户同日追加要求）：新增 `src/life-review.js`（纯函数）+ bridge 定时器/状态 `state/life-review.json`；
+  默认每天 08:00 在主人私聊自检一次、最多改 2 项、改完汇报；与同时间/同对象早安合并成同一个唤醒；
+  手动验收入口 `GET/POST /api/life/review[/run]`；`scripts/test-life-review.mjs`（12 场景）。
+- 门禁：`npm run test:life` 全绿（6 个脚本）；`npm run test:audit` = **109/110**（唯一失败＝既有 DSH 0.2.1 工具名漂移
+  `schedule_update/schedule_delete`，与本次无关）；`npm run docs:numbers` 已重生成。
+
+### 没验证 / 下一步
+
+1. **没同步真机、没重启桥接/DSH**（不能停用户正在用的服务）：上线顺序 = 用户审完清单 →
+   `node _recon/sync-to-real.mjs sync` → 真机 `node scripts/setup-dsh.mjs`（挂 MCP）→ 重启桥接 + DSH →
+   验收 `life_state`/一个低风险 apply/`life_verify`/回滚。
+2. **真实 QQ 端到端未做**（按用户要求不主动发 QQ）；MCP 工具名 `mcp__life-settings__*` 只在 DSH 重启后出现。
+3. B站真实行为（窗口/次数改变后真的少看/多看）未长期观察；`wakeMaxChars` 审批流只做了 CLI，无设置页卡片。
+4. 已知小债：`scripts/test-owner-approval.mjs` 的特权工具计数仍写 15（未把 4 个生活参数写工具算进去，但行为已覆盖）；
+   `plugins/surfcore/scripts/test-bili-memory.mjs` 依赖 staging `state/` 素材，独立跑会失败（pre-existing）。
+## 快照（2026-11-08 18:0x，q群撤回：QQ 群消息撤回 `qq_recall_message`——普通工具、权限已放开）
+
+> 合并说明（2026-11-08）：本快照记录的功能已在隔离 worktree `_work/recall-work` 完成，
+> 随后**合并回 `surfcore-work`**（与上面的 life-settings 改动一起；冲突处保留两套功能，
+> RULES 硬边界：撤回=第 16 条、生活参数=第 17 条；PITFALLS：撤回=#105、生活参数=#106）。
+> 合并后统一跑全量门禁，再同步真机并重启桥接/DSH 做真机验证（步骤见本快照「下一步」）。
+
+### 用户原话
+
+> 「给surfcore的qq部分接上群撤回的接口，权限放开，不需要主人点头，自己判断」
+
+拍板：**权限放开**（不走 owner 回合授权、不走 `qq-owner-approval` 内部模型审批，模型自己判断）/ **撤自己的随时、
+撤别人的需机器人本群管理员 + 内容明显违规或主人本人明确要求** / 硬闸保留（仅 `reserved2`、会话白名单、工具开关、
+约 2 分钟窗口、每小时上限、一次一条、会话归属）/ **本轮不做控制台 UI 开关**（改 `config.json` 即可）。
+
+### 隔离开发事实（重要）
+
+- 共享 staging `surfcore-work` 正被另一个 Agent Team（life-settings 移植）修改 → 本功能在独立 worktree 开发：
+  `_work/recall-work`（git 分支 `feat/qq-recall-message`，基线 `fd17a86`，`node_modules` 走 junction）。
+- **没有**写 `surfcore-work` / 真机 `~\surfcore`，没有跑 `_recon/sync-to-real.mjs`，没有重启桥接/DSH。
+- 待 life-settings 收工后**合并回 `surfcore-work`**，再由 Lead 统一同步真机、重启 DSH/桥接验证。
+
+### 先查了什么（只读）
+
+- SnowLuma 动作目录（仓库根 `_snowluma-catalog.json`）：确认有 `delete_msg`（参数 `message_id`），surfcore 的 QQ 侧原本没接。
+- 现有发送链路：`onebotSend()` 已返回 `body.data`（含 `message_id`），但 `sendMessagesV2()` 丢弃它、
+  `recordSentMessagesV2()` 不写 messageId ⇒ 模型拿不到自己刚发消息的 id、撤不了自己的消息（本轮先补这个前置能力）。
+- 现有特权工具口径（`RULES.md` 硬边界第 13–15 条 / `qq-owner-approval`）：撤回若进特权名单，非 owner 回合会被
+  DSH 前置模型审批直接 deny，与「权限放开、自己判断」矛盾 ⇒ **不进**三类特权工具名单。
+- `resolveReplyTargetV2` 的 seq → 真实 messageId 思路：本地 `seq` 可作为 `messageId` 的别名（能在 `recentMessages`
+  里映射到真实 id 才放行）。
+
+### 做了什么
+
+| 类别 | 内容 |
+| --- | --- |
+| 配置 | `socialV2.tools.recallMessage`（默认开）+ `socialV2.messageRecall.{enabled(默认 true), windowMs(30000~300000，默认 120000), maxPerHour(1~200，默认 30)}`；bridge 两处默认表 + 启动/控制台保存归一化；`config.example.json` 同步 |
+| bridge | 新增 `POST /api/socialV2/recall-message`（body `{key,messageId}`，兼容 `message_id` 别名；支持本地 seq 映射）；严格闸门顺序见 `_work/RECALL-MESSAGE-DESIGN.md` §2；新增 helper `onebotRawOrThrow` / `groupMemberRoleForRecall` / `recallMessageConfig` / `resolveRecallTargetV2`；成功**不回显被撤消息原文**，记账 `recallTimes` + `recentMessages[].recalled` |
+| 自己消息 id 落库 | `sendMessagesV2` 保留 `onebotSend` 返回的 message_id 为 `{text,messageId}`；`recordSentMessagesV2`/`notePurposeOutbound` 兼容对象；`send-message` / `send-burst` / 通用 `/api/send/*` 响应补 `messageIds`。**文本/图片/表情/语音的 messageId 都会写进 `recentMessages`**（图片/表情/语音是既有行为；本轮补的是文本发送链路原先丢弃的网关回执） |
+| MCP | `src/mcp-snowluma-safe.js`：`TOOL_CONFIG_FLAGS.qq_recall_message='recallMessage'` + `server.tool('qq_recall_message', …)`；描述含「qq_recall 是查记忆不是撤回」「不需要主人授权/自己判断」「撤别人需本群管理员 + 明显违规或主人要求」「私聊只能撤自己」「约 2 分钟窗口」「一次一条/被拒别重试」 |
+| preset | `qq-chat-v2` 安全规则第 2/22 条各补一句 + 工具协议新增**第 23 条【撤回消息（普通能力，权限已放开）】**；重新生成 `plugins/surfcore/presets/qq-chat-v2.patch.yml` |
+| 测试 | 新 `scripts/test-recall-message.mjs`（真实 `bridge.js` + 夹具网关，不连真 QQ、不写真实 state）：**19 条用例**覆盖规格 §6 的 14 类场景 + 配置归一化 + `recallTimes` 持久化，含「非 owner 回合撤自己必须成功」的权限口径回归；已进 `scripts/test-audit.mjs` |
+| 文档 | `RULES.md`（权限分层表 + 硬边界第 16 条 + 途径 E）、`SECURITY_BASELINE.md`（威胁模型/工具面矩阵/残余 R14）、`AGENT-TOOLS-AND-PRESETS.md` §2.4.3 + 闸门/失败模式、`MODULE-BRIDGE.md` §6.11/§7.8、`DATA-AND-CONFIG.md` §1.11/§4.1、`BOUNDARIES.md` §2.1/§4、`ROADMAP.md` §2/§4、`PITFALLS.md` #105、`CHANGELOG.md`、`README.md`/`README.en.md`；`CURRENT-NUMBERS.md` 由 `npm run docs:numbers` 生成 |
+| 明确没做 | 控制台 UI 开关（改 config 文件需重启桥接生效）；批量撤回；撤回群主消息；私聊撤对方 |
+
+### 验证
+
+- **已实测通过（2026-11-08，隔离 worktree，不连真 QQ）**：
+  - `node scripts/test-recall-message.mjs` → **19/19 绿**（真实 `bridge.js` + 夹具网关；覆盖规格 §6 的 14 类场景 + 配置归一化 + `recallTimes` 跨重启持久化）；
+  - `node scripts/build-agent-preset-patches.mjs --check` → 绿（两份 bundle patch 与 preset 源一致）；
+  - `node scripts/test-agent-preset-patches.mjs` → 绿；
+  - `node scripts/test-qq-preset-contract.mjs` → **9/9 绿**（含第 23 条静态断言）；
+  - `npm run config:check` → 绿；`node scripts/test-egress-boundary.mjs` → 绿（撤回走桥接、不进直连只读白名单）；
+  - 相关回归绿（2026-11-08 复跑）：`test-owner-trigger-gates` **8/8**、`test-group-admin-tools` **16/16**、`test-friend-requests` **22/22**、`test-mode-matrix` 退出 0；
+  - `npm run docs:numbers` → 重新生成 `docs/guides/CURRENT-NUMBERS.md`；`node scripts/test-doc-numbers.mjs` → 绿（3 项 PASS）。具体数字（bridge 行数 / qq 工具数 / test:audit 脚本数）以该文件为准——**合并 life-settings 后必然变化，合并后重新生成再引用**。
+- **全量门禁（2026-11-08，Lead 收口；worktree）**：
+  - `npm run test:audit` → **100/105（最终值以 Lead 合并后重跑为准；合并 life-settings 后脚本数会变，以 `docs/guides/CURRENT-NUMBERS.md` 为准）**；5 个红均**与本功能无关、逐条已核实**：① 3 个 `spawnSync EPERM`（本会话沙箱限制：
+    Node 不能起 piped-stdio 子进程；基线同样红）——`test-audit-setup` / `test-qq-model-view` / `test-bili-state-paths`；② 1 个 worktree `core.autocrlf=true` 导致引擎哈希假红（`test-core-rev-sync`，已在纯净基线
+    worktree `fd17a86` 复现同样失败）；③ 1 个既有 DSH 工具名漂移（`test-preset-local-tools`：DSH 升级后
+    `schedule_update`/`schedule_delete` 不在已安装工具包里，同 PITFALLS #97）。**注意**：`test-memory-card-wiring` 曾因本轮
+    `sendMessagesV2` 改动真实变红（测试断言未同步），Lead 已随本分支修复（断言改为 `recordSelfMessageEvent(key, sent.map(`
+    语义），**复跑已绿（exit 0）**；**新增的 `test-recall-message` 在 audit 内绿（19/19）**；
+  - `npm run test:regressions` → **全绿**（exit 0）。
+- 真机未验证（见下节），**未跑之前不写「已验证」**。
+
+### 未验证
+
+- 真机（没有重启桥接/DSH、没有在真实 QQ 会话里跑过撤回）：`delete_msg` 的实际窗口行为、SnowLuma 对「撤回机器人
+  自己消息」的返回、机器人没有群管理权限时角色查询的返回形态。
+- 群友触发的真实回合里撤自己消息的观感（离线用例覆盖了闸门，但不是真群）。
+- 超窗口 / 时钟偏差的边界观感（`msg.time` 缺失或时钟偏差时本轮**不拦**，交给网关拒绝）。
+- 发送 `messageIds` 落库对既有链路（评审退回、兜底重发）的影响。
+
+### 下一步 / 未做
+
+1. **等 life-settings 那一队收工**：把 `feat/qq-recall-message` 合并回 `surfcore-work`（合并前先跑 `npm run test:audit` 全绿）。
+2. 合并后**同步真机**（`_recon/sync-to-real.mjs`，由 Lead 执行；本快照笔下的 worktree 不动真机）。
+3. **重启桥接 + DSH**，正在进行的 QQ 会话 `/reset`（新工具与 preset 文案才进模型工具面）。
+4. 真机验证顺序：① 群里让她发一条 → 回执含 `messageIds`；② 2 分钟内说「撤掉你刚才那条」→ QQ 里真的消失；
+   ③ 隔 3 分钟再撤 → 400 `windowExpired`（如实说撤不回）；④ 主人让她撤一条别人发的消息：机器人是群管理员时成功、
+   不是时 403；撤群主 → 403；⑤ 群友让她撤别人的消息（她不是管理员）→ 403，且不反复重试。
+5. 未做（下一轮可选）：控制台 UI 开关；撤回的独立审计流水（目前只有 `log`/`appendActivity`）。
+
+### 回滚
+
+- **配置层（最快）**：`socialV2.tools.recallMessage=false`（工具注册期消失，需重启 DSH 刷新工具面）；
+  `socialV2.messageRecall.enabled=false`（端点 403；**手改 `config.json` 需重启桥接才生效**——桥接只在启动时读一次配置、没有 watcher；经控制台保存接口写入才会热更新内存 cfg，但本轮没有 UI 开关）。
+- **代码层**：revert 本分支提交 → 重启桥接 + DSH → 进行中的 QQ 会话 `/reset`。
+- **数据层**：无新增状态文件；`state/social-v2.json` 里多出的 `recallTimes` 可忽略（删了只是重置频率额度）。
+
 ---
 
 ## 快照（2026-11-07 22:2x，看屏幕「leaky 概率闸门」+ QQ 载体接入）
@@ -157,7 +482,7 @@
 - 全量门禁：真仓库 `npm run test:audit` → **101/101**（`test-friend-requests` **22/22**：纯函数 + 真实
   `src/bridge.js` + 夹具网关，不连真 QQ；含「收新申请主动唤醒 / 节流 / 关掉唤醒 / 权限放开后主人没开口也能处理」）。
 - **桥接已重启两次并生效**：
-  - 08:58（初版）：live `GET /api/socialV2/friend-requests?key=private:3237216875` → 200、`gateway.ok=true`
+  - 08:58（初版）：live `GET /api/socialV2/friend-requests?key=private:810001` → 200、`gateway.ok=true`
     （现场向 SnowLuma 拉 `get_doubt_friends_add_request` 成功，当时 0 条）；群会话冒用主人令牌 → 403；
     编造 flag → 400「没有找到这条待处理好友申请」（证明校验链真实生效、没有触达 OneBot 写动作）。
   - 09:26（权限放开后）：`/api/restart` 后 DSH 插件自动拉起新进程（pid 换新、启动日志无异常）；
@@ -205,7 +530,7 @@
 | 类别 | 内容 |
 | --- | --- |
 | 恢复 | 22:54、23:12 两次控制台 `/api/restart` 重启桥接（第一次先恢复发送，第二次加载补丁）；重启后日志 0 条 unauthorized |
-| 配置 | `config.json` 的 `snowluma.homeDir` = `C:/Users/32372/snowluma`（自愈能读 `config/onebot_<QQ>.json`） |
+| 配置 | `config.json` 的 `snowluma.homeDir` = `~/snowluma`（自愈能读 `config/onebot_<QQ>.json`） |
 | 代码 | `src/bridge.js`：新增 `onebotAction()`（401/1401/`wording=unauthorized` ⇒ `healTokenIfStale()` ⇒ 重试一次），
   `onebotSend` / `onebotSendSegments` 改用它；`pollSnowlumaStatus()` 的 60s `get_status` 遇 401 也触发自愈 |
 | 文档 | PITFALLS #101、CHANGELOG [未发布]；`docs/guides/CURRENT-NUMBERS.md` 按 `npm run docs:numbers` 重新生成 |
@@ -241,7 +566,7 @@
 | 任务 4 | 重启恢复唤醒：`scheduleRecoveryWakesV2()`（DSH 就绪/切回 reserved2 后，有未读且 bootstrap 过的会话补一次 `recovery`；`socialV2.wake.recoveryWake` 可关） |
 | 任务 7 | 出口边界冻结：`src/onebot-readonly.js`（MCP 直连 OneBot 只允许 5 个只读动作，`onebot()` 运行时断言）+ 文档 §3.1 + `test-egress-boundary` |
 | 任务 8 | 一代模式冻结：ROADMAP §1.4 + `test-mode-matrix.mjs`（四模式准入/preset 矩阵） |
-| 任务 9 | `npm run state:usage`（只读报表）+ 本机 `config.json.sessionCwd` 改到 `C:/Users/32372/surfcore-workspaces`（新会话不再落进 `state/agents`；旧工作区保留未删） |
+| 任务 9 | `npm run state:usage`（只读报表）+ 本机 `config.json.sessionCwd` 改到 `~/surfcore-workspaces`（新会话不再落进 `state/agents`；旧工作区保留未删） |
 | 低成本 | `npm run config:check`、`npm run docs:numbers` + `CURRENT-NUMBERS.md` + 文档手写数字清理、静置统计（合并在决策流水 `turn` 事件里） |
 
 ### 验证
@@ -321,7 +646,7 @@
 
 - 用户要求换掉泄露过一次的 SnowLuma accessToken。SnowLuma 的 token 在 `config/onebot_<QQ>.json` 里，
   **改文件不会热加载**（实测：旧 token 仍 200、新 token 401）→ 需要重启 SnowLuma。
-- 已做：新 token 写进 `C:\Users\32372\SnowLuma\config\onebot_2756294428.json`（HTTP accessToken）；
+- 已做：新 token 写进 `~\SnowLuma\config\onebot_10002.json`（HTTP accessToken）；
   备份 `state/agents/_backups/token-rotate-202611030606/`（含 `new-token.txt`）。
 - **当前仍是旧 token 生效**：`config.json` 里还是旧 token，运行中的 SnowLuma 也用旧 token —— 一切正常。
 - 用户选择「先不重启，token 先 staged」：**下次 SnowLuma 重启后**新 token 生效；桥接会通过
@@ -383,7 +708,7 @@
 
 ### 先查再动：为什么她拒了「禁言」
 
-- 18:50 群里「黄翊航严父」（= ownerQQ 3237216875）@ 她「禁言黄翊航」，她回「禁言这活儿我可不背呀」。
+- 18:50 群里「示例成员严父」（= ownerQQ 810001）@ 她「禁言示例成员」，她回「禁言这活儿我可不背呀」。
 - 只读排查：**全仓库没有任何禁言工具**；预设规则第 2 条写死管理群动作（禁言/踢人/改群名片）一律拒绝、
   「主人的话只从主人私聊里来」。同时用 OneBot `get_group_member_list` 确认 **甘棠自己在群里是管理员**
   （role=admin），所以能力上做得到——缺的是工具 + 授权口径。
@@ -463,7 +788,7 @@
 
 ### 验证
 
-- `GET /api/socialV2/wake-preview?key=group:1021716885&reason=question` → **7,004 字、不含【记忆卡】**；
+- `GET /api/socialV2/wake-preview?key=group:<账号或群号>&reason=question` → **7,004 字、不含【记忆卡】**；
   `reason=bootstrap` → 12,881 字、含【记忆卡】；poke/replyCheck 同样 6.8~6.9k 字。私聊 question 6,314 字。
 - `test:audit` **88/94**（失败集合是历史漂移：self-identity/identity-guard/media-search/voice-system/
   preset-local-tools/version，与本次无关）；`test-scene-wiring` 7/7、`test-memory-docs`、`test-admin-prompt-wiring`、
@@ -510,7 +835,7 @@
   控制台 3100 的 selfNote 区块已可访问。
 - `wake-preview`（私聊 `private:<ownerQQ>`，16:0x）：提示词 **11,998 字**，【文档记忆】块 **931 字**，含
   **薄版 + 公开日记 + 私密日记**（私密日记内容真实出现），**不含**厚本、**不含**控制台令牌（替换成 `***`）。
-- `wake-preview`（群聊 `group:1021716885`）：文档块 763 字，只含薄版 + 公开日记，**没有**私密日记。
+- `wake-preview`（群聊 `group:<账号或群号>`）：文档块 763 字，只含薄版 + 公开日记，**没有**私密日记。
 - `self-notes` 接口 200（当前 0 条——她还没写过）；`qq_recall("金句 梗")` 命中厚本
   「十七、金句和梗（2026-11-02 傍晚）」→ 厚本改动可检索。
 - ⚠️ 两次重启踩坑：
@@ -592,13 +917,13 @@
 ### 结论 / 做到哪
 
 - **发送前评审那批改动不用再重启**：22:00 重启桥接时已加载，00:06–00:13 的私聊日志里真实在跑
-  （`[预发送评审] private:3237216875 通过 88/75`、`86/75`，审过才发）。commit 7a972ce 本身也不影响运行态。
+  （`[预发送评审] private:810001 通过 88/75`、`86/75`，审过才发）。commit 7a972ce 本身也不影响运行态。
 - **「终止对话」不是评审改动**，是 11-01 的会话轮换：自然收尾次数 ≥5 后，收尾回合结束约 5s 就
   `retireSession`，活跃聊天时十几分钟换一次 DSH 会话；每次新会话第一轮都要重发 bootstrap
   （环境说明 + 记忆卡注入，冷启动 ≈37–38k tokens）→ 用户说的「很多次很长的前文提示词」。
 - 修法：新增 `socialV2.closure.rotateIdleMs`（默认 **300000=5 分钟**，0=不等）。收尾次数达标后先等回合结束，
   再等静置窗口内没有新消息才退役；期间对方又开口就按剩余时间顺延（`st.lastIncomingAt` 判定），不打断对话。
-  纯逻辑在 `src/conversation-closure.js`，定时/顺延在 `src/bridge.js scheduleSessionRotationAfterCloseV2`。
+  纯逻辑在 `src/conversation-closure.js`，定时/顺延在 `src/bridge.js 收尾后的会话轮换`。
 - live `config.json` 里 `rotateAfterTurns` 是误写（代码只认 `rotateAfterClosures`），已改回并补 `rotateIdleMs`；
   `config.example.json` 同步补默认值。
 
@@ -732,14 +1057,14 @@
 ### 已验证
 
 - `node --check` 全部改动文件；`test-presend-review.mjs` **18/18** 通过（配置/prompt 预算/解析/节流/缓存/解析重试/退回兜底/reviewer 编排全用 fake，不连真模型）；`test:audit` **83/90**（7 个失败全是历史漂移：self-identity / identity-guard / audit-regressions / media-search / voice-system / preset-local-tools / version，与上一轮 11 个失败是子集）；`test:regressions` **16/16**。
-- dry-run 真机（不发送）：`node scripts/review-dryrun.mjs --key group:1021716885 --text "..." --llm` → 敏感雷区句 22~25/80 退回、理由指向记忆卡里的「政治敏感词一律绕开」；人设口吻短句 80~84 通过；约 1k input token / 1.6~2.8s。
+- dry-run 真机（不发送）：`node scripts/review-dryrun.mjs --key group:<账号或群号> --text "..." --llm` → 敏感雷区句 22~25/80 退回、理由指向记忆卡里的「政治敏感词一律绕开」；人设口吻短句 80~84 通过；约 1k input token / 1.6~2.8s。
 - **桥接已重启生效**（通过插件 `/dsh-surfcore/api/bridge {action:'restart'}`，最终 PID **24264**；启动日志 `DSH 已就绪（模式: reserved2）`）。`state/review-context/memory-abstract.json` 已缓存（515 字 / 源 5984 字；记忆卡更新后 hash 变化会自动重压）。
 - **live 配置核对**（`review-preview` 现在会回 `reviewConfig`）：`{"threshold":75,"rejectFallbackMs":90000,"parseRetries":1,"enabled":true}`；实测「这图我先偷了，下次用」→ **84/75 通过**（阈值 75 已生效）。
 - **桥接侧 E2E**（新增 `POST /api/socialV2/review-preview`，控制台令牌、只评审不发送）：
-  `{"key":"group:1021716885","messages":[...]}` → 真实场合/记忆卡/对话拼进 prompt（scene 182~202 + memory 515~521 + style 140 ≈ 950~970 字），
+  `{"key":"group:<账号或群号>","messages":[...]}` → 真实场合/记忆卡/对话拼进 prompt（scene 182~202 + memory 515~521 + style 140 ≈ 950~970 字），
   评分 25/58（点雷区/答非所问）退回、74~84（人设口吻）按阈值判定；上下文与 `/api/recent` 一致，说明接线正确。
 - **真实 QQ 链路已经走过 send 前评审**（重启后的私聊流量，非测试消息）：
-  `21:33:26 [预发送评审] private:3237216875 通过 85/80 → 21:33:32 [reserved2] 工具统一发送 成功 2/2 条`；
+  `21:33:26 [预发送评审] private:810001 通过 85/80 → 21:33:32 [reserved2] 工具统一发送 成功 2/2 条`；
   `21:36:31 通过 85/80（场景225+记忆515+习惯140字）→ 21:36:39 发送 2/2 条`。
   即：真实发送会先审、审过才发；群聊重启后还没等到真实流量（在鱼群保护/冷却里）。
 
@@ -782,9 +1107,9 @@
 
 - `node --check src/{imagegen,bridge,mcp-snowluma-safe}.js` 通过；`test-imagegen` **12/12**；
   `test-qq-preset-contract` **8/8**；`config.example.json` JSON 解析 OK；patch 重建后 `--check` 一致。
-- 桥接重启加载新代码后，**真机群会话生成**：`POST /api/socialV2/generate-image`（`group:1021716885` token）
+- 桥接重启加载新代码后，**真机群会话生成**：`POST /api/socialV2/generate-image`（`group:<账号或群号>` token）
   → HTTP 200 / **15.4s** / 1077KB，`quota:{usedHour:1,usedDay:1,maxPerHour:3,maxPerDay:10}`；
-  生成后 `state/social-v2.json → conversations[group:1021716885].imageGenTimes` 有 1 条；
+  生成后 `state/social-v2.json → conversations[group:<账号或群号>].imageGenTimes` 有 1 条；
   **再重启一次桥接后配额没有清零**（hydrate 生效，下一次生成返回 `usedHour:2`），
   说明限流不会被「重启桥接」绕过。
 - 只生成、**没有把测试图发到群里**（避免打扰群友；群聊发送仍走 `qq_send_image`，之前已验过）。
@@ -827,7 +1152,7 @@
 | --- | --- |
 | 规则 | `socialV2.closure.rotateAfterClosures`（默认 5，0=关闭）：本会话内自然收尾累计 ≥ 5 次 → 换会话 |
 | 纯逻辑 | `src/conversation-closure.js`：`DEFAULT_CLOSURE_CONFIG.rotateAfterClosures`、归一化、`shouldRotateSessionAfterClosure(closureCount)` |
-| 桥接 | `src/bridge.js`：每次自然收尾 `st.sessionClosures` +1（持久化 social-v2.json）；`scheduleSessionRotationAfterCloseV2()`（5s 定时、`isConversationBusyV2` 判忙、最多 6 次重试、重开/映射变化/新收尾都放弃）；`retireSession` 清零计数；`forgetConversationCaches` 统一清定时器 |
+| 桥接 | `src/bridge.js`：每次自然收尾 `st.sessionClosures` +1（持久化 social-v2.json）；收尾后的会话轮换（5s 定时、`isConversationBusyV2` 判忙、最多 6 次重试、重开/映射变化/新收尾都放弃）；`retireSession` 清零计数；`forgetConversationCaches` 统一清定时器 |
 | 测试 | `scripts/test-conversation-closure.mjs` + `scripts/test-closure-wiring.mjs` 新增阈值/挂起/取消/计数归零用例；另 `state/agents/_research/verify-rotation.mjs` 实测第 5 次收尾后 5s archive 旧会话、计数归零、收尾记录保留 |
 
 ### 已验证
@@ -926,7 +1251,7 @@
 - **真机桥接路由已验**：重启桥接（POST /api/restart → 插件自动拉起）后，
   `POST /api/socialV2/generate-image`（owner 私聊 token）→ `{ok:true, model:"agnes-image-2.5-flash",
   size:"1024x1024", ms:10238, path:"state/generated-images/img-20261101-140557-15b638.png", bytes:1052741}`；
-  随即 `POST /api/socialV2/send-image` 把这张图发到 `private:<ownerQQ>`（`{ok:true, messageId:1657025779}`）。
+  随即 `POST /api/socialV2/send-image` 把这张图发到 `private:<ownerQQ>`（`{ok:true, messageId:<账号或群号>}`）。
   密钥解析走的是 DSH 凭据文件（config.json 没写 key，证明 fallback 有效）。
 - 群聊/别人私聊会被路由 403（代码分支 + preset 文案；未用真群验证）。
 
@@ -1358,7 +1683,7 @@
 ### 排查结论（先分析再动手）
 
 - surfcore 原本**没有**这两个接口（全仓搜 `qzone|longNick|说说|个性签名` 只命中无关文案）。
-- SnowLuma **有**：本机运行时 `1.14.5-node` 里 `set_self_longnick`（`C:\Users\32372\SnowLuma\config-Bgjda8Pc.js:8038`）
+- SnowLuma **有**：本机运行时 `1.14.5-node` 里 `set_self_longnick`（`~\SnowLuma\config-Bgjda8Pc.js:8038`）
   与 `send_qzone_msg`（同文件 `:8826`）都实现了；`_snowluma-catalog.json` / `@snowluma/mcp` 的 catalog 是
   SDK **1.14.20 构建期快照**（比运行时新，但这两个动作一致）。
 - 坑（已写进 `PITFALLS.md`）：`get_qzone_msg_list({})` 在账号没有说说时返回 `retcode 100「响应结构异常」`，
@@ -1546,7 +1871,7 @@
 
 **前置（会话侧，不入库）**：本机原来没有 ffmpeg → 装 9.0.2 到 `~/.dsh/tools/ffmpeg/bin`，并硬链接到
 `~/.dsh/surfcore/bili/bin`（surfcore `tools/lib/ffmpeg.mjs` 的查找链覆盖这里，`ffmpegInfo()` 已 ok）。
-`dsh-video-storyboard` 0.5.0 装进 `~/.dsh/plugins/` + desktop profile（改前备份 `profiles/desktop/package.json.bak-2026-10-30T11-03-00-458Z-preinstall`）。
+`dsh-video-storyboard` 0.5.0 装进 `~/.dsh/plugins/` + desktop profile（改前备份 `profiles/desktop/package.json.bak-<时间>-preinstall`）。
 
 **C-1 代码（本次提交）**：
 
@@ -2243,7 +2568,7 @@
 - `node plugins/surfcore/scripts/test-admin-config-api.mjs`：新增作息窗口
   POST `/config` → 文件原样落盘断言，通过。
 - 手工复验：窗口 9→10→9、时间 `10:00`→`10:0021`；白名单全放行开关 true；
-  记忆 B站→QQ 开关 false；`，987654321` 输入后出现 chip。
+  记忆 B站→QQ 开关 false；`，<账号或群号>` 输入后出现 chip。
 
 ### 没验证 / 下一步
 
@@ -2537,7 +2862,7 @@
 - **第一次真发已验收（2026-10-24 04:42，用户选择「现在真发一条」）**：
   `POST /api/purpose/run {force:true}` → 200 delivered；选中的是 persona 基线目标
   `self/connect`（想找主人说说话，confidence 0.45，risk 0.05）。
-  04:42:56 桥接日志 `[reserved2] 工具统一发送 private:3287064288: 成功 2/2 条`；
+  04:42:56 桥接日志 `[reserved2] 工具统一发送 private:<账号或群号>: 成功 2/2 条`；
   04:42:59 `[目的] 回合结束：sent`；她把内部备忘写成
   「半夜睡不着，想找弥叭陪 wo 说两句话」。
   状态：`countToday=1`、`lastOutcome=sent`、goal `attempts=1/lastActionAt=…/status=active`、
@@ -2564,7 +2889,7 @@
 
 - **SnowLuma 不会补发离线消息**：桥接/QQ 掉线期间的群消息只存在 QQ 服务端；重新上线后
   必须用 OneBot 历史接口（`get_group_msg_history` / `get_friend_msg_history`）主动补。
-- 真机只读探测确认两个接口都可用（`group 767098733` 返回 5 条、私聊返回 3 条），
+- 真机只读探测确认两个接口都可用（`group <账号或群号>` 返回 5 条、私聊返回 3 条），
   不需要新依赖，也不碰 SnowLuma 运行时。
 - 新配置 `socialV2.history`，**缺省 enabled=true**：
   `enabled / limit(30) / maxAgeMinutes(720) / wake(true) / includePrivate(true)`。
@@ -2759,7 +3084,7 @@
 - ✅ 词表小修（`再嘲笑 / 别去嘲笑 / 别笑我 / 求求`，以及 agree 去掉裸「就是」）已在 02:15 那次重启里生效。
 - ✅ **02:14 真机复现的「推荐只在唤醒提示里」漏洞已修并在 02:23 重启后验证**：402 群那句
   「求求别再嘲笑我的回复了」到达时会话正在 `qq_wait_for_messages` 里，不会重建唤醒提示；
-  现在 `stickerMatchFor()` 同时接进唤醒 / wait / unread，`GET /api/socialV2/unread?key=group:767098733`
+  现在 `stickerMatchFor()` 同时接进唤醒 / wait / unread，`GET /api/socialV2/unread?key=group:<账号或群号>`
   实测返回 `stickerMatch.hint`（委屈/嘲讽 → #05 #06）+ `matches[]`。PITFALLS #55。
 - 副情绪已在 02:24 用 `tag-stickers --api --apply` 刷回表里的值（接口补了 `emotionAlt`）。
 - ⚠️ **一个排序优化还没生效**：4 条消息窗口会把最新一条冲淡（#05/#06 打平在 0.46），
@@ -3016,7 +3341,7 @@
 ### 真机验证
 
 - 11:29 目标非好友：`[send] … 失败: result=16 请先添加对方为好友`（问题暴露，不再静默）。
-- 好友加上后 **11:36:19 `[send] /api/send/private private:3362299430: 成功 1/1 条`**，
+- 好友加上后 **11:36:19 `[send] /api/send/private private:<账号或群号>: 成功 1/1 条`**，
   随后 `工具已发送消息，跳过自动转发` ⇒ 只发一条。
 - 下次准点：明天 08:00（今天已过补发窗口；今天的问候已用试发补过，不再重发避免刷屏）。
 - 注意：11:32 左右的试发一度卡住，是我在它 turn 进行中重启桥接造成的假死会话；
@@ -3093,8 +3418,8 @@
 
 - **已真机生效**（11:15 重启桥接 + 热重载插件，pid 19992 / `reserved2` / `dshReady=true`；
   11:23 又为「只准自己互认」身份规则重启到 **pid 2760**，状态同样 `reserved2` / `dshReady=true`）：
-  `state/self-identity.json` 已生成 `{nickname:"卡哇伊的小肥鱼", userId:"3760717363"}` ——
-  注意这是**她自己的 QQ 号**（3287064288 是主人的），所以身份必须从网关 login 取、不能从配置拼。
+  `state/self-identity.json` 已生成 `{nickname:"卡哇伊的小肥鱼", userId:"10002"}` ——
+  注意这是**她自己的 QQ 号**（<账号或群号> 是主人的），所以身份必须从网关 login 取、不能从配置拼。
   11:15:03 的 AI 内部输出也证实她能从三张 B站 主页截图里认出自己那张（用户中途也确认过这一点）。
 - **仍需用户验一遍**：再转发一次「她在别的群的聊天记录」，她应该说成 QQ 聊天记录而不是 B站。
 - **B站 侧没有图片输入通道**（DM/评论都是纯文本，`tools/commands/dm-await.mjs` 不取图）：
@@ -3148,12 +3473,12 @@
 
 ### 追记（10:49–11:00）：真机第一次测试「还是回了」—— 填错了框，不是拦截失效
 
-- 用户实测：402 群（`group:767098733`）里「@机器人 test」照常回复。
+- 用户实测：402 群（`group:<账号或群号>`）里「@机器人 test」照常回复。
 - 查证：保存前的备份 `qq-config-2026-10-23T02-49-34-262Z.json` 里 `deny` 全空；保存后
-  `deny.private=["1011078831"]`、`deny.users=[]`；`state/social-v2.json` 的 `unread` 里还躺着那两条
-  `userId=1011078831` 的测试消息。⇒ 那个 QQ 被填进了「**仅拦私聊**」，`deny.users` 根本没赋值。
+  `deny.private=["<账号或群号>"]`、`deny.users=[]`；`state/social-v2.json` 的 `unread` 里还躺着那两条
+  `userId=<账号或群号>` 的测试消息。⇒ 那个 QQ 被填进了「**仅拦私聊**」，`deny.users` 根本没赋值。
 - 已修（本轮实做）：
-  1. 把 `1011078831` 移进 `deny.users`（备份 `_backups/config-before-move-1011078831-to-deny-users-*`）；
+  1. 把 `<账号或群号>` 移进 `deny.users`（备份 `_backups/config-before-move-<账号或群号>-to-deny-users-*`）；
   2. `loadSocialV2State()` 启动时清掉黑名单用户在 `unread/recentMessages` 里的积压（实测清了 4 条）——
      否则拉黑前堆的未读会在下一次唤醒被当成新消息回一遍；
   3. 设置页：字段改名「仅拦私聊（deny.private）」+ 只填在这一档时红字提示 + 一键加到「拉黑的人」；
@@ -3162,12 +3487,12 @@
   模式回落到本地 `chat`。已把 `config.json` 的 `dsh.baseUrl` 改成 `http://127.0.0.1:48904` 并按该端口重启，
   现在 `mode=reserved2`、`dshReady=true`、SnowLuma `good=true`。
   ⚠️ 以后手动重启桥接**别硬编码端口**（要么不传 `dshWebUrl` 让它自发现，要么先看 `state/dsh-port.json` / GUI 地址）。
-- 仍需用户验一遍：设置页硬刷新 → 黑名单卡片应显示「人 1 · 群 0 · 私聊 0」→ 让 `1011078831` 在群里再发一条 →
-  群里无回复，`bridge.log` 出现 `[黑名单] 忽略 group:767098733 来自 1011078831 的消息`。
+- 仍需用户验一遍：设置页硬刷新 → 黑名单卡片应显示「人 1 · 群 0 · 私聊 0」→ 让 `<账号或群号>` 在群里再发一条 →
+  群里无回复，`bridge.log` 出现 `[黑名单] 忽略 group:<账号或群号> 来自 <账号或群号> 的消息`。
 
 ### 没验证 / 下一步
 
-- **真机拦截还没被真消息触发过**：配置已生效（`deny.users=["1011078831"]`），等用户再发一条确认。
+- **真机拦截还没被真消息触发过**：配置已生效（`deny.users=["<账号或群号>"]`），等用户再发一条确认。
 - 插件的 `client.js` 已热重载（`plugin_manager` 关/开 `include:surfcore`），但**浏览器端要刷新一次**设置页才会看到新卡片。
 - 拉黑只拦**入站**，不回溯清理记忆卡里已有的内容；要清走 `/reset` 或控制台删记忆。
 
@@ -3986,7 +4311,7 @@
 
 | 平台 | 值 | 落在哪 |
 | --- | --- | --- |
-| QQ | `3287064288` | `config.json` 的 `ownerQQ`（+ `admin` 投影） |
+| QQ | `<账号或群号>` | `config.json` 的 `ownerQQ`（+ `admin` 投影） |
 | B站 | 用户自己的 mid/昵称 | `~/.dsh/surfcore/bili.config.json` 的 `owner.mid/name` |
 | 称呼 | 用户自填 | 合体层 `~/.dsh/surfcore/config.json` 的 `admin.displayName` |
 
@@ -4097,3 +4422,26 @@
 3. 发布方式：`github.com:443` 经常不通 → 用 `scripts/publish-via-api.mjs`（走 api.github.com），
    `--since <本地已有的远端祖先>` 用于 API 造提交后本地没有远端树的情况。
 4. 发完回填：`CHANGELOG.md`、本文件「尚未验证」、需要时 `PITFALLS.md`。
+
+
+## 2026-11-14 · QQ 约定与话题
+
+二代桥接的聊天入站、消息等待和唤醒已接入角色目录内的 conversation-memory-v1.json。离线验证运行 node scripts/test-conversation-memory.mjs；无需迁移旧数据。
+
+
+## QQ 二代记忆验收
+
+运行 node scripts/test-recall-calibration.mjs、node scripts/test-conversation-memory.mjs、node scripts/test-episode-recall.mjs。基线为第二版。第二版在预留四个闲聊和四个回忆问题上误中三次、正确召回三次。二代改用同一上下文入口，未修改 v1 数据格式。
+
+
+## 2026-11-14 · 每个 DSH 会话一次总提示
+
+二代以 sessions.json 中的 QQ 会话映射和 DSH 接受回执判断首次投递。检查 scripts/test-session-prompt.mjs：拒收重试、重启恢复、并发和新 session 首包。
+
+## 桌宠屏幕伴学
+
+桌宠的「文本对话」和「语音对话」打开随角色移动的输入框。点「记录」展开历史，点「伴学」选择具体窗口或显示器，再选择模型与声音。开启后可在原输入框提问。默认间隔 8 秒，同时只处理一帧，同一画面自动跳过；手动提问会重新取帧。点「停止共享」、关闭聊天或隐藏桌宠即可结束。打开对话框本身不会共享屏幕。
+
+DeepSeek 看图使用 deepseek-flash 及 DSH 凭据 DEEPSEEK_API_KEY。本机模型使用用户指定端口的回环 OpenAI 兼容接口，默认 Ollama 11434 和 qwen3.5:latest，须先启动模型服务。Codex CLI 使用本机 ChatGPT 登录态和临时只读会话，可用 SURFCORE_CODEX_EXE 指定原生可执行文件。模型失败会显示错误并停止共享。语音可选桌宠现有 TTS、DeepSeek Stella 或关闭。屏幕伴学单独处理，不会触发 QQ 发言或写聊天记忆。
+
+普通桌宠聊天仍用 DSH 的默认模型。QQ 主会话还依赖 DSH 的会话队列和工具调用；后台文本整理走 src/llm-text.js，搜网有独立调用。整站统一模型需要分别适配这些契约并回归，简单替换 DeepSeek 地址无法实现。桌宠 UI 来自本机安装的 Electron 发行包，更新或重装该包时需合并 dist 的伴学改动。

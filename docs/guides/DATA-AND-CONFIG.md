@@ -131,7 +131,7 @@
 | 子段 | 关键键 | 作用 |
 | --- | --- | --- |
 | 总开关 | `enabled`、`autoReplyCheckMs`、`agentPreset`（`qq-chat-v2`）、`provideRecommendations` | 二代是"一切皆工具"，文本不自动发送 |
-| `tools` | 布尔开关表 | **逐个工具的开关**：发消息/引用/分条/等待/表情/语音/记忆/黑话/收尾/跨场合投递/群管理/好友申请…默认全开，`setStickerRemark` 与 `sendVoice` 默认**关**。群管理开关是 `setGroupBan`（默认开，对应 `qq_set_group_ban`；群名片是 `setGroupCard`）；好友申请开关是 `friendRequests`（默认开，对应 `qq_list_friend_requests` / `qq_handle_friend_request`；2026-11-06 场景放宽后为「主人本人私聊或主人本人触发的回合」可用） |
+| `tools` | 布尔开关表 | **逐个工具的开关**：发消息/引用/分条/等待/表情/语音/记忆/黑话/收尾/跨场合投递/群管理/好友申请…默认全开，`setStickerRemark` 与 `sendVoice` 默认**关**。群管理开关是 `setGroupBan`（默认开，对应 `qq_set_group_ban`；群名片是 `setGroupCard`）；好友申请开关是 `friendRequests`（默认开，对应 `qq_list_friend_requests` / `qq_handle_friend_request`；2026-11-06 场景放宽后为「主人本人私聊或主人本人触发的回合」可用）；撤回消息开关是 `recallMessage`（默认开，对应 `qq_recall_message`：**普通工具**，不要求 owner 回合、不进内部模型审批，行为配置见 `messageRecall`） |
 | `wake` | `defaultMode`（diving）、`preSleepWaitEnabled`、`preSleepWaitMs`（300000）、`batchWindowMs`、`maxWakePerMinute/Hour`、`noActionLimit`、`recommended*`、`bootstrapOnlyContext`（true） | 唤醒调度与"沉睡前观察"的强制窗口。`bootstrapOnlyContext=true`（2026-11-02）：记忆卡（实测 5.9k 字/次）与叙事层等最大静态块**只在每段新会话首次唤醒（bootstrap）注入一次**，同一会话后续唤醒不再重发（唤醒提示 12.7k → ~6.8k 字）；身份/管理员规则/B站简报/文档记忆/私聊边界/style-notes 等小块仍每轮在。设 `false` 恢复旧行为（记忆卡每轮都带）。另：唤醒提示里新增「不回复也要静置」硬规则——决定不发言/收尾时先用 `qq_wait_for_messages(timeoutMs=300000)` 静置满 5 分钟再结束回合，期间有人说话就继续接（避免下一句变成一次新唤醒、重发一遍提示词） |
 | `closure` | `enabled`、`cooldownMs`（20 分钟）、`requireNoOpenQuestion`、`promptInWake`、`maxSummaryChars`、`maxNextOpeningChars`、`rotateAfterClosures`（5）、`rotateIdleMs`（300000） | 对话收尾：冷却只压普通概率唤醒，@/提问/私聊不压；**自然收尾累计 5 次、且收尾后静置 `rotateIdleMs`（默认 5 分钟）无新消息 → 才换新 DSH 会话**（期间又开口就继续用原会话；记忆卡/收尾记录保留，计数换会话后归零；0=关闭轮换 / 0=不等静置） |
 | `send` | `burstMaxMessages`（8）、`maxSendPerMinute/Hour`、`maxMessageChars`（500）、`gap*` | 发送节流与硬上限（超长 400、超条数 429） |
@@ -149,6 +149,7 @@
 | `media` | `maxBytes`（8MB）、`maxPixels`（64MP）、`maxCount`（5） | 图片/表情/动图限制 |
 | `adminActions` | `windowMs`（默认 `600000`=10 分钟，1 分钟~24 小时）、`maxPerHour`（默认 20，1~200） | **群管理动作的授权窗口（2026-11-06 起为兜底路径）**（2026-11-02 用户拍板）：管理员（ownerQQ）**最近一次在群里说话**后的 `windowMs` 内，才允许她执行禁言/解禁、改别人群名片；过期即失效。**主路径已换成「主人本人触发的回合」**（`state/turn-triggers.json` 归因 + `socialV2.toolApproval`，见 `RULES.md` 硬边界第 13 条），这个时间窗保留为兼容兜底。`maxPerHour` 是每会话每小时的动作上限（跨重启保留），2026-11-06 起也管**好友申请处理**（`adminActionTimes` 共用一份计数，每会话每小时上限）。好友申请**不再使用 `windowMs` 时间窗**（权限已放开，见下一条）。两者都是桥接侧硬闸，不是提示词约束；见 `RULES.md` 硬边界第 13、14 条 |
 | `friendRequests` | `wakeOnRequest`（默认 `true`）、`wakeMinIntervalMs`（默认 `300000`=5 分钟，0~1 小时） | **好友申请行为配置**（2026-11-06 用户要求「权限放开，由模型自己判断是否添加好友」）：收到新的普通好友申请时是否**主动唤醒主人私聊会话**让她自己判断；`wakeMinIntervalMs` 是两次申请唤醒的最小间隔（间隔内的新申请只落缓存，下次唤醒一起看到）。注意与 `socialV2.tools.friendRequests`（工具注册开关）不是一回事；主动唤醒仍走鱼群/token 防爆破/唤醒限频全套闸门 |
+| `messageRecall` | `enabled`（默认 `true`）、`windowMs`（默认 `120000`=2 分钟，合法 `30000`~`300000`）、`maxPerHour`（默认 `30`，合法 `1`~`200` 整数） | **消息撤回的行为配置**（2026-11-08 用户拍板「权限放开，不需要主人点头，自己判断」）：`enabled=false` 时 `POST /api/socialV2/recall-message` 一律 403（**手改 `config.json` 需重启桥接才生效**——桥接只在启动时读一次配置、没有 watcher；经控制台保存接口写入才会热更新内存 cfg，但本轮没有 UI 开关；启动归一化与控制台保存归一化用同一套 clamp：`enabled !== false`、`windowMs` 夹到 30000~300000、`maxPerHour` 取整夹到 1~200）；`windowMs` 是 QQ 侧约 2 分钟的可撤回窗口（超时 400 带 `windowExpired:true`）；`maxPerHour` 是每会话每小时**成功**撤回上限（失败不计数）。它**不**管授权：撤回是**普通工具**，不要求主人本人触发的回合、也不进 `socialV2.toolApproval` 内部模型审批；硬闸见 `RULES.md` 硬边界第 16 条。本轮没有控制台 UI 开关（改 `config.json` 需重启桥接，记录在 HANDOFF） |
 | `scenes` | `defaultPrivate.label/toneHint`、`defaultGroup.label/toneHint/memoryGuard`、`overrides.<key>` | **场合档位**（2026-10-31）：唤醒提示词顶部注入【场合】卡；`toneHint` 是该场合的语气提示，`memoryGuard`（默认群聊开）决定是否注入「私聊的事别搬到群里」守卫 |
 | `memoryScene` | `groupExcludePrivate`（默认 `false`）、`honorAudience`（默认 `true`） | 记忆卡注入的场合过滤：`honorAudience` 认记录级 `audience` 标记；`groupExcludePrivate=true` 时群聊连 `[私聊]` 记录也过滤（硬开关，默认关=记忆共同） |
 | `recall` / `docMemory` / `selfNotes` | `recall.{enabled,crossConversation,maxHits}`；`docMemory.{enabled,maxChars.qq\|group,docs}`（默认 1100/900；`docs=null` 用内置四本：薄版 560 注入、厚本 240 仅检索、公开日记 200、私密日记 240）；`selfNotes.{enabled,maxNotes,maxChars}` | 记忆扩展（2026-11-01/02），都不占记忆卡 6000 字预算：原文库按需召回（`qq_recall`；群聊只查本群、主人私聊可跨会话；厚本语感本可检索但不注入）；活文档记忆（薄版每轮注入 + 两本日记；文件一改下轮生效；`GET /api/socialV2/wake-preview` 可看 AI 真正收到的提示词）；selfNote 自我认知层（按角色共享，只在换新会话第一轮注入一次；桥接控制台「自我记录」可增删） |
@@ -178,7 +179,8 @@
   `model`、`maxUses`、`maxTokens`、`maxResults`、`timeoutMs`。
 - `purpose`：`enabled`、`gapMinMs/gapMaxMs`（15–30 分钟随机间隔）、`initialDelayMinMs`、`dailyMax`（4）、
   `quietStart/quietEnd`（23:30–08:30）、`idleThresholdMs`（主人空闲 30 分钟）、`materialWindowHours`、
-  `biliWindowDays`、`maxMaterials`、`minMaterials`、`retryMs`、`maxAttempts`、`maxCandidates`、`promptMaxChars`。
+  `biliWindowDays`、`maxMaterials`、`minMaterials`、`retryMs`、`maxAttempts`、`maxCandidates`、`promptMaxChars`、
+  `pendingTtlDays`（待续目的保留天数，默认 14；2026-11-08 补进模板）。
   ⚠️ 新版本还有 `carrier`（qq/pet）、`petModality`、`petFallbackToQQ`，**模板里没有**。
 - `greetings.morning`：`time`（08:00）、`uin`、`name`；默认整体关。
 
@@ -187,6 +189,15 @@
 `config.example.json` **没有** `chat`、`platforms.start`、`pet`、`tokenBudget` 四段。
 功能不受影响（代码各处有 `??` 兜底），但这意味着"模板即默认层"这一层缺键，新装用户从模板看不到这些能力。
 修法要先定"哪一层是权威默认"（这是 RISK A5，刻意没动）。
+
+### 1.14 `lifeSettings`（生活参数，2026-11-08 新增）
+
+- `enabled`（默认 true）：**回滚开关**。false 时桥接不叠 sidecar 覆盖、不启动消费者刷新、life 工具返回 503。
+- `maxWritesPerHour`（默认 12，clamp 1–120）：每个 QQ 会话每小时 `life_apply/rollback/observe` 上限。
+- `dailyReview`（默认开，2026-11-08 用户要求「就在早安一个心跳」）：`{enabled:true, time:'08:00', maxChanges:2, notifyOwner:true, graceHours:3}`。
+  每天在主人私聊叫醒一次做生活参数自检；与同时间/同对象的早安问候合并成同一个唤醒；状态落 `state/life-review.json`。
+- 参数目录/范围/审批级别在 `src/life-settings/catalog.js`（30 项 + 6 组只读）；受管覆盖**不写这个文件**，
+  而是写 `~/.dsh/surfcore/life-settings.json`。完整语义见 [LIFE-SETTINGS.md](LIFE-SETTINGS.md)。
 
 ---
 
@@ -257,7 +268,7 @@
 | --- | --- | --- | --- |
 | `sessions.json` 🔒 | 桥接 | 桥接/插件 | QQ 会话 ↔ DSH 会话映射 + **每会话 agentToken** + 退役记录。删了 = 所有会话重新开会话（上下文丢） |
 | `mode.json` | 桥接/控制台 | 桥接 | 运行模式（chat/closed-agent/reserved/reserved2） |
-| `social-v2.json` 🔒 | 桥接 | 桥接/插件/桌宠 | 二代仿真全部状态：未读池、唤醒配置、收尾记录、表情、鱼群、token 计数。（单文件约 400KB 量级） |
+| `social-v2.json` 🔒 | 桥接 | 桥接/插件/桌宠 | 二代仿真全部状态：未读池、唤醒配置、收尾记录、表情、鱼群、token 计数。**2026-11-08 起 `conversations[<key>]` 里另有 `recallTimes`**（撤回消息的每小时频率计数，只保留最近 ≤200 条时间戳；成功才追加，**随 `social-v2.json` 落盘、跨重启保留**，与 `adminActionTimes` 同口径，防重启刷额度；删了等于重置频率额度、不影响 QQ 消息本身）。（单文件约 400KB 量级） |
 | `console-token` 🔒 | 桥接 | 控制台 | 自动生成的控制台令牌 |
 | `bridge.lock` | 桥接 | 桥接 | 单实例锁（PID + 端口二次判据） |
 | `bridge.log` / `.log.1` | 桥接 | 控制台 | 运行日志（滚一代）；`qq-activity.log` 是"说了什么"的活动日志（500 行） |
@@ -273,6 +284,7 @@
 | `friend-requests.json` | 桥接 | 桥接/控制台 | **好友申请事件缓存**（2026-11-06）：`pending` 普通申请（TTL 7 天、≤50 条）+ `handled` 已处理标记（24h 内去重、≤100 条）。读坏/不存在按空缓存处理，写失败只记日志；删了 = 丢掉还没处理的申请（不影响 QQ 账号本身） |
 | `turn-triggers.json` | **桥接（唯一写者）** | **DSH 插件只读**（`qq-owner-approval` / `qq-tool-restrict`） | **本回合触发者归因**（2026-11-06）：`{version, updatedAt, mode, ownerKey, sessions:{<DSH sessionId>: {key, kind, groupName, turnActive, wakeReason, trigger:{userId,isOwner,at,seq,messageId,text,direct,quoteSelf}, ownerInBatch, recent[], updatedAt}}}`。桥接在投递 prompt 前入队、`turn/start` 对齐、`turn/end` 失效；`trigger.text`/`recent[].text` 是**脱敏后的纯文本**（≤200/120 字，不含 media/token）。sessions ≤50、24h 未更新启动时丢弃、启动时 `turnActive` 强制归零；写失败只 log、**绝不影响投递**。删了 = 群聊里的特权工具全部 fail-closed，直到下一次投递重写。**不要手改**（字段契约见 `src/turn-trigger.js` 头部与 `RULES.md` 硬边界第 15 条） |
 | `tool-approvals.jsonl` | **DSH 插件**（`qq-owner-approval`，运行在 DSH 宿主进程、不在沙箱里） | 桥接（只读展示）/控制台 | **内部模型审批流水**（2026-11-06）：每行 `{t, key, sessionId, tool, decision: allow\|deny\|fail, risk, reason(≤160，已脱敏), model, latencyMs, triggerUserId, triggerIsOwner, wakeReason, mode, source:'model'}`；**工具参数原文与令牌绝不入日志**；>1MB 轮转为 `.1`；写失败只 log（审批本身不依赖它）。桥接用它算安全姿态统计并提供 `GET /api/tool-approvals?limit=N`（仅控制台令牌）；读不到 → 姿态 `toolApproval` 项 `warn`（尚无记录或插件未生效）。删了 = 丢审批历史，不影响审批逻辑 |
+| `life-settings-audit.jsonl` | 桥接（`/api/life/*` 每次 agent 写/读管理端动作） | 人/排障 | **生活参数审计**（2026-11-08）：每行 `{at, via: agent\|operator, key, ownerTurn, action, planId?, changeId?, ok, error?}`；**不含参数值全文与 token**；>1MB 轮转为 `.1`；写失败只吞（审计不阻塞功能）。删了 = 丢审计历史，不影响 sidecar 事务 |
 | `pending-replies.json` | 桥接 | 桥接 | 待回复队列（提问/审批等待中的消息） |
 | `bili-memory.json/.md`、`bili-dynamics-*.json`、`bili-share-*.json`、`bili-video-titles.json` | 桥接 | 桥接/插件 | 桥接侧的 B站 记忆镜像（有角色时改用角色包） |
 | `voice-packs/`、`voice-tts/` | 桥接 | 桥接/插件 | 语音包安装目录（**几百 MB 到几 GB**，用户素材）与 TTS 缓存 |
@@ -300,6 +312,11 @@
 | `bili/credentials.json` 🔒 | B站 工具 | B站 工具 | 鱼的 cookie（`sessdata`/`bili_jct`/`buvid3`） |
 | `bili/owner-credentials.json` 🔒 | 工具 | 工具 | 主人的 B站 cookie（**只用于只读抓偏好**，绝不用于发评论） |
 | `token-budget.json`、`token-usage-daily.json`、`token-usage-state.json`、`token-alert.json` | 插件/工具 | 插件 | 每日额度、当日用量、事件水位、80% 提醒去重 |
+| `life-settings.json` 🔒 | 桥接（`src/life-settings/manager.js`）或 CLI，**唯一写者** | 桥接/插件/CLI | **生活参数受管覆盖 + 历史/计划/观察**（2026-11-08）：`{schema:1, scopeId, revision, overrides, history, plans, observations}`；scopeId 与 `SURFCORE_ROOT+DSH_HOME` 绑定；**不写基础配置**，回滚只回写覆盖层 |
+| `life-settings.lock/` | 桥接/CLI | — | 跨进程 mkdir 写锁（含 `owner.json`）；崩溃遗留用 `npm run life -- recover-lock` 隔离，不自动破坏 |
+| `life-settings-backups/` | 桥接/CLI | 人 | 每次提交前整份备份（`r<revision>-<uuid>.json`） |
+| `life-runtime/{qq,bili}.json` | bridge（QQ/purpose） / 插件调度器（B站） | 桥接/CLI | **消费者采用证据**（2026-11-08）：`{schema,scopeId,producer,pid,revision,observedAt,values,details}`；`life_verify` 只认这个（90s TTL + pid 存活 + 同 revision），manager 不伪造 |
+| `life-review.json` | 桥接（每日生活参数心跳，唯一写者） | 桥接/控制台 | **每日心跳状态**（2026-11-08）：`{lastDate,lastAt,lastOk,lastError?,lastSkip?,via,lastManualAt?}`；用来保证同一天只叫醒一次；手动试跑只写 `lastManual*` 不占当天名额；删了 = 下一次可能当天再叫一次 |
 | `alignments.json` / `align-candidates.json` | 插件 | 桥接/插件 | 身份对齐已生效项 / 待审批候选 |
 | `extensions.json` | 插件 | 插件 | 扩展启用状态与各自配置 |
 | `backups/` | 插件 | 人 | 配置/人格/记忆卡的写前备份（**按来源分别保留 40 份**） |

@@ -4,6 +4,8 @@
 > 本文只描述**桥接这一侧**的行为；插件宿主、SnowLuma 内部、DSH 服务端的实现不在范围内。
 > 所有 `src/bridge.js:行号` 都指本仓库该文件。
 > **最后核对**：2026-10-26（全仓库逐行梳理）。配套阅读：总纲 [ARCHITECTURE.md](ARCHITECTURE.md) · 边界 [BOUNDARIES.md](BOUNDARIES.md) · 索引 [../README.md](../README.md)。
+> **2026-11-08 增量**：新增 `POST /api/socialV2/recall-message`（撤回 QQ 消息，**普通工具**：不要求 owner 回合、
+> 不进内部模型审批）与发送端点回执 `messageIds`（自己发的消息 id 落库，供撤回用）；见 §6.11、§7.8 末段。
 
 ---
 
@@ -513,7 +515,7 @@ await pumpMux();      // DSH 事件流主循环（永不返回）
 
 `reconcileSessionPolicies()`（`src/bridge.js:3388-3402`）遍历全部会话，不满足 `isCurrentSession` 的就退役。**但 `dshPresetIds` 为空时直接 return**——否则一次网络抖动会让所有会话集体退役、上下文全丢（注释 `src/bridge.js:3389-3398`）。
 
-**正常使用中的主动轮换（2026-11-01）**：`socialV2.closure.rotateAfterClosures`（默认 5，0=关闭）。每次 `qq_close_conversation` 成功，`st.sessionClosures` +1（持久化在 social-v2.json）；累计 ≥ 阈值时，`closeConversationV2` 只挂一个 5s 定时器（`sessionRotateTimers`），不打断收尾回合；定时器到点后确认会话映射没变、收尾记录没被覆盖、对方没重开、`isConversationBusyV2()` 为 false，才调用 `retireSession(key)` 换新会话并清零计数（`scheduleSessionRotationAfterCloseV2`）。放弃条件全部是「这次不换」（计数不清零，下次收尾再触发），不影响别的路径；`forgetConversationCaches` 统一清定时器。为什么按收尾次数而不是 token：DSH 自动压缩门槛 727k（1M 窗口）、手动压缩摘要不适合人格记忆（PITFALLS #87）。
+**正常使用中的主动轮换（2026-11-01）**：`socialV2.closure.rotateAfterClosures`（默认 5，0=关闭）。每次 `qq_close_conversation` 成功，`st.sessionClosures` +1（持久化在 social-v2.json）；累计 ≥ 阈值时，`closeConversationV2` 只挂一个 5s 定时器（`sessionRotateTimers`），不打断收尾回合；定时器到点后确认会话映射没变、收尾记录没被覆盖、对方没重开、`isConversationBusyV2()` 为 false，才调用 `retireSession(key)` 换新会话并清零计数（收尾后的会话轮换）。放弃条件全部是「这次不换」（计数不清零，下次收尾再触发），不影响别的路径；`forgetConversationCaches` 统一清定时器。为什么按收尾次数而不是 token：DSH 自动压缩门槛 727k（1M 窗口）、手动压缩摘要不适合人格记忆（PITFALLS #87）。
 
 重建路径 `ensureSession(key)`（`src/bridge.js:9119-9212`）：
 
@@ -727,6 +729,7 @@ await pumpMux();      // DSH 事件流主循环（永不返回）
 | POST | `/api/socialV2/send-message` | `sendMessage` | **发 QQ**（单/多段，可引用/@） | `src/bridge.js:6050-6202` |
 | POST | `/api/socialV2/send-cross` | `crossSceneSend` | **受控跨场合投递**（主人本人发起：主人私聊或主人本人触发的回合 → 显式白名单群；默认关；桥接代投，不向模型发目标 token；`allowTargets`/群白名单/敏感/长度/频率闸全保留；每次调用先过 DSH 内部模型审批） | `src/bridge.js` 同段（2026-10-31 路线 A；2026-11-06 来源放宽） |
 | POST | `/api/socialV2/set-group-ban` | `setGroupBan` | **群管理：禁言/解禁**（群聊/私聊都行；授权 = 主人本人触发的回合（主路径）或旧 `ownerAt` 时间窗（兜底，`socialV2.adminActions.windowMs`）；**私聊必须显式给 `groupId` 且命中 `allow.groups`**，群聊里传别的群号 400；目标必须是本群成员、不能是她自己/管理员/群主/其他管理员；`durationSeconds=0` 解禁，最长 30 天；每小时上限 `maxPerHour`；每次调用先过 DSH 内部模型审批） | `src/bridge.js` 同段（2026-11-02 群管理动作；2026-11-06 场景放宽） |
+| POST | `/api/socialV2/recall-message` | `recallMessage` | **撤回一条 QQ 消息**（真撤回；**普通工具**，2026-11-08 用户拍板「权限放开，不需要主人点头，自己判断」：**不要求 owner 回合、不进 DSH 内部模型审批**，模型自己判断）。请求体 `{key, messageId}`（兼容 `message_id`；也接受本地 `seq`，能在 `recentMessages` 里映射到真实 id 才放行，否则 400）。严格顺序：① body/`key` 非空；② 仅 `reserved2`（403）；③ 会话令牌命中该 key + `v2SessionAllowed` + `socialV2.tools.recallMessage !== false` + AI 未暂停（403）；④ `socialV2.messageRecall.enabled !== false`（403）；⑤ key 格式 `^(group\|private):\d+$` + 当前模式白名单（400/403）；⑥ `messageId` 非空+每会话每小时 ≤ `maxPerHour`（默认 30，**成功才记账**，超限 429）；⑦ 解析真实 id（seq → `recentMessages[].messageId`；无真实 id → 400）；⑧ `get_msg` 查消息（经 `withTimeout`；失败/找不到 → 404，错误已脱敏）；⑨ 取发送者与机器人自身 QQ（`selfId` 取不到 → 500、`senderId` 空 → 403）；⑩ 会话归属：群要求 `group_id` 等于本群；**私聊要求无 `group_id` 且（`target_id === 当前会话` 或 `user_id === 当前会话`）**——SnowLuma 自发私聊副本是 `user_id=自己`/`target_id=对方`，收到的私聊是 `user_id=对方`，两种都认；不符 403；⑪ self 判定：**撤自己的随时**（群聊/私聊都行）；撤别人的**仅群聊 + 机器人本群 `admin`/`owner`**（`get_group_member_info` 自验，取不到角色 fail-closed），目标为群主 → 403，私聊撤对方 → 403；⑫ 窗口：`msg.time` 有效且 `ageMs > windowMs`（默认 120000）→ 400 带 `windowExpired:true`（time 缺失/时钟偏差不拦，交网关拒绝）；⑬ `delete_msg`（网关失败 → 500，错误先脱敏）。成功 200 `{ok,key,messageId,messageType,self,senderId,windowMs}`，**不回显被撤消息原文**；成功后 `recentMessages` 对应条目记 `recalled:true`、`recallTimes` 追加本次时间并落盘 | `src/bridge.js` 同段（2026-11-08 消息撤回；复用 `agentTokenOk`/`v2SessionAllowed`/`v2ToolEnabled`/`modeAllowed` 等 helper，新增 `onebotRawOrThrow`/`groupMemberRoleForRecall`/`recallMessageConfig`/`resolveRecallTargetV2`） |
 | GET | `/api/socialV2/group-members` | —（只读，带会话令牌） | **群成员名单（reserved2）**：群成员 QQ 号/昵称/群名片/role；群聊只能查本群、主人私聊可查白名单群；给「禁言/改名片」按昵称解析 QQ 号用 | `src/bridge.js` 同段（2026-11-02 群管理动作） |
 | POST | `/api/socialV2/handle-friend-request` | `friendRequests` | **好友申请：同意/拒绝**（`approve=true` 真会生效的账号级动作）。硬闸：**主人本人私聊或主人本人触发的回合**（别人私聊/群友触发的回合 403；2026-11-06 场景放宽）+ 每小时 ≤ `maxPerHour`（与群管理动作共用 `adminActionTimes`）；**2026-11-06 用户要求「权限放开，由模型自己判断是否添加好友」，已删除「主人最近开口 10 分钟」时间窗**，判断权在模型（preset 第 21/22 条），处理完由模型在私聊里告知主人（群里只说结论）；`kind` 只能 `request`/`filtered`，`flag` 走 `^[A-Za-z0-9_\-+/=.:]{1,200}$` 且必须来自列表（普通申请还要命中事件缓存，否则 400）；`approve=true/false` 缺省 true、非布尔 400；`request`→`set_friend_add_request`、`filtered`→`set_doubt_friends_add_request`；网关失败 502「处理好友申请失败：…」；成功后从缓存删除并记 `handled`；`wakeReason=friendRequest` 的唤醒提示会带「你可以自己判断」口径；每次调用先过 DSH 内部模型审批 | `src/bridge.js` 同段（2026-11-06 好友申请 + 场景放宽） |
 | GET/POST | `/api/socialV2/style-notes` | —（控制台/管理端） | 说话习惯：POST 可选 `scope`（global/private/group/group:<id>）；GET `?key=` 返回按场合过滤后的注入块 | `src/bridge.js` 同段（2026-10-31 路线 A） |
@@ -748,11 +751,26 @@ await pumpMux();      // DSH 事件流主循环（永不返回）
 
 三条容易被忽略的「必须 `reserved2` + 必须 agent token」：`send-burst`（`src/bridge.js:5963-5967`）、`send-message`（`src/bridge.js:6096-6097`）、`send-sticker`（`src/bridge.js:6771-6772`）。而 `send-voice` / `send-poke` / `forward-message` 也各自显式要求；`send-cross`（2026-10-31）同样要求 `reserved2` + token，且额外要求来源是主人本人（私聊或主人触发的回合，2026-11-06 放宽）、目标双白名单、`crossSceneSend.enabled=true`。
 
+2026-11-08 起，`send-message` / `send-burst` 与通用 `/api/send/*` 的成功响应多一个 `messageIds` 数组（本次真实发出的 QQ message id，
+过滤空值）。**文本/图片/表情/语音的 messageId 都会写进 `recentMessages`**（图片/表情/语音是既有行为；本轮补的是文本发送链路
+原先丢弃的网关回执），要撤某条消息用回执 `messageIds` 或 `/api/socialV2/recent` / 消息详情里的真实 id（见 `PITFALLS.md` #105）。
+
 2026-11-06 场景放宽的四个端点（`friend-requests` / `handle-friend-request` / `send-cross` / `set-group-ban` / `set-group-card`）统一用
 `ownerTurnAllowed(key)` 判「这一轮是不是主人本人触发的」：`private:<ownerQQ>` 恒 true（旧路径）；群聊要 `reserved2` +
 `socialV2.toolApproval.enabled` + `state/turn-triggers.json` 的 `turnActive`/`trigger.isOwner`/窗口；其余 false（fail-closed）。
 `superseded` 之外的旧闸（`allowTargets`、`allow.groups`、`maxPerHour`、`ownerAt` 窗口、目标成员校验）**全部保留**
 ——场景放宽只改「谁能发起」，不改「能对谁做」。其中 `set-group-card` 的「改别人」三通道 = 主人私聊 / 主人触发回合 / 旧 `ownerAt` 窗口。
+
+**2026-11-08 的撤回端点不属于上面这条「场景放宽」**：`/api/socialV2/recall-message` 是**普通工具**，既不查
+`ownerTurnAllowed()`、也不进 `qq-owner-approval`；它的授权不是「谁发起本回合」，而是「撤谁的消息 + 机器人在这群里的角色」。
+闸门顺序（严格，先失败先返回，与端点行一致）：`reserved2` → 会话令牌/会话白名单/工具开关/AI 暂停 →
+`socialV2.messageRecall.enabled` → key 格式 + 模式白名单 → `messageId` 非空 + 每小时频率 → `messageId` 解析（本地 seq 映射）→
+`get_msg`（404）→ 取发送者/自身 QQ（selfId 取不到 500）→ 会话归属（群查 `group_id`；私聊要求无 `group_id` 且
+`target_id` 或 `user_id` 命中当前会话——SnowLuma 自发私聊副本是 `user_id=自己`/`target_id=对方`，两种都认；403）→
+self / 别人的角色校验（撤别人需机器人本群 `admin`/`owner`，取不到角色 fail-closed；
+目标是群主 403；私聊撤对方 403）→ 约 2 分钟窗口（400 带 `windowExpired:true`）→ `delete_msg`（网关失败 500，错误先脱敏）。
+**成功才计入 `recallTimes`**（失败不占额度），一次一条。`get_msg`/`delete_msg` 都走 `withTimeout`（8s / 10s），
+不会把 handler 卡死。
 
 ### 6.12 管理端表情库
 
@@ -902,6 +920,10 @@ DSH 工具调用（三类特权工具）
   因而**不构成授权**、端点放宽不生效——行为与 2026-11-05 完全一致。`closed-agent` 用 DSH 默认 preset、不挂守卫，也不受影响。
 - **端点 ④ 的顺序**：`set-group-ban` 先解析/校验 groupId 再查授权与频率；`friend-requests` 先查工具开关/令牌再查授权；
   各端点保持原有「先失败先返回」顺序，场景放宽只在原「来源必须是主人私聊」那一行替换。
+- **撤回消息不走这条链路**（2026-11-08）：`POST /api/socialV2/recall-message` 是**普通工具**——没有 ① 归因、没有 ② 模型审批、
+  也没有 ④ 的 owner 窗口；它的硬闸是端点自己的「仅 `reserved2` + token/会话白名单/工具开关/AI 暂停 + 会话归属 +
+  机器人本群角色（仅撤别人的消息时）+ 约 2 分钟窗口 + 每小时频率」。它是用户明确拍板的放宽（「权限放开，不需要主人点头，
+  自己判断」），见 `RULES.md` 硬边界第 16 条与 `SECURITY_BASELINE.md` §三 R14。
 
 ### 7.9 其它硬化点
 

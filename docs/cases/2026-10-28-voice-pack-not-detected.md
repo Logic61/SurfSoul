@@ -4,7 +4,7 @@
 
 - 用户把本地语音包装在 `文档\surfcore\state\voice-packs\voice-local`（`config.toml`、`.venv`、`.venv-gsv` 都在）；
 - 语音页仍显示「安装（1.9GB）」，判定未安装；
-- 配置里的「安装目录」是另一个路径（`C:\Users\<user>\surfcore\state\voice-packs`）。
+- 配置里的「安装目录」是另一个路径（`<仓库目录>/state/voice-packs`）。
 
 ## 根因
 

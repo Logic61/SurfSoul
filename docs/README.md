@@ -24,7 +24,7 @@
 | 文档 | 一句话说明 | 状态 |
 | --- | --- | --- |
 | ~~guides/PROJECT_GUIDE.md~~ | **（已不在工作区）** 旧的「权威项目说明书」（113 KB / 1450+ 行）。2026-10-26 逐行梳理后由 `ARCHITECTURE.md` + `MODULE-*.md` + `SUBSYSTEM-*.md` 这套**带 `文件:行号`** 的新文档取代 | 🗄️ 已被取代；本机文件已不存在（`.gitignore` 排除的那批历史文档之一），链接点不开属预期 |
-| [guides/DSH_SETUP.md](guides/DSH_SETUP.md) | DSH 端安装说明：`qq-chat` / `qq-chat-v2` preset 与四个 MCP server 怎么挂到目标设备的 DSH 上 | ✅ |
+| [guides/DSH_SETUP.md](guides/DSH_SETUP.md) | DSH 端安装说明：`qq-chat` / `qq-chat-v2` preset 与五个 MCP server 怎么挂到目标设备的 DSH 上 | ✅ |
 | [guides/TOKEN_USAGE_CONSOLE.md](guides/TOKEN_USAGE_CONSOLE.md) | 控制台「令牌与花费」看板：数据来源、计价口径（峰谷分时）、API、配置 | ✅ |
 | [guides/CONSOLE-UI-TESTING.md](guides/CONSOLE-UI-TESTING.md) | 控制台离线预览（`npm run preview:console`）与离线浏览器回归（`npm run test:console-ui`）怎么用 | ✅ 2026 整理时自 `scripts/` 移入 |
 | [guides/SECURITY_BASELINE.md](guides/SECURITY_BASELINE.md) | **安全基线与威胁模型**：威胁主体、已实现的边界（准入/工具面/出站/控制台/落盘/网络）、已知残余风险、发布前回归清单、改动检查单 | ✅ **改动安全相关代码前必读**（2026-09-20 新增） |
@@ -34,6 +34,8 @@
 | [guides/PURPOSE_OUTREACH.md](guides/PURPOSE_OUTREACH.md) | **目的机制（主动找主人）**：从近期 QQ+B站 记忆提炼「目的」→ 定期搭话（分享🧀/索取）；**载体 QQ / 桌宠**（2026-10-25）与互斥/回落、排程与硬闸门、素材/候选/提示词、内部备忘与 pending、状态文件、API、配置、预览/试一次、验证与回滚 | ✅ 2026-10-25 更新 |
 | [../plugins/surfcore/docs/PET.md](../plugins/surfcore/docs/PET.md) | **桌宠栏目**：安装/启动、**文本/语音对话**、气泡与「回复」按钮、主动搭话的桌宠载体、`pet-api` 本地令牌接口、数据位置与排障 | ✅ 2026-10-25 更新 |
 | [guides/CONVERSATION_CLOSURE.md](guides/CONVERSATION_CLOSURE.md) | **对话收尾判断**：六类信号 → continue/linger/close；`qq_close_conversation` 与 mark_read/潜水的边界；未答提问硬闸、冷却与重开、结束点记录、配置/验证/回滚 | ✅ 2026-10-24 新增 |
+| [guides/LIFE-SETTINGS.md](guides/LIFE-SETTINGS.md) | **生活参数自调**：agent 用 MCP 工具预览/执行/验证/回滚自己的行为参数（B站作息、主动冒泡、唤醒概率、目的节奏）；bridge owner 回合硬闸、sidecar 覆盖层、消费者采用证据、CLI 审批 | ✅ 2026-11-08 新增 |
+| [guides/LIFE-PARAMS-CHECKLIST.md](guides/LIFE-PARAMS-CHECKLIST.md) | **生活参数开放清单（待用户审阅）**：29 项建议自主 + 1 项需审批 + 6 组只读；权限口径与相对参考仓库的优化 | ✅ 2026-11-08 新增（待审阅） |
 
 ### 2026-10-26 全仓库梳理（新，建议按顺序读）
 
@@ -57,7 +59,7 @@
 | [guides/SUBSYSTEM-BILI.md](guides/SUBSYSTEM-BILI.md) | **B站 子系统**：账号与凭据、生物钟、内容生产/消费、34 个 CLI 命令与 23 个库、四本账额度、鱼群、脱敏、配置全解 | ✅ 2026-10-26 新增 |
 | [guides/SUBSYSTEM-VOICE.md](guides/SUBSYSTEM-VOICE.md) | **语音子系统**：三条链路（语音库/现场合成/语音包）、状态机、本地↔云端路由、合成契约、发送全链路、触发规则、配置全解 | ✅ 2026-10-26 新增 |
 | [guides/SUBSYSTEM-PET.md](guides/SUBSYSTEM-PET.md) | **桌宠子系统**：拓扑、发现与鉴权、pet-api 端点、对话链路、事件队列、目的载体与互斥、记忆写入、语音与回音、专注模式、桌宠侧契约 | ✅ 2026-10-26 新增 |
-| [guides/AGENT-TOOLS-AND-PRESETS.md](guides/AGENT-TOOLS-AND-PRESETS.md) | **工具面与 preset**：四个 MCP server、`qq_*` 工具全表与开关（数量见 [CURRENT-NUMBERS.md](guides/CURRENT-NUMBERS.md)）、权限与会话绑定、fail-closed 工具守卫、两代 preset、装配流程 | ✅ 2026-10-26 新增 |
+| [guides/AGENT-TOOLS-AND-PRESETS.md](guides/AGENT-TOOLS-AND-PRESETS.md) | **工具面与 preset**：五个 MCP server、`qq_*` 工具全表与开关（数量见 [CURRENT-NUMBERS.md](guides/CURRENT-NUMBERS.md)）、权限与会话绑定、fail-closed 工具守卫、两代 preset、装配流程 | ✅ 2026-10-26 新增 |
 | [guides/CURRENT-NUMBERS.md](guides/CURRENT-NUMBERS.md) | **自动生成的当前规模数字**（bridge 行数 / 工具数 / MCP server 数 / restrict 名单 / 控制台页数 / 审计脚本数）；手写文档引用它、不要手抄 | ✅ 2026-11-03 自动生成 |
 | [guides/DATA-AND-CONFIG.md](guides/DATA-AND-CONFIG.md) | **配置与数据**：三份配置逐段全解（含默认值/生效时机）、约 95 个状态文件全表（谁写谁读/能不能删）、角色包结构、备份与迁移 | ✅ 2026-10-26 新增 |
 | [guides/BOUNDARIES.md](guides/BOUNDARIES.md) | **能力边界**：环境边界、能力矩阵（能做/有条件/不做）、失败模式 → 恢复动作表、安全承诺与不承诺、资源与数据出机边界 | ✅ 2026-10-26 新增 |

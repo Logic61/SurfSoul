@@ -1,10 +1,12 @@
 # 工具面与 preset（AGENT-TOOLS-AND-PRESETS）
 
-> 这份文档回答：**agent 的手从哪来**（四个 MCP server + 全部 `qq_*` 工具）、**哪些手被绑住**
+> 这份文档回答：**agent 的手从哪来**（五个 MCP server + 全部 `qq_*` 工具）、**哪些手被绑住**
 > （七层闸门 + fail-closed 守卫 + 本回合归因 + 内部模型审批）、**她戴哪张面具**（`qq-chat` / `qq-chat-v2` 两代 preset）、
 > **这些是怎么装进 DSH 的**。
-> **最后核对**：2026-11-06（工具场景放宽 + ownerQQ 归因 + 内部模型审批：本地执行 10 工具、好友申请、
-> 跨场合投递、群管理改为「主人本人触发的回合」可用且逐次模型审批，仅 `reserved2` 生效）。
+> **最后核对**：2026-11-08（新增 `life-settings` MCP：生活参数预览/执行/验证/回滚，写操作走 bridge
+> `ownerTurnAllowed` + 内部模型审批；见 [LIFE-SETTINGS.md](LIFE-SETTINGS.md)。同日新增 `qq_recall_message` 撤回消息：
+> 普通工具、权限已放开、不做 owner 回合/内部模型审批；2026-11-06 的工具场景放宽 + ownerQQ 归因 + 内部模型审批仍有效：
+> 本地执行 10 工具、好友申请、跨场合投递、群管理改为「主人本人触发的回合」可用且逐次模型审批，仅 `reserved2` 生效）。
 > 工具/名单数量以 [CURRENT-NUMBERS.md](CURRENT-NUMBERS.md) 为准。
 > 配套阅读：总纲 [ARCHITECTURE.md](ARCHITECTURE.md) · 边界 [BOUNDARIES.md](BOUNDARIES.md) · 索引 [../README.md](../README.md)。
 
@@ -12,16 +14,19 @@
 
 ## 0. 一句话
 
-**两个 MCP 手 + 一张面具。**
+**五只 MCP 手 + 一张面具。**
 
 - `snowluma`（全部 `qq_*` 工具，数量见 [CURRENT-NUMBERS.md](CURRENT-NUMBERS.md)）是主力手：读消息、发消息、等待、表情、语音、记忆、她自己的资料/空间、快速生图、群管理动作、好友申请。
 - `snowluma-host`（1 个）是探活手：只问 SnowLuma 在不在，**没有启停能力**（EULA）。
 - `web-search-safe`（2 个）是外部信息手：只读搜索与抓取，带 SSRF 防护。
+- `stock`（3 个）是只读行情手：公开行情、无 key、不落盘。
+- `life-settings`（9 个 `life_*`）是**生活参数手**（2026-11-08）：预览/执行/验证/回滚自己的行为参数；
+  写操作只允许主人私聊或主人本人触发的回合，权限/限频/审计在 bridge，细节见 [LIFE-SETTINGS.md](LIFE-SETTINGS.md)。
 - preset 决定"她是谁、在哪说话"：`qq-chat`（一代/普通）与 `qq-chat-v2`（二代仿真）。
 
 ---
 
-## 1. 四个 MCP server
+## 1. 五个 MCP server
 
 | server | 入口 | 工具 | 挂载 | 边界 |
 | --- | --- | --- | --- | --- |
@@ -29,10 +34,11 @@
 | `snowluma-host` | `src/mcp-host-server.js`（93 行） | `snowluma_status` | 同上 | **只读探活**；v0.1.5 起移除了 `start_snowluma`/`stop_snowluma` |
 | `web-search-safe` | `src/mcp-web-search-safe.js`（92 行） | `web_search`、`web_fetch` | 同上 | 只读；禁内网/环回/CGNAT；DNS 解析后逐地址校验；重定向每跳复核 |
 | `stock` | `src/mcp-stock-safe.js` | 3 个只读行情工具 | 同上 | 只读公开行情；无 key、无账号、不落盘（2026-10-29 加） |
+| `life-settings` | `src/mcp-life-settings.js`（stdio 代理） | 9 个 `life_*` 工具 | 同上（env 显式带 `SURFCORE_ROOT`/`DSH_HOME`） | 只是代理：读/写权限、owner 回合闸、每会话限频、审计都在 bridge `/api/life/*`；MCP 没有 approve 工具 |
 
 > 数量以 [CURRENT-NUMBERS.md](CURRENT-NUMBERS.md) 为准（自动生成，避免手抄漂移）。
 
-三者都是 **stdio** transport，由 DSH 的 MCP 客户端按 profile 配置拉起，进程生命周期归 DSH 管。
+五个都是 **stdio** transport，由 DSH 的 MCP 客户端按 profile 配置拉起，进程生命周期归 DSH 管。
 
 > 为什么要把 host 单独拆出来：SnowLuma 的登录态查询（`get_login_info`）与"操控进程"是两类能力，
 > 前者无副作用、后者触碰 EULA §5.4。拆成两个 server 后，MCP 配置里可以只挂前者的能力。
@@ -163,6 +169,23 @@
 > （默认开）与 `wakeMinIntervalMs` 控制。新工具与其它 MCP 工具一样要**重启 DSH** 才进入 QQ 会话工具面；
 > 桥接端点/主动唤醒重启桥接即生效。
 
+### 2.4.3 撤回消息（普通工具，权限已放开，2026-11-08）
+
+> 用户原话：「给surfcore的qq部分接上群撤回的接口，权限放开，不需要主人点头，自己判断」。
+> **这是普通工具，不是特权工具**：不要求「主人本人触发的回合」、**不进** `qq-owner-approval` 模型审批名单，
+> 群友触发的回合里也能撤她自己发的消息；什么时候撤由模型自己判断（preset 工具协议第 23 条）。
+> 剩下的硬闸是桥接端点自己的那几道（见下表），回滚开关 `socialV2.messageRecall.enabled=false`（手改 `config.json` 需重启桥接才生效；经控制台保存接口写入才热更新内存 cfg）。
+
+| 工具 | 作用 | 开关 | 硬约束 |
+| --- | --- | --- | --- |
+| `qq_recall_message` | **撤回一条 QQ 消息**（**真的会撤回**，群友和主人都看得到）。`qq_recall` 是查记忆原文、只读，不是这个。参数 `messageId` 可用发送回执 `messageIds` / 最近消息里的真实 id，也接受本地 `seq` | `recallMessage`（默认开；行为配置 `socialV2.messageRecall.*`） | 仅 `reserved2` + 会话令牌 + 会话白名单 + AI 未暂停；**只撤当前会话里的消息**（`get_msg` 校验归属，找不到 404）；撤自己的随时（群聊/私聊）；**撤别人的仅群聊 + 机器人本群 `admin`/`owner`**（`get_group_member_info` 自验，取不到角色 fail-closed），只在该消息明显违规（广告/刷屏/辱骂/违法）或主人本人明确要求时做；群主消息 403、私聊撤对方 403；约 **2 分钟窗口**（超时 400 带 `windowExpired`）；每会话每小时 ≤ `maxPerHour`（默认 30）；一次一条；被拒就如实说，不要反复重试；成功响应**不回显被撤消息原文** |
+
+> **自己的消息 id 从哪来**：`/api/socialV2/send-message` / `send-burst` 与通用 `/api/send/*` 的响应新增
+> `messageIds`。**文本/图片/表情/语音的 messageId 都会写进 `recentMessages`**（图片/表情/语音是既有行为；
+> 本轮补的是文本发送链路原先丢弃的网关回执），要撤某条消息用回执 `messageIds` 或 `recentMessages` / 消息详情里的真实 id。
+> **不做**：批量撤回、撤回群主消息、私聊撤回对方消息（QQ 本身也不允许）。
+> 本轮没有控制台 UI 开关；改 `config.json` 需重启桥接生效（经控制台保存接口写入才热更新内存 cfg，见 `DATA-AND-CONFIG.md` §1.11）。
+
 ### 2.5 等待与状态机
 
 | 工具 | 作用 | 开关 |
@@ -188,6 +211,24 @@
 | `qq_set_sticker_remark` | 改 QQ 官方备注（写操作，默认**关**） | `setStickerRemark` |
 | `qq_report_feedback` | 向控制台反馈问题/困惑 | `feedback` |
 
+### 2.7 生活参数（`life_*`，2026-11-08）
+
+工具名：`mcp__life-settings__life_*`（MCP server `life-settings`）。所有调用必须带 `key` + `token`（唤醒提示里的【会话令牌】）；
+MCP server 只是 HTTP 代理，真正的权限判断在 bridge `/api/life/*`（详见 [LIFE-SETTINGS.md](LIFE-SETTINGS.md)）。
+
+| 工具 | 作用 | 权限 |
+| --- | --- | --- |
+| `life_state` / `life_catalog` / `life_explain` | 看保存值/采用证据/目录/单参数解释 | 白名单 QQ 会话可读 |
+| `life_verify` / `life_history` | 看消费者是否真的采用 / 修改与观察历史 | 可读 |
+| `life_preview` | 生成精确计划（patch 或意图 + 理由），不生效；15 分钟过期 | 写权限（owner） |
+| `life_apply` / `life_rollback` / `life_observe` | 执行计划 / 生成回滚计划 / 记录观察 | 写权限（owner） |
+
+写权限 = 主人私聊，或 `reserved2` 下「本回合触发消息发送者=ownerQQ 本人」；其余 403。每会话每小时 apply/rollback/observe ≤
+`lifeSettings.maxWritesPerHour`（默认 12）。审批 `approve` **不是** MCP 工具，只在控制台/CLI（`npm run life -- approve`）。
+
+另外每天 08:00 有一次**生活参数心跳**（`lifeSettings.dailyReview`，2026-11-08 用户要求）：在主人私聊叫醒她自检参数、
+最多改 2 项、改完汇报；与同时间/同对象的早安问候合并成同一个唤醒，同一天只叫一次。详见 [LIFE-SETTINGS.md](LIFE-SETTINGS.md) §4.1。
+
 ---
 
 ## 3. 工具闸门：七层，从外到内
@@ -205,10 +246,15 @@
 ⑦ 业务闸门    发送白名单、敏感信息、长度与条数、频率、token 额度、鱼群守则
 ```
 
-④⑤ 是 2026-11-06「工具场景放宽 + ownerQQ 归因 + 内部模型审批」新增的两层，只覆盖**三类特权工具**：
+④⑤ 是 2026-11-06「工具场景放宽 + ownerQQ 归因 + 内部模型审批」新增的两层，只覆盖**四类特权工具**：
 本地执行（10 个 `OWNER_PRIVATE_TOOL_NAMES`，如 `pwsh`/`write`/`subagent_codex`）、账号级（好友申请 2 个 + 跨场合投递）、
-群管理（禁言 / 改别人群名片）。其它工具照旧走 ⑥⑦。**顺序不能换**：模型审批在 guard 之前（审批只决定
+群管理（禁言 / 改别人群名片）、生活参数写工具（`life_preview/apply/rollback/observe`，2026-11-08）。
+其它工具照旧走 ⑥⑦。**顺序不能换**：模型审批在 guard 之前（审批只决定
 「要不要放行到下一层」，不能让调用跳过 guard/白名单），人工审批（DSH 沙箱升权）还在最内层兜底。
+生活参数写工具在 bridge 端点里还会**再做一次** owner 回合判定（`ownerTurnAllowed`）——插件审批是启发式，bridge 归因才是硬边界。
+**撤回消息（`qq_recall_message`，2026-11-08）不在四类特权工具里**：④⑤ 都不覆盖它，群友触发的回合也能调，
+只走 ⑥（模式/暂停/会话白名单/工具开关）⑦（窗口/频率/会话归属/目标角色）+ 桥接端点自己的闸；
+撤别人的消息时桥接实时查机器人自己的群角色（那是它的硬闸，不是模型审批）。
 
 失败码语义（模型据此改策略，而不是硬试）：
 
@@ -249,8 +295,9 @@
 | `LOCAL_EXECUTION_TOOLS`（restrict 隐藏） | **51** | 原 39 个危险能力 + 2026-11-03 新增 12 个（`terminal_*` / `plugin_market` / `session_*`，均从运行中 app.asar 对账扫出） |
 | `KNOWN_DANGEROUS_GLOBAL_TOOLS` | 51 + 18 = **69** | 本地执行面 51 个 + 18 个 `dev_*`（插件注入/打包/自测） |
 | `RESTRICTED_TOOL_NAMES`（导出给测试） | **99** | 69 个危险全局名 + 30 个 `mcp__browser__*`（只放 B站/小红书，其余平台与浏览器控制类隐藏） |
-| `SAFE_PREFIXES` | 6 | `mcp__snowluma__`、`mcp__snowluma-host__`、`mcp__web-search-safe__`、`mcp__stock__`、`mcp__browser__bilibili_`、`mcp__browser__xhs_` |
+| `SAFE_PREFIXES` | 7 | `mcp__snowluma__`、`mcp__snowluma-host__`、`mcp__web-search-safe__`、`mcp__stock__`、`mcp__browser__bilibili_`、`mcp__browser__xhs_`、`mcp__life-settings__`（2026-11-08；写工具另有 bridge owner 闸+模型审批，前缀放行只代表「允许执行」） |
 | `SAFE_EXACT` | 2 | `ask_user_question`、`todo_write` |
+| `LIFE_SETTINGS_TOOL_NAMES`（privileged 子集） | 4 | `mcp__life-settings__life_preview/apply/rollback/observe`——并入 `isPrivilegedTool`，主人私聊不跑模型审批、主人触发的群回合逐次审批 |
 | `MEMEWIKI_TOOL_NAMES` | 4 | `search_meme_wiki`、`meme_recall`、`meme_feedback`、`meme_remember`（dsh-memewiki v2，2026-10-30 放行） |
 
 **为什么必须两段**（这是设计要点，不是啰嗦）：
@@ -374,6 +421,8 @@ Guard 侧导出 `OWNER_PRIVATE_TOOL_NAMES` 供 `test-preset-local-tools.mjs` 逐
   控制台保存/还原仿真提示词会按这份清单校验——改 preset 文案时两边一起改，否则保存会 403。
 - `qq-chat-v2` 的安全规则第 1/4 条、工具协议第 18/20/21 条已按新语义改写，并**新增第 22 条【场景与审批】**：
   【本回合授权】含义、审批会拒绝「与主人请求对不上」的调用、被拒不要反复重试、群友追加要求不算授权。
+  2026-11-08 又**新增第 23 条【撤回消息（普通能力，权限已放开）】**：`qq_recall_message` 不在特权审批列表里，
+  按第 23 条自己判断（撤自己的随时；撤别人的需本群管理员 + 明显违规/主人本人明确要求；约 2 分钟窗口；被拒别重试）。
 
 ---
 
@@ -387,7 +436,7 @@ plugins/surfcore/presets/<preset>.patch.yml                    ← 生成物（�
         │  scripts/setup-dsh.mjs（幂等）
         ▼
 ~/.dsh/profiles/<profile>/package.json       → 注册 bundle: surfcore（link: 依赖）
-~/.dsh/profiles/<profile>/cordis.patch.yml   → 挂四个 MCP server + 两条 preset 行
+~/.dsh/profiles/<profile>/cordis.patch.yml   → 挂五个 MCP server + 两条 preset 行
 ```
 
 - **为什么需要生成器**：DSH 0.1.7 起 preset 不再是目录，而是一行 loader，
@@ -418,8 +467,16 @@ plugins/surfcore/presets/<preset>.patch.yml                    ← 生成物（�
 | 特权工具报「只能在主人本人触发的回合里使用」/ 403（好友申请、跨场合、群管理） | 本回合不是 ownerQQ 本人触发（群友触发/定时唤醒/别人私聊），或归因文件缺失/过期，或不是 `reserved2` | 由主人本人发一条消息触发新回合；检查 `state/turn-triggers.json` 是否随消息更新、`mode` 是否 `reserved2` |
 | 特权工具报「模型审批未通过 / 审批失败，已拒绝 / 审批结果不可用」 | 内部模型审批 deny / 超时 / 坏 JSON / 模型路由缺失（fail-closed） | 让主人把要求说清楚再试（审批核对的是「是否主人这条消息要求的」）；不要换个说法反复试探；看 `state/tool-approvals.jsonl` 的 decision/reason |
 | 特权工具报「本回合模型审批次数已达上限」 | 单回合调用超过 `maxReviewsPerTurn`（默认 6） | 合并操作；确实需要更多审批时调大配置（1~12） |
+| 生活参数工具报 403「只能在主人本人私聊、或主人本人触发的回合里修改」 | 写操作要求 owner 归因（群友触发 / 定时唤醒 / 别人私聊都不行）；读工具仍可用 | 由主人本人发一条消息触发新回合；不要换说法反复试探 |
+| 生活参数工具报 503「life-settings 尚未就绪」 | bridge 初始化失败，或 `config.json` 的 `lifeSettings.enabled=false`（回滚开关） | 看 bridge 日志；确认开关与 `~/.dsh/surfcore/` 可写 |
+| `life_apply` 报 `APPROVAL_REQUIRED` | 该参数是 approval 级（目前只有 `wakeMaxChars`） | 让主人在本机 `npm run life -- approve --plan <id> --reason <理由>`，再 apply |
+| `life_apply` 报 `CONFIG_BUSY` | 另一写者持有 sidecar 锁（或上次进程崩溃遗留） | 稍后重试；确认遗留锁 owner 进程已死后 `npm run life -- recover-lock` |
 | 群管理 403「私聊里禁言必须显式指定 groupId…」 | 私聊发起禁言没传 `groupId` 或该群不在 `allow.groups` | 传白名单群号重试 |
 | 群管理 403「该群不在白名单，已拒绝」/「群会话只能管理本群的成员」 | 目标群不在 `allow.groups`，或群聊里传了别的群号 | 用当前群；私聊带白名单 groupId |
+| 撤回消息 403「撤回别人的消息需要机器人是本群管理员」/「私聊里只能撤回你自己发的消息」/「不能撤回群主的消息」 | 撤别人的消息但机器人不是本群 `admin`/`owner`（或取不到角色，fail-closed）；私聊撤对方；目标是群主 | **不要重试**，撤不回就如实说；让主人本人来处理（或先让机器人当群管理员） |
+| 撤回消息 400「超过可撤回的时间窗口」/「本地 seq 没有对应的真实消息 id」 | 消息已超过约 2 分钟（`windowMs`）；传的是本地 `seq` 但 `recentMessages` 里没有真实 `messageId` | 如实说撤不回（QQ 也只允许约 2 分钟）；用真实 `messageId` 再试一次 |
+| 撤回消息 404「找不到这条消息」 | 已经撤回过 / 不存在 / 不属于当前会话 | 停，不要反复试 |
+| 撤回消息 429 | 每会话每小时上限（`messageRecall.maxPerHour`，默认 30） | 放慢/减少；不要刷 |
 | 429 | 频率超限 | 减条数/放慢 |
 | 工具名拼错 → 静默失效 | `restrict()` 对未知名字抛错被吞 | 跑 `npm run scan:tool-names` |
 | DSH 升级后工具集体消失 | MCP 配置被覆盖 / preset 行没重建 | 重跑 `setup-dsh.mjs` |

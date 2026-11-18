@@ -42,12 +42,12 @@ SurfCore 让一个 **DeepSeek Harness（DSH）agent** 活在一个真实的人�
 ┌───────────────────────────────▼─────────────────────────────────────────────────────────────┐
 │ QQ 桥接进程（node src/bridge.js，单实例锁）                                                  │
 │   · OneBot WS 客户端  · DSH Web API 客户端  · 控制台 HTTP :3100                             │
-│   · 四个 MCP server（stdio）· 目的机制 tick · 会话映射 · 安全闸门                            │
+│   · 五个 MCP server（stdio）· 目的机制 tick · 会话映射 · 安全闸门 · 生活参数（life-settings）│
 └──────┬───────────────────────────────┬───────────────────────────────┬──────────────────────┘
        │ OneBot v11 WS                 │ MCP (stdio)                    │ HTTP 127.0.0.1
 ┌──────▼──────────────┐   ┌────────────▼──────────────┐   ┌─────────────▼──────────────┐
 │ SnowLuma2（第三方）  │   │ DSH 的 MCP 客户端          │   │ 语音引擎（仓库外）           │
-│ 登录/收发/媒体 CDN    │   │  snowluma / -host / search │   │ 本地 :8765 / 云端 :8767      │
+│ 登录/收发/媒体 CDN    │   │ snowluma/-host/search/stock│   │ 本地 :8765 / 云端 :8767      │
 └─────────────────────┘   └───────────────────────────┘   └────────────────────────────┘
 ```
 
@@ -56,7 +56,7 @@ SurfCore 让一个 **DeepSeek Harness（DSH）agent** 活在一个真实的人�
 | **DSH 宿主 + surfcore 插件** | 用户启动 DSH | 进程内 | 设置页、桌宠、B站调度、记忆卡全停（QQ 桥接仍运行，但 agent 回复没人接） |
 | **QQ 桥接**（`src/bridge.js`） | 插件按开关拉起 / 手动 `npm start` | HTTP+WS 到 DSH、WS 到 SnowLuma | QQ 收发全停；插件 2 分钟内自愈重启它（`plugins/surfcore/lib/index.js:2181`） |
 | **SnowLuma2** | 用户自己（EULA §5.4，本程序只探测不部署） | OneBot v11 WS | 桥接显示"未连接"，消息进不来 |
-| **四个 MCP server** | DSH 的 MCP 客户端按 profile 配置拉起（stdio） | stdio | agent 失去 QQ 工具/搜索/股票能力（表现为"只会说话不做事"） |
+| **五个 MCP server** | DSH 的 MCP 客户端按 profile 配置拉起（stdio） | stdio | agent 失去 QQ 工具/搜索/股票/生活参数能力（表现为"只会说话不做事"） |
 | **语音引擎**（本地包 / 云包） | 设置页「启动」按钮 / `run.bat` | HTTP | 合成失败 → 返回 502 → 模型改回打字（不会伪造"我发了语音"） |
 | **桌宠**（仓库外 Electron） | 用户自己 | HTTP + `x-pet-token` | 目的载体回落 QQ；对话不可用 |
 

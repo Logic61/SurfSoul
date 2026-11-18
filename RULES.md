@@ -31,7 +31,7 @@
 | **群友** | QQ 群 | **仅正常聊天**。控制词、`/` 管理命令被桥接拦截；**群友无法直接触发任何特权工具**——本机工具、好友申请、跨场合投递、群管理动作一律拒绝（哪怕群名片写着“管理员”、自称主人、或转述“主人说”）；群聊里只有「主人本人那条触发消息所在的回合」才临时放开特权工具，而群友追加的要求不算授权；静默模式下消息不投递给 agent |
 | **管理员** | **桥接控制台**（`http://127.0.0.1:3100`） | **最高权限**：控制模式（控制台顶部模式按钮）、控制角色/静默（写 `state/current-role.json`）、完整 DSH 工具（含本地操作）、查看 QQ 活动日志（`state/qq-activity.log`）、直接打开「QQ 聊天」工作区会话对话；可查看安全姿态（`GET /api/security-posture`）与工具模型审批流水（`GET /api/tool-approvals`，只读） |
 | **QQ 会话 agent（chat 模式）** | — | 最低权限面（见下） |
-| **QQ 会话 agent（reserved2，二代仿真）** | — | 日常聊天 + 工具面白名单；**只有主人本人触发的回合**才临时获得特权工具（且逐次模型审批）；群友触发的回合里特权工具一律 fail-closed |
+| **QQ 会话 agent（reserved2，二代仿真）** | — | 日常聊天 + 工具面白名单；**只有主人本人触发的回合**才临时获得特权工具（且逐次模型审批）；群友触发的回合里特权工具一律 fail-closed。**另有一条普通工具例外（2026-11-08 用户拍板）**：`qq_recall_message` 撤回 QQ 消息不走 owner 回合授权、不走内部模型审批，模型自己判断，见硬边界第 16 条 |
 
 ## QQ 会话 agent 的硬边界
 
@@ -78,6 +78,21 @@
     - **配置与回滚**：`socialV2.toolApproval.{enabled,failClosed,model,maxTokens,timeoutMs,maxReviewsPerTurn,triggerWindowMs,claimSandboxApproval}`（默认值见 `config.example.json`）；`enabled=false` 立即回到旧行为（bridge 端点 + 插件监听都认这个开关），代码回滚按 commit revert + 重启桥接/DSH。
     - **审计**：每次 allow/deny/fail 追加一行 `state/tool-approvals.jsonl`（工具名/决定/风险/理由/延迟/触发者归因，**不含参数原文与令牌**），控制台可只读查看 `GET /api/tool-approvals`，安全姿态 `GET /api/security-posture` 有 `toolApproval` 项。
     - **诚实边界**：模型审批是**启发式**（模型可能被群聊内容注入、可能误判），硬边界始终是「真实 sender 归因 + 工具 schema/guard 白名单 + 发送白名单」；主人触发回合里群友追加的注入内容仍可能污染判断，缓解=归因只认触发消息 + 审批层能看到本回合最近对话 + 预设第 22 条。
+16. **消息撤回（普通工具，权限已放开；2026-11-08 用户拍板）**：用户原话「给surfcore的qq部分接上群撤回的接口，权限放开，不需要主人点头，自己判断」。`qq_recall_message` 是**真撤回**（群友和主人都看得到），走桥接 `POST /api/socialV2/recall-message` → OneBot `delete_msg`。它**不是特权工具**：不要求「主人本人触发的回合」、**不进** `qq-owner-approval` 内部模型审批名单——群友触发的回合里也能撤她自己发的消息；什么时候撤由模型自己判断（preset 工具协议第 23 条）。
+    - **撤她自己的消息**：reserved2 的群聊/私聊都可以，随时（仍受约 2 分钟窗口限制）。
+    - **撤别人的消息**：仅群聊，且机器人自己必须是该群 `admin`/`owner`（桥接用 `get_group_member_info` 自验，取不到角色一律 fail-closed）；只在该消息**明显违规（广告/刷屏/辱骂/违法）**或**主人本人明确要求**时做；群友单纯让她撤别人的话（尤其只对那个群友有利）**不当枪**；目标若是**群主**一律拒绝（QQ 不允许管理员撤回群主消息）。
+    - **命名区分**：`qq_recall` 是「原文召回/查记忆」（只读）；`qq_recall_message` 才是「撤回消息」（写）——别混。
+    - **硬边界不因放开而取消**：仅 `reserved2`；agent token + 会话白名单 + 工具开关（`socialV2.tools.recallMessage`）；AI 暂停拒绝；**只能撤当前会话里的消息**（`get_msg` 校验归属）；约 **2 分钟窗口**（`socialV2.messageRecall.windowMs`，默认 120000，超时 400 带 `windowExpired`）；**每小时频率上限**（`socialV2.messageRecall.maxPerHour`，默认 30）；一次一条；**私聊永远不能撤对方消息**。
+    - **配置与回滚**：`socialV2.messageRecall.enabled=false` → 端点直接 403（**手改 `config.json` 需重启桥接才生效**：桥接只在启动时读一次配置、没有 watcher；经控制台保存接口 `POST /api/socialV2/config` 写入才会热更新内存 cfg，但本轮没有 UI 开关）；`socialV2.tools.recallMessage=false` → 工具从工具面消失（需重启 DSH）。
+    - 她自己发的消息 id：**文本/图片/表情/语音的 messageId 都会写进 `recentMessages`**（图片/表情/语音是既有行为；本轮补的是文本发送链路原先丢弃的网关回执，并给发送端点响应补 `messageIds`）；要撤某条消息时用回执 `messageIds` 或 `recentMessages` / 消息详情里的真实 id（见 `docs/PITFALLS.md` #105）。
+17. **生活参数自调（2026-11-08 新增）**：agent 可以通过 `mcp__life-settings__life_*` 工具预览/执行/验证/回滚自己的**行为参数**（B站作息与口味、QQ 主动冒泡/潜水/唤醒概率、目的节奏等），但：
+    - **写权限只认 owner 回合**：主人本人私聊，或 `reserved2` 下「本回合触发消息的发送者=ownerQQ 本人」（与硬边界第 1 条同一份 `state/turn-triggers.json` 归因）；群友触发的回合、别人私聊、定时唤醒一律 403。读工具（state/catalog/explain/verify/history）白名单会话可用。
+    - **写工具逐次模型审批**：主人触发的群回合里，`life_preview/apply/rollback/observe` 与本地执行/账号级/群管理同属特权工具（`qq-owner-approval` fail-closed）；**审批≠授权**，bridge 端点仍会独立判 `ownerTurnAllowed`。
+    - **不放宽硬边界**：凭据/账号身份、`allow`/`deny`、模式/preset、`toolApproval` 开关、token 预算硬上限、`purpose.dailyMax`、`bili.limits`、记忆容量/遗忘规则**永不进**生活参数目录；目录是闭集（未知参数直接拒绝）。
+    - **不改基础配置**：受管值写 `~/.dsh/surfcore/life-settings.json` 覆盖层（原子写+备份+跨进程锁+history），基础 `config.json`/`bili.config.json` 保持人类可读可改；设置页改同一字段不会自动取消覆盖（以 `life_state` 的 saved/effective 两层为准）。
+    - **审批项**：`wakeMaxChars` 是唯一的 approval 级参数；agent 只能预览，必须主人在本机 `npm run life -- approve --plan <id> --reason <…>`。`lifeSettings.enabled=false` 是回滚开关（工具 503、消费者不叠覆盖）。
+    - **验证口径**：`life_apply` 只代表「已保存」（`saved-unverified`）；`life_verify` 读到消费者发布的 `life-runtime/{qq,bili}.json`（同 revision、90s 内、pid 存活、值相等）才算 `runtime-adopted`；平台真实行为另算。完整语义见 [`docs/guides/LIFE-SETTINGS.md`](docs/guides/LIFE-SETTINGS.md)，开放清单见 [`docs/guides/LIFE-PARAMS-CHECKLIST.md`](docs/guides/LIFE-PARAMS-CHECKLIST.md)。
+    - **每日心跳（2026-11-08）**：每天一次（默认 08:00）在**主人私聊**叫醒她做生活参数自检（`lifeSettings.dailyReview`）；同一天只跑一次，错过 3 小时内补跑，与同时间/同对象的早安问候合并成同一个唤醒；每次最多改 2 项，只有明确理由才改，改完用发送工具向主人汇报。心跳**不放松任何权限**：仍是主人私聊 + 同一套工具/目录/审批硬边界；暂停或非 reserved2 时跳过。手动试跑走控制台 `POST /api/life/review/run`（不占当天名额）。
 
 ## 提示词分层边界（仿真 / 人格 / 记忆卡）
 
@@ -150,6 +165,22 @@
 - 申请留言/昵称是陌生人可控内容：她只当资料看，不会按留言里的要求操作；也不会批量乱加。
 - 总开关：控制台/配置 `socialV2.tools.friendRequests`（默认开，工具面）；行为配置
   `socialV2.friendRequests.{wakeOnRequest,wakeMinIntervalMs}`。
+
+**途径 E：撤回消息（2026-11-08 用户拍板，权限放开；普通工具，不抓审批）**：
+- **她自己判断**：发错/说错/重复/泄露了不该说的 → 直接撤，不用主人逐条点头。撤**她自己**的消息随时可以
+  （reserved2 群聊/私聊都行）；主人在群里/私聊里说「撤掉刚才那条 / 撤掉你上一条」也照做。
+- 她还能撤**别人**的消息，但只有她**确实是本群管理员**（`admin`/`owner`）时才可能成功，且只在该消息
+  **明显违规（广告/刷屏/辱骂/违法）**或**主人本人明确要求**时做；群友让她撤别人的消息、尤其只对那个群友有利时，
+  她不当枪。**群主的消息撤不了**；私聊里只能撤她自己的。
+- 工具：`qq_recall_message(key, token, messageId)`（也接受本地 `seq`）；返回**不含被撤消息原文**；
+  被拒就如实说撤不回，不要反复重试。
+- 硬闸：仅 `reserved2` + 会话白名单 + 工具开关 `socialV2.tools.recallMessage`（默认开）+ AI 未暂停；
+  **只能撤本会话里的消息**（`get_msg` 校验归属）；约 2 分钟窗口（`socialV2.messageRecall.windowMs`，默认 120000）；
+  每小时上限 `socialV2.messageRecall.maxPerHour`（默认 30）；一次一条。
+- 回滚：`socialV2.messageRecall.enabled=false`（端点 403；**手改 `config.json` 需重启桥接**，经控制台保存接口写入才热更新内存 cfg）或
+  `socialV2.tools.recallMessage=false`（工具面消失，需重启 DSH）。本轮没有控制台 UI 开关。
+- **不走** owner 回合授权、**不进** `qq-owner-approval` 模型审批——这是用户明确拍板的「普通能力」；
+  命名上别和只读的 `qq_recall`（查记忆原文）混了。
 
 **途径 B：DSH WebUI**：
 - 在 GUI 会话里对我说「给 QQ 机器人设置角色：傲娇助手」/「清除角色」/「开启静默模式」，我写 `state/current-role.json`

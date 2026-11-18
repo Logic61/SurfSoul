@@ -106,6 +106,13 @@
 
 ## 2. 生物钟调度
 
+> **2026-11-08 起，以下 B站 配置可能被「生活参数」覆盖层接管**：`night.windows` / `night.maxWakesPerDay` /
+> `night.maxVideos` / `night.minGapMin` / `night.skipChance` / `preferences.like|keywords|weights` /
+> `share.enabled` / `share.minScore` / `listen.commentIntervalSec`。agent 通过 `life_*` 工具改这些时，值写在
+> `~/.dsh/surfcore/life-settings.json`（不写 `bili.config.json`）；插件所有读点经 `tools/lib/config.mjs` 的
+> `applyManagedSettings` 叠加，**下一轮 tick** 生效；`whale-night` 重排保留当天已用次数与旧 slots。
+> 消费者会在 `life-runtime/bili.json` 发布采用证据（`life_verify` 只认它）。见 [LIFE-SETTINGS.md](LIFE-SETTINGS.md)。
+
 ### 2.1 两套"生物钟"，别混
 
 | 名称 | 文件 | 跑在哪 | 职责 |

@@ -62,6 +62,7 @@
 ## 2. 当前版本与里程碑
 
 - 当前版本：`0.1.0`（SurfCore 合体版），目标 DSH `0.2.1-rc.2`。
+- 已完成（2026-11-08，隔离 worktree `feat/qq-recall-message`；**已合并 staging `e6aeba6` + 同步真机 `5efb670`**）：**QQ 群消息撤回（`qq_recall_message`，普通工具、权限已放开）**——用户原话「给surfcore的qq部分接上群撤回的接口，权限放开，不需要主人点头，自己判断」。先确认 SnowLuma 有 `delete_msg`；落地：桥接 `POST /api/socialV2/recall-message`（body `{key,messageId}`，支持本地 seq 映射；严格闸门：仅 `reserved2` → 会话令牌/白名单/工具开关/AI 暂停 → `messageRecall.enabled` → 每小时频率 → `get_msg` 查消息 → 会话归属 → self/角色校验（撤别人需机器人本群 admin/owner，群主 403、私聊撤对方 403）→ 约 2 分钟窗口 → `delete_msg`）+ MCP 工具 `qq_recall_message` + `socialV2.tools.recallMessage` / `socialV2.messageRecall.*` 配置；**不进** owner 回合授权与 `qq-owner-approval` 模型审批（用户拍板的「普通能力」）；先补「文本发送链路原先丢弃的 messageId 回执」（`send-message`/`send-burst`/通用 `/api/send/*` 回执 `messageIds`；图片/表情/语音本来就会写 `recentMessages`）；preset 新增第 23 条；新测试 `test-recall-message` 进 `test:audit`；文档 12 处同步（含 `PITFALLS.md` #105）。✅ 已合并回 `surfcore-work`（`e6aeba6`；`f284cc3` 对齐真机）并同步真机（`5efb670`）；**待重启 DSH/桥接**后按 `HANDOFF.md` 顶部「合并与真机同步记录」验收。
 - 已完成（2026-11-06 下午）：**工具场景放宽 + ownerQQ 归因 + 内部模型审批（reserved2）**——用户原话「把只允许
   主人私聊调用的工具放开到群聊/私聊都能触发（认准请求者是 ownerQQ）」+ 加一层内部模型审批；当晚拍板
   「全部放开 / fail-closed / 主人私聊保持现状 / 仅 reserved2 生效」（决策记录见 §4）。落地：
@@ -376,6 +377,18 @@
 
 > 这条决策改变了 M2 的表述：从「群友物理上碰不到本机」改为「群友无法直接触发特权工具；只有 ownerQQ 本人触发的回合
 > 临时拥有本机能力且逐次模型审批」。回滚开关 `socialV2.toolApproval.enabled=false`。
+
+**已拍板记录：2026-11-08 消息撤回（安全边界放宽，用户书面确认）**
+
+| 问题 | 用户选择 |
+| --- | --- |
+| 放开范围 | **撤回消息按普通工具处理**：不进「主人本人触发的回合」授权、不进 `qq-owner-approval` 内部模型审批；群友触发的回合里也能撤她自己发的消息，**模型自己判断**什么时候撤 |
+| 撤别人的消息 | 仅群聊；机器人必须是该群 `admin`/`owner`（自验角色，取不到 fail-closed）；只在该消息**明显违规**（广告/刷屏/辱骂/违法）或**主人本人明确要求**时做；群友单纯让她撤别人的（尤其只对那个群友有利）不当枪；**群主消息撤不了** |
+| 保留的硬闸 | 仅 `reserved2`、会话令牌/白名单/工具开关、AI 暂停、只能撤当前会话消息、约 2 分钟窗口（`windowMs`）、每小时上限（`maxPerHour`）、一次一条、私聊不能撤对方 |
+| 控制台 UI | 本轮**不做**开关（改 `config.json` 需重启桥接才生效；回滚开关 `socialV2.messageRecall.enabled=false` / `socialV2.tools.recallMessage=false`） |
+| 附带承认 | 「该不该撤」交给模型判断，属**启发式**放宽：机器人是群管理员时可能被群内容诱导撤回他人消息（残余风险记 `SECURITY_BASELINE.md` §三 R14；缓解 = preset 第 23 条口径 + 窗口/频率/归属硬闸） |
+
+> 这条决策改变了「特权工具」清单的表述：`qq_recall_message` 是**普通工具**，不在三类特权工具（本地/账号级/群管理）里。
 
 ## 5. 已放弃 / 回滚过的路线（记录为什么，避免重走）
 

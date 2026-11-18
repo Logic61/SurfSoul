@@ -140,7 +140,7 @@ node scripts/setup-dsh.mjs
 它做三件事（可重复跑，幂等）：
 
 1. 往 DSH profile 里插 `qq-chat` / `qq-chat-v2` 两条 agent preset；
-2. 在 `cordis.patch.yml` 挂三个 MCP server（QQ 工具 / SnowLuma 探活 / 只读搜索）；
+2. 在 `cordis.patch.yml` 挂五个 MCP server（QQ 工具 / SnowLuma 探活 / 只读搜索 / 股票行情 / 生活参数）；
 3. 在 profile 的 `package.json` 注册 `surfcore` bundle。
 
 装到别的 profile：

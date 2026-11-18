@@ -1,4 +1,4 @@
-# SurfCore — QQ ↔ DeepSeek Harness Bridge + QQ × Bilibili plugin
+# SurfSoul — QQ ↔ DeepSeek Harness Bridge + QQ × Bilibili plugin
 
 > ℹ️ This English page is a **condensed overview**. The full, code-level documentation
 > (architecture, every module, voice / pet / Bilibili subsystems, configuration and state files,
@@ -9,11 +9,9 @@
 >
 > 🧩 The merged DSH plugin lives in **[plugins/surfcore/](plugins/surfcore/README.md)** and appears in DSH settings as **SurfCore** (QQ settings + Bilibili browsing + two-way redacted memory + identity alignment). Since 2026-10-22 the former `QQbot` and `刷B站/dsh-bili-whale` workspaces are merged into this repository.
 
-> ⚠️ **Current release `0.1.0` (SurfCore merged edition; it carries the bridge code of qq-bridge `v0.2.0-r4`), verified on DSH `0.2.1-rc.2`** (run `npm run verify:adaptation` to re-check item by item against your own DSH). It uses the persistent local signing key to **mint the session Cookie offline**, slash RPC endpoints and the `/api/remote.mux` event stream — a protocol generation introduced in DSH `0.1.2-alpha.1`, incompatible with the older dot-endpoint protocol. Reading the launch token out of the old guard logs has not worked since DSH 0.1.7 (the token is generated per process and never written to disk). Agent presets are `@deepseek-ai/dsh-agent-preset` Cordis rows since DSH 0.1.7 (the `~/.dsh/.agent-presets/` directory mechanism is gone). On **DSH `0.1.1-rc.2` or earlier**, use tag [`v0.1.0`](https://github.com/Derpyu520/qq-bridge/releases/tag/v0.1.0); for **DSH 0.1.5-rc.1** use [`v0.1.5`](https://github.com/Derpyu520/qq-bridge/releases/tag/v0.1.5); for **DSH 0.1.7-rc.2** use [`v0.1.7`](https://github.com/Derpyu520/qq-bridge/releases/tag/v0.1.7).
->
-> **r4 highlights**: sticker/animated-emoji pipeline (CDN first, `emoji_id` fallback, multi-address DNS failover), web search now reuses DSH's own DeepSeek search backend (Bing only as fallback), `qq_wait_for_messages` long-polling past the 300 s undici timeout, plus fixes for the mode-switch rollback, permanent "busy" turns, missing self-identity injection and a full-project audit. Details: [Release v0.2.0-r4](https://github.com/Derpyu520/qq-bridge/releases/tag/v0.2.0-r4).
->
-> The default branch `main` **is** this version — a plain `git clone` gets it, no branch switching needed.
+The fork retains package version `0.6.22`. In DSH settings, open **SurfCore → QQ** to select DeepSeek or a locally authenticated Codex CLI (Sol or Astra) and set reasoning effort. DSH manages conversations and executes approved QQ actions. The selected provider receives the conversation context and requested images.
+
+Group aliases, slang and video preferences are scoped to the group. QQ voice replies are optional. Desktop pet microphone input, spoken replies and screen sharing have separate controls. See the [current Chinese overview](README.md).
 
 For the detailed Chinese guide, start with **[docs/guides/ARCHITECTURE.md](docs/guides/ARCHITECTURE.md)**
 (the 2026-10 code-level documentation set: architecture, every module, voice / pet / Bilibili subsystems,
@@ -43,6 +41,7 @@ QQ messages ──► SnowLuma (OneBot v11 WS) ──► qq-bridge ──► DSH
 - Whitelist/blacklist access control, fail-closed by default.
 - Sensitive text audit prevents paths/credentials from being sent to QQ.
 - MCP tools for reading group history/members, sending messages, replying with quotes, and (in `reserved2`) full simulated-group-friend tooling, **owner-turn attribution + per-call internal model approval** for privileged tools (local execution / account-level / group-admin; 2026-11-06).
+- **Message recall** (`qq_recall_message`, 2026-11-08): recall a QQ message for real. It is a **normal tool** — no owner-turn authorization and no internal model-approval gate; the model decides. Recalling her own messages is always allowed; recalling someone else's only in groups where the bot is an admin/owner, and only for clearly abusive/spam content or on the owner's explicit request (the group owner's messages can never be recalled). Hard gates kept: `reserved2` only, current conversation only, separate private and group recall windows, hourly cap, one message per call. Detailed rules: [RULES.md](RULES.md) (Chinese).
 - Slang/network-expression learning with human confirmation.
 - Lightweight memory system for active topics, pending thoughts and member impressions.
 - **Memory cards (the character's long-term memory)**: two cards sharing one document family — the **decayed card** (`memory-card.*`) is the only one loaded into prompts (owner + emotional memories stay vivid, unimportant ones fade one level per day), while the **full archive** (`memory-card-full.*`) keeps every memory permanently vivid and is never injected; it exists for on-demand search/recall via the settings page or `/api/memory-card/full`. Capacity alerts at 80/90/100% with one-click compression apply to the decayed card only; the full archive has a soft cap and is never auto-deleted. Rules and configuration: [docs/guides/MEMORY_CARD.md](docs/guides/MEMORY_CARD.md).

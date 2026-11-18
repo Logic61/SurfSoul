@@ -27,7 +27,7 @@
 | 3 | **版本不兼容**（QQ 更新后 SnowLuma 还没适配） | 报错前后 QQ 是否刚自动更新过 | 升级 SnowLuma 到最新；或把 QQ 回退到 SnowLuma 支持的版本 |
 | 4 | **安全软件拦截**（火绒 / 360 / Defender 的"防注入"） | 拦截日志里能看到 `QQ.exe` 或 SnowLuma 路径 | 给 SnowLuma 目录 + QQ 目录加白名单，或临时关防护再注入 |
 | 5 | **注入残留** | 之前注入失败过，QQ 里挂着半截模块 | SnowLuma 进程页点「卸载」→ 完全退出 QQ → 重新打开 → 再注入 |
-| 6 | **路径含中文/空格** | 解压目录是 `D:\我的工具\SnowLuma 2` 之类 | 挪到 `D:\SnowLuma` 这种纯英文无空格路径 |
+| 6 | **路径含中文/空格** | 解压目录是 `我的工具/SnowLuma 2` 之类 | 挪到 `SnowLuma` 这种纯英文无空格路径 |
 
 > 判断是否恢复：状态从「等待连接」变成「已连接」，并且控制台出现
 > `[Hook] login detected` + `[OneBot.HTTP]/[OneBot.WS] listening`。
@@ -66,7 +66,7 @@ SnowLuma 的 WebUI/控制台端口**会漂移**（见过 5099、5100）。
 它挂在后台是因为 WebUI 和后面的 OneBot 都靠这个进程活着。你要是把它关了，
 网页就打不开，QQ 也连不上；所以这个别去动它。
 ……
-之后要是想重启 SnowLuma（比如电脑重启过），双击 C:\Users\<你>\SnowLuma\start-snowluma.bat 就行。
+之后要是想重启 SnowLuma（比如电脑重启过），双击 安装目录里的 start-snowluma.bat 就行。
 ```
 
 **要点**：这个进程本身不能关（关了 QQ 就断），要解决的是"**它不该由会话托管**"。

@@ -4,6 +4,136 @@
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 发布规则见 [docs/guides/VERSIONS.md](docs/guides/VERSIONS.md)。
 
+## [未发布] - 2026-11-10（会话轮换改口径：按「当前上下文大小」换，220k 一换）
+
+### 新增
+
+- **`socialV2.closure.rotateAfterContextTokens`（2026-11-10 用户要求「改成上下文大小，220k 一换」）**：
+  当前会话最近一轮**真正带入模型**的 input token（`cacheMiss + cacheHit + cacheWrite`，不是会话累计计费量）
+  ≥ 阈值时，在该回合结束后换新 DSH 会话。与「自然收尾 N 次」是两个独立触发，谁先到算谁；默认 0=关闭。
+  本机 live 设为 **220000**，同时把 `rotateAfterClosures` 设 0（纯上下文模式）。
+- **`token-ledger.sessionContextTokens(sessionId)`**：从账本最近一条 assistant 采样算「当前上下文」；
+  没有采样时返回 0（调用方据此不触发，fail-open 到旧行为）。
+- **`bridge.js` 按上下文长度轮换会话**：`turn/end` 后判断，到阈值挂 5s 定时器；
+  `isConversationBusyV2()` 判忙最多重试 6 次，放弃后下个回合结束再判。日志 `[轮换] … 上下文 N token ≥ 阈值，换新会话`。
+- **可观测**：`GET /api/socialV2/states` 每个会话新增 `contextTokens`（当前上下文，离阈值还有多远）与 `sessionId`。
+
+### 测试
+
+- `scripts/test-conversation-closure.mjs`：默认 0/归一化 0..2M/220k 边界/坏值不触发/两个触发互相独立。
+- `scripts/test-token-usage.mjs`：`sessionContextTokens` 只算 input 桶、取最新一轮、同轮同步骤后到覆盖、未知会话 0。
+- `scripts/test-closure-wiring.mjs`：默认关不换；219,999 不换；220,000 挂起且 5s 后真的归档旧会话、清映射、计数归零。
+
+### 文档
+
+- `docs/guides/CONVERSATION_CLOSURE.md` §3.5/§5、`docs/HANDOFF.md` 顶部快照、`docs/PITFALLS.md` **#108**、
+  `config.example.json` 默认值。
+
+
+
+### 新增
+
+- **`screen.interruptTrigger=perLook`（2026-11-08 用户要求「每次截图完就打扰抽签」）**：抽签时机从「purpose 真正要出发那一刻」
+  （约 3–4 次/天）改成「每张截图判完就抽」（约每 2 分钟一次）；抽中即尝试一次主动搭话。新增
+  `targetPerDay`（默认 6）、`triggerMinGapMin`（默认 20）与 `screenLooksPerDay()` / `screenPerLookRates()`：
+  每张概率按 `targetPerDay ÷ 每天截图次数` 自动换算（`pAbove=6/450≈1.33%`、`pBelow≈0.22%`），改 `intervalMin` 不用手调。
+- **触发链路**：`pet-purpose.lookScreen()` perLook 下每张判定后抽签；`canScreenTrigger()` 先过每日上限/最小间隔/
+  主人刚聊过/载体在线（不合格连抽都不抽）；`runOnce({screenTriggered})` 只越过 `nextFireAt`，安静时段/上限/额度照拦。
+  QQ 载体由插件通过桥接 `/api/purpose/run` 带 `screenTriggered` 触发；`bridge.js` 在 perLook 下让定时器让位，
+  但用 pet-api `/purpose/screen` 检查截图管道健康度，坏了（失败/超 30 分钟/调不通）就让定时器兜底。
+- **设置页**：「看屏幕」卡片新增「什么时候抽签」下拉与 perLook 的「每天目标搭话次数」「两次截图触发最小间隔」，
+  并展示换算后的每张概率；leaky 参数按模式显示。
+
+### 测试
+
+- `plugins/surfcore/scripts/test-screen-watch.mjs` 新增 §8b（每天截图数换算 / perLook 边界 / 硬闸不抽签）与
+  §9 的 perLook decide；`scripts/test-purpose-wiring.mjs` 新增 4 条（定时器让位、管道坏了兜底、
+  screenTriggered 越过排程投递、越过排程不越硬闸）。
+
+### 文档
+
+- `docs/HANDOFF.md` 顶部快照、`docs/PITFALLS.md` **#107**、`docs/guides/PURPOSE_OUTREACH.md` 配置表与看屏幕章节。
+- **真机未重启**：配置已切 `perLook`（`targetPerDay=6`、`dailyMax=6`），插件/桥接代码重启 DSH 后生效。
+
+## [未发布] - 2026-11-08（生活参数自调 + QQ 群消息撤回：普通工具、权限已放开）
+
+### 新增
+
+- **生活参数自调（life-settings，参考 GitHub `nefelibata5136-code/surfcore-life`，按本地权限基建重做）**：用户原话
+  「让本地 surfcore agent 获得修改自己插件参数的能力，实现上例如把工具给到 qq 白名单什么的……你可以列一个清单让我审阅
+  哪些让他自己调整」。参考实现的核心 8 模块逐字移植（闭集参数目录/事务 sidecar/原子写+备份+mkdir 锁/digest/15 分钟计划/
+  回滚保护/证据 TTL），**权限层不照搬**：MCP 工具只是代理，写操作由 bridge 按真实 sender 归因（`ownerTurnAllowed`）+
+  会话 token 绑定 + 每会话限频 + 审计做硬闸；MCP 没有 approve 工具。
+  - `src/life-settings/*`、`src/mcp-life-settings.js`、`src/life-bridge-api.js`、`scripts/life-settings.mjs`（CLI：
+    state/catalog/explain/history/pending/approve/recover-lock）、`plugins/surfcore/lib/life-runtime.js`。
+  - 30 参数（29 自主 + 1 审批 `wakeMaxChars` + 6 组只读）：B站窗口/每日次数/单次数量/最小间隔/跳过概率/兴趣词与权重/
+    分享门槛/监听周期；QQ 主动冒泡开关与概率/推荐潜水/收尾安静/默认唤醒概率/主动间隔/目的开关；目的 gap/安静时段/
+    候选数/待续 TTL；**token 预算硬上限保持只读**（少自动机会靠减机会实现，不是放宽上限）。
+  - 5 个内置意图：`less-disturbance` / `more-group-opportunities` / `more-solitude` / `more-exploration` /
+    `fewer-model-opportunities`；预览→执行→验证→回滚闭环，`life_verify` 只认消费者发布的 `life-runtime/{qq,bili}.json`。
+  - 本地增强（相对参考实现）：bridge owner 回合硬闸（参考版无调用者鉴权）、跨午夜窗口自动拆两窗、证据 45s 节流
+    （参考版每 5s 写盘）、plans/history/observations 有界、sidecar 坏时消费者 fail-safe 沿用上次值、`recover-lock`。
+  - **每日生活参数心跳**（同日追加，用户原话「每天定时心跳唤醒判断要不要改动……就在早安一个心跳，改完还能顺便跟我说一声」）：
+    每天 08:00 在主人私聊叫醒一次做生活参数自检（`lifeSettings.dailyReview`）；同一天只跑一次、错过 3 小时内补跑、
+    DSH 离线/投递失败 10 分钟重试；与同时间/同对象的早安问候**合并成同一个唤醒**（不重复叫醒）；每次最多改 2 项、
+    默认「保持不动」、改完用 `qq_send_private_message` 汇报；暂停/非 reserved2 跳过。
+    控制台验收入口：`GET /api/life/review`、`POST /api/life/review/run`（手动试跑不占当天名额）。
+  - 配置：`config.json` 新增 `lifeSettings.{enabled,maxWritesPerHour}`（enabled=false 为回滚开关）；
+    `config.example.json` 补 `purpose.pendingTtlDays`；`setup-dsh.mjs` 挂第 5 个 MCP（`mcp-life-settings`）。
+  - 工具面：`qq-tool-restrict` 放行 `mcp__life-settings__`；4 个写工具并入 `isPrivilegedTool`（主人私聊不跑模型审批、
+    主人触发的群回合逐次审批）；B站 scheduler/config/whale-night 全部走 overlay 并发布采用证据。
+
+- **QQ 消息撤回 `qq_recall_message`**（2026-11-08 用户拍板：「给surfcore的qq部分接上群撤回的接口，权限放开，不需要主人点头，自己判断」）：
+  MCP 工具 → `POST /api/socialV2/recall-message` → OneBot `delete_msg`。**它是普通工具**：不要求「主人本人触发的回合」、
+  不进 `qq-owner-approval` 内部模型审批名单，群友触发的回合里也能撤她自己发的消息，模型自己判断什么时候撤（preset 第 23 条）。
+  撤自己的随时（群聊/私聊）；撤别人的仅群聊且机器人必须是本群 `admin`/`owner`（`get_group_member_info` 自验，取不到角色
+  fail-closed），只在该消息明显违规（广告/刷屏/辱骂/违法）或主人本人明确要求时做；群主消息 403、私聊撤对方 403。
+  硬闸：仅 `reserved2` + 会话令牌/白名单/工具开关/AI 暂停 + 只能撤当前会话消息（`get_msg` 校验归属）+ 约 2 分钟窗口
+  （`windowMs` 默认 120000）+ 每会话每小时 ≤ `maxPerHour`（默认 30，成功才计数）+ 一次一条；成功响应不回显被撤消息原文。
+- **配置**：`socialV2.tools.recallMessage`（默认开）+ `socialV2.messageRecall.{enabled:true, windowMs:120000, maxPerHour:30}`
+  （`windowMs` 夹 30000~300000、`maxPerHour` 夹 1~200）；启动与控制台保存两处同套归一化；`config.example.json` 同步。
+  本轮不做控制台 UI 开关（改 `config.json` 即可）。
+- **文本发送链路 messageId 落库（前置能力）**：`sendMessagesV2` 保留 `onebotSend` 返回的 `message_id`；
+  `recordSentMessagesV2`/`notePurposeOutbound` 兼容 `{text, messageId}`；`send-message` / `send-burst` / 通用 `/api/send/*`
+  成功响应补 `messageIds`。**文本/图片/表情/语音的 messageId 都会写进 `recentMessages`**（图片/表情/语音是既有行为；
+  本轮补的是文本发送链路原先丢弃的网关回执），要撤某条消息用回执 `messageIds` 或 `recentMessages` / 消息详情里的真实 id。
+- **preset**：`qq-chat-v2` 安全规则第 2/22 条各补一句 + 工具协议新增第 23 条【撤回消息（普通能力，权限已放开）】；
+  重新生成 `plugins/surfcore/presets/qq-chat-v2.patch.yml`。
+
+### 安全
+
+- **权限口径（用户明确拍板）**：撤回**不走** owner 回合授权、**不进**模型审批；把判断权交给模型。保留的硬闸见上。
+  残余风险：机器人是群管理员时可能被群内容诱导撤回他人消息（缓解 = preset 第 23 条口径 + 窗口/频率/会话归属闸 +
+  群主消息撤不了），记入 `SECURITY_BASELINE.md` §三 R14。
+- 回滚：`socialV2.messageRecall.enabled=false`（端点 403；**手改 `config.json` 需重启桥接**，经控制台保存接口写入才热更新内存 cfg）/ `socialV2.tools.recallMessage=false`（工具面消失，需重启 DSH）。
+
+### 测试
+
+- 新增 `scripts/test-life-{settings,mcp,qq-runtime,bridge-auth,bili-wiring}.mjs`（核心 19 + MCP 8 + QQ runtime 13 +
+  bridge 鉴权 7 + B站接线 6）与每日心跳 `test-life-review.mjs`（12），全部离线 fixture；已登记进 `scripts/test-audit.mjs`。
+- `npm run test:audit` = 109/110（唯一失败 `test-preset-local-tools` 为既有 DSH 0.2.1 工具名漂移，与本功能无关）。
+
+- 新 `scripts/test-recall-message.mjs`（真实 `bridge.js` + `audit-bridge-harness` 夹具网关，不连真 QQ、不写真实 state）：
+  19 条用例覆盖规格 §6 的 14 类场景 + 配置归一化 + `recallTimes` 持久化——群/私聊撤自己、非管理员 403 且无 `delete_msg`、管理员放行、群主 403、跨会话 403、
+  找不到 404、超窗口 400 `windowExpired`、`time` 缺失不拦、seq 映射、开关/模式/token/paused 闸门、429、网关失败、
+  **非 owner 回合撤自己必须成功（权限口径回归）**、发送回执 `messageIds` 落库、`recallTimes` 持久化；进 `scripts/test-audit.mjs`。
+- `node scripts/test-egress-boundary.mjs` 保持不变（撤回走桥接，不进直连只读白名单）；preset 契约测试补第 23 条静态断言。
+
+### 文档
+
+- 新增 `docs/guides/LIFE-SETTINGS.md`（设计与运维）、`docs/guides/LIFE-PARAMS-CHECKLIST.md`（**待用户审阅的开放清单**）；
+  同步 AGENT-TOOLS / DATA-AND-CONFIG / RULES 硬边界第 17 条 / SECURITY_BASELINE / ARCHITECTURE / README / FOLDER_MAP /
+  PITFALLS #106 / HANDOFF。
+
+---
+
+- `RULES.md`（权限分层 + 硬边界第 16 条 + 途径 E）、`SECURITY_BASELINE.md`（威胁模型/工具面矩阵/残余 R14）、
+  `AGENT-TOOLS-AND-PRESETS.md` §2.4.3、`MODULE-BRIDGE.md` §6.11/§7.8、`DATA-AND-CONFIG.md` §1.11/§4.1、
+  `BOUNDARIES.md` §2.1/§4、`docs/HANDOFF.md` 顶部快照、`docs/ROADMAP.md` §2/§4、`docs/PITFALLS.md` #105、
+  `README.md`/`README.en.md`；`CURRENT-NUMBERS.md` 由 `npm run docs:numbers` 重新生成。
+- 隔离开发：`_work/recall-work`（分支 `feat/qq-recall-message`），等 life-settings 队收工后合并回 `surfcore-work` 再同步真机；
+  真机验证步骤见 HANDOFF 顶部快照。
+
 ## [未发布] - 2026-11-07（看屏幕 leaky 概率闸门 + QQ 载体接入）
 
 ### 新增
@@ -188,7 +318,7 @@
 
 ### 变更
 
-- **DSH 会话工作区根移出 `state/`**：本机 `config.json.sessionCwd` 改为 `C:/Users/32372/surfcore-workspaces`
+- **DSH 会话工作区根移出 `state/`**：本机 `config.json.sessionCwd` 改为 `~/surfcore-workspaces`
   （新会话生效；旧工作区保留待人工清）。`state/` 恢复「只放桥接运行时数据」。
 - **语音 preset 文案中性化**：不再写死「已开启」，改成「出厂的语音工具默认关闭；工具面里能看到就是已开启」，
   避免 repo 里的 preset 与用户本机配置互相矛盾。
@@ -977,7 +1107,7 @@
 
 ### 修复
 
-- **SnowLuma「装好了但检测不到」**：用户填 `D:\Tools\SnowLuma2` 时，代码只取 `dirname` → 算成 `D:\Tools`，
+- **SnowLuma「装好了但检测不到」**：用户填 `<工具目录>/SnowLuma2` 时，代码只取 `dirname` → 算成 `<工具目录>`，
   而配置在 `SnowLuma2` 下的 `app/config` 里，于是永远检测不到。现在候选目录展开为
   `填写路径 / 填写路径pp / 上一级 / 上一级pp`；`SnowLuma home（app 目录）` 也加了「浏览…」和更清楚的说明。
 
