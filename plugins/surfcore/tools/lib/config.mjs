@@ -14,6 +14,27 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { DEFAULT_BILI_FISH_GUARD } from './fish-guard.mjs'
 import { DEFAULT_LIMITS } from './limits.mjs'
+import { applyManagedSettings } from '../../../../src/life-settings/runtime.js'
+
+// 受管设置（生活参数）的合并点：B站 域的所有读点都从这里拿到叠加后的配置。
+// `applyManagedSettings()` 只叠加 sidecar 里已登记的 bili.* 覆盖值，并在 sidecar
+// 损坏/不可读时 fail-safe（返回最后一次成功值或 base 配置）——绝不让 B站 工具链
+// 因为「生活参数状态文件坏了」而整条抛 CORRUPT_FILE。
+// 保留 mtime/size 缓存语义：文件不变不重读，但受管 revision 独立，每次返回前都要重新叠加。
+let managedWarned = false
+function withManagedBili(base) {
+  try {
+    return applyManagedSettings(base, 'bili')
+  } catch (error) {
+    if (!managedWarned) {
+      managedWarned = true
+      try {
+        console.error(`[config] B站受管设置叠加失败，本进程沿用基础配置：${String(error?.message ?? error).slice(0, 160)}`)
+      } catch {}
+    }
+    return base
+  }
+}
 
 const HOME = process.env.USERPROFILE || process.env.HOME || '.'
 export const configPath = process.env.SURFCORE_BILI_CONFIG || path.join(HOME, '.dsh', 'surfcore', 'bili.config.json')
@@ -75,6 +96,10 @@ let cacheKey = ''
  * ⚠️ 2026-10-22：以前是"进程内永久缓存"，长驻的插件宿主改了设置也读不到新值。
  *   现在每次调用先 stat 一下（很便宜）；文件不变就用缓存，变了就重读。
  *   这样调度器/提示词里的额度、四类动态、分享上限都能"改完下一轮生效"。
+ *
+ * 2026-11-08（生活参数自调）：缓存的是**基础配置**（bili.config.json + DEFAULTS），
+ * 每次返回前再叠加受管设置（life-settings sidecar 的 bili.* 覆盖值）。受管 revision
+ * 与旧文件 mtime 独立——旧文件不变也要重放覆盖值；返回的是新对象，调用方改它不会污染缓存。
  */
 export function config() {
   let key = 'none'
@@ -82,11 +107,11 @@ export function config() {
     const stat = fs.statSync(configPath)
     key = `${stat.mtimeMs}:${stat.size}`
   } catch { /* 没有用户配置 */ }
-  if (cache && key === cacheKey) return cache
+  if (cache && key === cacheKey) return withManagedBili(cache)
   let user = {}
   try { user = JSON.parse(fs.readFileSync(configPath, 'utf8')) } catch { /* 没配置就用默认 */ }
   cache = merge(DEFAULTS, user)
   cache.__hasUserFile = Object.keys(user).length > 0
   cacheKey = key
-  return cache
+  return withManagedBili(cache)
 }

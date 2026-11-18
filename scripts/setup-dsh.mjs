@@ -5,8 +5,9 @@
 //   1. 安装两套 agent preset：qq-chat、qq-chat-v2
 //      （DSH 0.1.7 机制：作为 surfcore bundle 的 patch 层插入
 //        @deepseek-ai/dsh-agent-preset 行；~/.dsh/.agent-presets/ 目录已不再被读取）
-//   2. 在 DSH profile 的 cordis.patch.yml 中挂载三个 MCP server：
-//      mcp-snowluma / mcp-snowluma-host / mcp-web-search-safe
+//   2. 在 DSH profile 的 cordis.patch.yml 中挂载五个 MCP server：
+//      mcp-snowluma / mcp-snowluma-host / mcp-web-search-safe / mcp-stock-safe /
+//      mcp-life-settings（生活参数工具面，stdio 直连本仓库 src/mcp-life-settings.js）
 //   3. 在 profile package.json 中只注册一个 bundle：surfcore
 //      （surfcore = QQ 设置 + B站养鱼 + 两个 chat preset，全部在一个 bundle 里）
 //
@@ -136,7 +137,7 @@ function yamlSingleQuote(s) {
 }
 
 // 由桥接托管的 MCP 条目 id：脚本对这几个 id 拥有所有权，可安全地按 id 增删。
-const MANAGED_MCP_IDS = ['mcp-snowluma', 'mcp-snowluma-host', 'mcp-web-search-safe', 'mcp-stock-safe'];
+const MANAGED_MCP_IDS = ['mcp-snowluma', 'mcp-snowluma-host', 'mcp-web-search-safe', 'mcp-stock-safe', 'mcp-life-settings'];
 
 function mcpEntries() {
   const node = process.execPath;
@@ -146,6 +147,15 @@ function mcpEntries() {
     'mcp-web-search-safe': { serverName: 'web-search-safe', script: path.join(REPO_ROOT, 'src', 'mcp-web-search-safe.js') },
     // 股票行情（只读、无 key）：2026-10-29 加，QQ 侧也要能聊股票
     'mcp-stock-safe': { serverName: 'stock', script: path.join(REPO_ROOT, 'src', 'mcp-stock-safe.js'), toolCallTimeoutMs: 60000 },
+    // 生活参数（2026-11-08，IMPL-SPEC §5.2）：工具名 mcp__life-settings__life_*。
+    // 它只是 bridge http://127.0.0.1:<consolePort>/api/life/* 的 stdio 代理，
+    // 不读模型、不联网、启动不依赖 bridge 在线；但必须先知道仓库根与 DSH 根
+    // 才能解析 sidecar 与配置（MCP server 的 cwd 不是仓库），所以 env 里显式给两个路径。
+    'mcp-life-settings': {
+      serverName: 'life-settings', script: path.join(REPO_ROOT, 'src', 'mcp-life-settings.js'),
+      toolCallTimeoutMs: 60000,
+      env: { SURFCORE_ROOT: REPO_ROOT, DSH_HOME },
+    },
   };
   let out = '# === qq-bridge MCP BEGIN ===\n';
   out += '# 由 scripts/setup-dsh.mjs 维护；这段区块会被整体替换，请勿手工编辑内部条目。\n';
@@ -161,6 +171,10 @@ function mcpEntries() {
     out += `          - ${yamlSingleQuote(s.script)}\n`;
     // qq_wait_for_messages 最长可等 10 分钟；DSH 默认 60s 会提前掐断工具调用。
     if (s.toolCallTimeoutMs) out += `        toolCallTimeoutMs: ${s.toolCallTimeoutMs}\n`;
+    if (s.env && Object.keys(s.env).length) {
+      out += `        env:\n`;
+      for (const [key, value] of Object.entries(s.env)) out += `          ${key}: ${yamlSingleQuote(value)}\n`;
+    }
   }
   out += '# === qq-bridge MCP END ===\n';
   return out;

@@ -30,6 +30,8 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { config } from '../lib/config.mjs'
 import { loadScores } from '../lib/scores.mjs'
+import { applyManagedSettings, extractManagedValues, settingsRevision } from '../../../../src/life-settings/runtime.js'
+import { nightSettingsFingerprint, reconcileNightPlanState, nightNotBeforeMinute } from '../../lib/life-runtime.js'
 import {
   buildNightSchedule, nextPendingSlot, markScheduleSlot, qualityByWindow, minToHHMM,
 } from '../lib/night-schedule.mjs'
@@ -54,7 +56,10 @@ const parseHHMM = (s) => { const [h, m] = String(s).split(':').map(Number); retu
 const nowMin = () => { const d = new Date(); return d.getHours() * 60 + d.getMinutes() }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
-const cfg = load(CFG, DEFAULTS)
+// The old per-character file remains readable, but explicit managed choices
+// have the final say. Otherwise it silently masks successful Agent edits.
+const cfg = applyManagedSettings({ night: load(CFG, DEFAULTS) }, 'bili').night
+const managedRevision = settingsRevision()
 
 // 窗口：优先 windows[]；没有就退回 windowStart/windowEnd 一个窗口（兼容旧配置）
 // 每个窗口自带 wakes（醒来几次，2026-10-18 主人定）；0 = 这个窗口不醒 ✓
@@ -83,19 +88,36 @@ function windowsOf(c) {
 const WINDOWS = windowsOf(cfg)
 // 2026-10-23 用户选 C：每个窗口至少 1 次；全天总数 ≤ maxWakesPerDay（硬上限 12）。
 // 不再把“各窗口 wakes 之和”当上限——27 次需求和 12 次上限本身就冲突。
-const MAX_WAKES = Math.min(12, Math.max(0, Number(cfg.maxWakesPerDay ?? 12) || 12))
-const MIN_GAP_MIN = Math.max(0, Number(cfg.minGapMin ?? 20) || 20)
+// 2026-11-08（生活参数）：`maxWakesPerDay=0` 是受管参数允许的合法值（明确表示今天不自动浏览），
+// 不能再用 `|| 12` 把 0 吞成 12 —— 否则 Agent 把次数调到 0 也停不下来。
+const MAX_WAKES = Math.min(12, Math.max(0, Number(cfg.maxWakesPerDay ?? 12)))
+const MIN_GAP_MIN = Math.max(0, Number(cfg.minGapMin ?? 20))
 
-const st = load(STATE, {})
+// 旧计划里的当天已用次数/上次真实唤醒必须保留；只有「节奏输入变了」才重排。
+const st = reconcileNightPlanState(load(STATE, {}), cfg, { revision: managedRevision })
+// 采用回执：写进 whale-night.json，供 life_verify 判定「这个消费者真的用了新值」。
+// 它记录的是本次规划实际采用的受管值，不是模型自述。
+const adoptedSettings = {
+  revision: managedRevision,
+  schedulePolicy: 'strict-gap-v1',
+  fingerprint: nightSettingsFingerprint(cfg),
+  values: extractManagedValues({ night: {
+    ...cfg, maxWakesPerDay: MAX_WAKES, minGapMin: MIN_GAP_MIN,
+    skipChance: Number(cfg.skipChance ?? 0.3), maxVideos: Number(cfg.maxVideos ?? 5),
+  } }, 'bili'),
+  plannedAt: new Date().toISOString(),
+}
 const wakesToday = (s) => (s.date === today() ? Number(s.wakes ?? 0) : 0)
 
 function donePlan(state, reason) {
   return {
     ...(state && typeof state === 'object' ? state : {}),
     date: today(), action: 'done', done: true,
-    wakes: Number(state?.wakes ?? 0) || 0,
-    watchWakes: Number(state?.watchWakes ?? 0) || 0,
+    wakes: state?.date === today() ? Number(state?.wakes ?? 0) || 0 : 0,
+    watchWakes: state?.date === today() ? Number(state?.watchWakes ?? 0) || 0 : 0,
     reason,
+    lifeSettings: adoptedSettings,
+    scheduleSettingsFingerprint: adoptedSettings.fingerprint,
   }
 }
 
@@ -103,6 +125,8 @@ function planFromSlot(state, slot) {
   const kind = slot.kind === 'base' ? '保底' : '加餐'
   return {
     ...state,
+    lifeSettings: adoptedSettings,
+    scheduleSettingsFingerprint: adoptedSettings.fingerprint,
     date: today(),
     slots: state.slots,
     warnings: Array.isArray(state.warnings) ? state.warnings : [],
@@ -127,7 +151,8 @@ function planFromSlot(state, slot) {
 }
 
 function makePlan() {
-  const now = nowMin()
+  // 重排也要尊重「距上次真实唤醒 ≥ minGap」，不能因为调了参数就提前再醒一次。
+  const now = nightNotBeforeMinute(st, MIN_GAP_MIN)
   if (MAX_WAKES === 0) return donePlan(st, 'maxWakesPerDay=0 → 今天不醒')
 
   // 已经生成过今天的排程：只推进 slots，不重新掷骰子。
@@ -152,6 +177,11 @@ function makePlan() {
     quality: qualityByWindow(loadScores(), WINDOWS, { days: 30 }),
   })
   const base = {
+    // 只保留「已发生」的审计与上次真实唤醒时间；不整包展开旧 state，
+    // 避免把昨天的 action/woke/slotId 等执行态字段带进今天的新计划。
+    ...(Array.isArray(st?.scheduleChanges) ? { scheduleChanges: st.scheduleChanges } : {}),
+    ...(st?.wokeAt ? { wokeAt: st.wokeAt } : {}),
+    ...(st?.replannedAt ? { replannedAt: st.replannedAt } : {}),
     date: today(),
     slots: schedule.slots,
     warnings: schedule.warnings,

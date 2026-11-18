@@ -37,6 +37,34 @@ import { readQqForBili } from './memory.js'
 import { buildSelfIdentityBlock, readQqSelfIdentity } from '../../../src/self-identity.js'
 import { adminFromSources, adminPromptBlock } from '../../../src/admin-identity.js'
 import { activeMemoryPaths, activePlatformStateDir } from '../../../src/character-persona.js'
+import { applyManagedSettings, compactLifeState, publishRuntimeEvidence, settingsRevision } from '../../../src/life-settings/runtime.js'
+import { plannedWakeTime } from './life-runtime.js'
+
+/**
+ * B站 运行时证据发布器（节流）：
+ *   · revision 变化 → 立即发（新节奏要被验证时不能等心跳）；
+ *   · 同 revision → 距上次成功发布 ≥ heartbeatMs 才发心跳（默认 45s，落在 90s TTL 内）；
+ *   · 发布失败不推进水位，下一次 tick 会重试；调用方自己 try/catch（坏 sidecar 不打断 tick）。
+ *
+ * 独立成纯函数是为了离线单测：注入 publish/now 就可以断言「变更加急 + 心跳节流」，
+ * 不需要真的等 45 秒、也不需要跑 B站 CLI。
+ */
+export function createEvidencePump({ publish, heartbeatMs = 45_000, now = () => Date.now() } = {}) {
+  if (typeof publish !== 'function') throw new Error('createEvidencePump: publish 必须是函数')
+  const interval = Math.max(0, Number(heartbeatMs) || 0)
+  const clock = typeof now === 'function' ? now : () => Date.now()
+  let lastRevision = null
+  let lastAt = 0
+  return function pump({ revision, values = {}, details = {}, force = false } = {}) {
+    const at = clock()
+    const changed = lastRevision !== revision
+    if (!force && !changed && at - lastAt < interval) return false
+    publish({ revision, values, details })
+    lastRevision = revision
+    lastAt = at
+    return true
+  }
+}
 
 // 当前角色的 B站 行为目录（角色系统未启用时回退旧目录）。
 function platformDir() {
@@ -544,7 +572,8 @@ export function startScheduler(ctx, opts) {
   const ACCOUNT_DIR = path.join(dshHome, 'surfcore', 'bili')
   const PLATFORM_DIR = activePlatformStateDir(ACCOUNT_DIR)
   const STATE = path.join(PLATFORM_DIR, 'whale-night.json')
-  const CFG_FILE_REF = path.join(dshHome, 'surfcore', 'bili.config.json')     // 监听循环每次重读（改配置立刻生效 ✓）
+  // 监听循环/私信/直播间每次重读（改配置立刻生效 ✓）；测试可用环境变量指到临时夹具。
+  const CFG_FILE_REF = process.env.SURFCORE_BILI_CONFIG || path.join(dshHome, 'surfcore', 'bili.config.json')
   const CRED_REF = path.join(ACCOUNT_DIR, 'credentials.json')                // 账号凭证全局共用，不进角色包
   const readState = () => { try { return JSON.parse(fs.readFileSync(STATE, 'utf8')) } catch { return null } }
   const writeState = (o) => {
@@ -552,6 +581,81 @@ export function startScheduler(ctx, opts) {
   }
   const nowMin = () => { const d = new Date(); return d.getHours() * 60 + d.getMinutes() }
   const today = () => new Date().toLocaleDateString('sv-SE')
+
+  // ── 生活参数（life-settings）受管 overlay + 运行时证据 ─────────────────────
+  // B站 的受管字段（night.* / preferences.* / share.* / listen.commentIntervalSec）以
+  // sidecar 覆盖值为准；基础配置（bili.config.json）仍由这里读，overlay 由 runtime.js 叠加。
+  let running = true
+  let lastTickAt = null
+  let lastManagedRevision = -1
+  let lastListenConfig = null
+  const evidenceHeartbeatMs = Number.isFinite(Number(opts.evidenceHeartbeatMs))
+    ? Math.max(0, Number(opts.evidenceHeartbeatMs))
+    : 45_000
+  const clock = typeof opts.now === 'function' ? opts.now : () => Date.now()
+  // 测试钩子：注入 evidenceHeartbeatMs / now 即可断言节流，不必真等 45 秒。
+  const pumpEvidence = createEvidencePump({
+    publish: (snapshot) => publishRuntimeEvidence('bili', snapshot),
+    heartbeatMs: evidenceHeartbeatMs,
+    now: clock,
+  })
+
+  /**
+   * 读取监听循环用的 B站 配置：基础文件 + 受管 overlay。
+   * 坏 sidecar 由 runtime.js fail-safe；这里再包一层 try/catch，任何异常都退回原始文件内容
+   * （overlay 失败不能把监听/私信/直播间整条链路弄瘫）。
+   */
+  function readListenerConfig() {
+    let raw = {}
+    try { raw = JSON.parse(fs.readFileSync(CFG_FILE_REF, 'utf8')) } catch {}
+    try {
+      return applyManagedSettings(raw, 'bili')
+    } catch (error) {
+      log(`[life-settings] B站受管设置暂时不可用（沿用基础配置）：${String(error?.message ?? error).slice(0, 120)}`)
+      return raw
+    }
+  }
+
+  function runtimeStatus(state = readState()) {
+    const nextPlan = plannedWakeTime(state)
+    return {
+      running: running !== false,
+      sessionId,
+      lastTickAt,
+      schedulerTickMs: TICK_MS,
+      // mode 默认 'runtime'（真实进程证据）；测试/仿真可注入 local-simulation。
+      mode: opts.runtimeMode ?? 'runtime',
+      nextPlan,
+      // compactLifeState() 读 nextWakeAt；与 nextPlan 同源，保持两个名字都在。
+      nextWakeAt: nextPlan,
+      scheduleAction: state?.action ?? null,
+      scheduleFingerprint: state?.lifeSettings?.fingerprint ?? null,
+      plannedAt: state?.lifeSettings?.plannedAt ?? null,
+      dailyWakes: state?.date === today() ? Number(state.wakes ?? 0) : 0,
+      lastWakeAt: state?.wokeAt ?? null,
+    }
+  }
+
+  /** 发布 bili 运行时证据。节流交给 pumpEvidence；异常只 log，绝不打断 tick。 */
+  function reportRuntime(where, state = readState(), { force = false } = {}) {
+    try {
+      const revision = Number.isSafeInteger(state?.lifeSettings?.revision)
+        ? state.lifeSettings.revision
+        : settingsRevision()
+      const values = { ...(state?.lifeSettings?.values ?? {}) }
+      // 监听间隔是「读点当下真实消费的值」，用来向 verify 证明这个消费者确实在用它。
+      if (lastListenConfig && lastListenConfig.revision === revision) {
+        values['bili.listen.commentIntervalSec'] = lastListenConfig.intervalSec
+      }
+      pumpEvidence({
+        revision, values,
+        details: { ...runtimeStatus(state), source: 'scheduler + night planner', where },
+        force,
+      })
+    } catch (error) {
+      log(`[life-settings] B站运行证据暂不可写：${String(error?.message ?? error).slice(0, 120)}`)
+    }
+  }
 
   // ── 每日 token 额度闸门（2026-10-23）──────────────────────────────────
   // 额度不是「少发几条」，而是「今天 B站 不再叫醒」：到 100% 后所有 prompt 都不投，
@@ -588,7 +692,15 @@ export function startScheduler(ctx, opts) {
         log(`[bili-whale] token 额度检查失败（${where}）：${String(error?.message ?? error).slice(0, 120)}`)
       }
     }
-    return ctx.sessionController.prompt(args, signal)
+    // 每次真实投递前回报一次运行时证据（节流在 pump 里）；后续 verify 靠它判定「采用」。
+    reportRuntime(where)
+    // 状态板只追加到**这一次**的 content 尾部：不改静态 system/身份前缀，也不重写历史条目。
+    const board = compactLifeState({ platform: 'bili', wakeReason: where })
+    const content = [...(args.content ?? [])]
+    if (board && !content.some((part) => part.type === 'text' && String(part.text ?? '').includes(board))) {
+      content.push({ type: 'text', text: board })
+    }
+    return ctx.sessionController.prompt({ ...args, content }, signal)
   }
 
   // ⚠️ 2026-10-18 大坑：插件跑在 DSH 的 **Electron** 里，`process.execPath` = DeepSeek Harness.exe ✗
@@ -605,7 +717,11 @@ export function startScheduler(ctx, opts) {
     return process.execPath   // 兜底
   }
   const NODE_EXE = findNode()
-  const NODE_ENV = { ...process.env }   // 真 node 不需要 ELECTRON_RUN_AS_NODE ✓
+  // 真 node 不需要 ELECTRON_RUN_AS_NODE ✓
+  // ⚠️ 必须把 DSH_HOME/SURFCORE_BILI_CONFIG 显式带给 bili 子进程：whale-night.mjs 用
+  // life-settings runtime 读同一个 sidecar，scopeId 由 root+dshHome 决定——env 不一致会
+  // 读到另一份设置（表现是「改了但没采用」）。
+  const NODE_ENV = { ...process.env, DSH_HOME: dshHome, SURFCORE_BILI_CONFIG: CFG_FILE_REF }
 
   // 每次调用都重读 config：设置页把 agent.sandbox 改成 workspace-write 后，下一 tick 生效。
   function ensurePermission(where = 'tick') {
@@ -658,10 +774,29 @@ export function startScheduler(ctx, opts) {
   }
 
   let waking = false
-  async function tick() {
+  async function tickOnce() {
     if (waking) return
     if (!ctx.sessionController) return           // 服务还没就绪 → 下一 tick 再来
     if (await budgetBlockedNow('生物钟叫醒')) return
+    // The manager only saves choices. The real planner must consume them before
+    // they count as adopted. It preserves a same-day plan unless rhythm inputs
+    // changed, and preserves already-used daily opportunities on a replan.
+    // Failures here must never break the tick: a corrupt sidecar is fail-safe in
+    // runtime.js, and anything else only logs (the saved plan keeps driving wakes).
+    try {
+      const revision = settingsRevision()
+      if (revision !== lastManagedRevision) {
+        const result = await runBili(['night', 'plan'])
+        if (!result.ok) {
+          // 只记日志、不更新水位 → 下一 tick 重试；本轮仍按已保存的计划继续。
+          log(`[life-settings] B站新节奏尚未采用：${(result.err || result.out).slice(0, 160)}`)
+        } else {
+          lastManagedRevision = revision
+        }
+      }
+    } catch (error) {
+      log(`[life-settings] B站受管设置读取/重排失败（本 tick 按已保存计划继续）：${String(error?.message ?? error).slice(0, 160)}`)
+    }
     // 2026-10-23：每个 tick 都校正一次权限（会话可能在别处被切回 workspace-write）。
     ensurePermission('tick')
     const st = readState()
@@ -779,6 +914,16 @@ export function startScheduler(ctx, opts) {
       }
     }
   }
+  // 每个 tick 收尾都发一次运行时证据（节流在 pump 里：变更加急 / 否则 45s 心跳）。
+  // 证据发布失败只 log，不影响下一轮 tick。
+  let ticking = false
+  async function tick() {
+    if (ticking || !running) return
+    ticking = true
+    lastTickAt = new Date().toISOString()
+    try { await tickOnce() }
+    finally { ticking = false; reportRuntime('tick') }
+  }
 
   // ── 全天监听（2026-10-18 加）：插件自己轮询收件箱，有人找她就叫醒她 ────────────────
   // 为什么放这里：`listen.allDay` 只控制"守多久" ✓，但**没人启动 listener** ✗ —— 跟生物钟当初的病一样。
@@ -826,8 +971,7 @@ export function startScheduler(ctx, opts) {
     async function dmTick() {
       if (dmBusy) return
       if (await budgetBlockedNow('私信叫醒')) return
-      let cfg
-      try { cfg = JSON.parse(fs.readFileSync(CFG_FILE_REF, "utf8")) } catch { cfg = {} }
+      const cfg = readListenerConfig()
       const L = cfg.listen ?? {}
       if (!L.dm) return
       if (Date.now() - lastDmAt < 5_000) return   // 2026-10-19：原来 60s 和定时器叠成双层节流 → 最坏 2 分钟 ✗ 改成 5s
@@ -884,12 +1028,14 @@ export function startScheduler(ctx, opts) {
   async function listenTick() {
     if (listening) return
     if (await budgetBlockedNow('评论区倾听')) return
-    let cfg
-    try { cfg = JSON.parse(fs.readFileSync(CFG_FILE_REF, 'utf8')) } catch { cfg = {} }
+    const cfg = readListenerConfig()
     const L = cfg.listen ?? {}
     if (L.comment === false) return                              // 评论区监听关掉了 ✓
     // 下限 60 秒（2026-10-18 测试期曾临时放宽到 2 秒 ✓ 已还原 ✓ —— B站 接口经不起每 2 秒锤 ✗）
     const interval = Math.max(60, Number(L.commentIntervalSec ?? 300)) * 1000
+    // 记录「这个读点此刻真实消费的监听周期」→ 证据里带上它，verify 才能证明采用。
+    try { lastListenConfig = { revision: settingsRevision(), intervalSec: interval / 1000 } } catch { lastListenConfig = null }
+    reportRuntime('listen-interval-read')
     if (Date.now() - lastListenAt < interval) return
     lastListenAt = Date.now()
     // 「全天」关掉时：只在她醒着的窗口里听（省 token / 更自然 ✓）
@@ -958,8 +1104,7 @@ export function startScheduler(ctx, opts) {
   async function liveTick() {
     // ⚠️ 2026-10-18 主人定：直播间是**独立开关** —— 点开就开始、关掉就停（不受作息影响 ✓）
     if (ctx.sessionController) {
-      let cur = {}
-      try { cur = JSON.parse(fs.readFileSync(CFG_FILE_REF, 'utf8')) } catch {}
+      const cur = readListenerConfig()
       if (!cur.listen?.live && liveProc !== null) {           // 开关被关掉 → 立刻停子进程 ✓
         liveStopping = true
         try { liveProc.kill() } catch {}
@@ -983,8 +1128,7 @@ export function startScheduler(ctx, opts) {
     if (liveProc !== null || liveWaking || liveRetryAt > Date.now()) return
     if (!ctx.sessionController) return
     if (await budgetBlockedNow('直播间叫醒')) return
-    let cfg = {}
-    try { cfg = JSON.parse(fs.readFileSync(CFG_FILE_REF, 'utf8')) } catch {}
+    const cfg = readListenerConfig()
     const L = cfg.listen ?? {}
     const room = String(L.liveRoom ?? '').trim()
     if (!L.live || !room) return
@@ -1253,7 +1397,15 @@ export function startScheduler(ctx, opts) {
       // ⭐ 直播间是**单独开关**：保存设置就立刻生效（点开就跑 ✓ 关掉就停 ✓），不等下一轮定时器
       liveTick().catch(() => {})
     },
-    stop() { clearInterval(timer); clearInterval(timer2); clearInterval(timer3); clearInterval(timerDyn); clearInterval(timerDm); for (const t of startupTimers) clearTimeout(t); try { liveProc?.kill() } catch {} try { permissionListenerOff?.() } catch {} },
+    stop() {
+      running = false;
+      clearInterval(timer); clearInterval(timer2); clearInterval(timer3); clearInterval(timerDyn); clearInterval(timerDm);
+      for (const t of startupTimers) clearTimeout(t);
+      try { liveProc?.kill() } catch {}
+      try { permissionListenerOff?.() } catch {}
+      // 停掉后必须让证据失效（details.running=false）——否则 verify 会把死进程当采用证据。
+      reportRuntime('stopped', undefined, { force: true })
+    },
     /** 切角色时用：停定时器 + 取消当前 DSH 会话的在途回合，避免旧人格继续跑。 */
     async retire() {
       this.stop();
@@ -1262,5 +1414,7 @@ export function startScheduler(ctx, opts) {
     tick,
     listenTick,
     liveTick,
+    /** 只读运行时状态（含下一次计划）：诊断/测试用，不写盘。 */
+    status: runtimeStatus,
   }
 }

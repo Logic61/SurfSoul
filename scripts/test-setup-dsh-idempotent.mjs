@@ -70,7 +70,9 @@ const finalPatch = fs.readFileSync(path.join(tmpHome, 'profiles', 'web', 'cordis
 
 // 断言 1：每个托管 id 恰好出现一次
 let failed = 0;
-for (const id of ['mcp-snowluma', 'mcp-snowluma-host', 'mcp-web-search-safe']) {
+// 与 setup-dsh.mjs 的 MANAGED_MCP_IDS 保持同一份名单（不 import 那个脚本：import 会执行安装流程）。
+const MANAGED_IDS = ['mcp-snowluma', 'mcp-snowluma-host', 'mcp-web-search-safe', 'mcp-stock-safe', 'mcp-life-settings'];
+for (const id of MANAGED_IDS) {
   const n = finalPatch.split('\n').filter((l) => new RegExp(`^\\s*-\\s*id:\\s*${id}\\s*$`).test(l)).length;
   const ok = n === 1;
   if (!ok) failed += 1;
@@ -102,8 +104,20 @@ if (doc) {
   const ok = Array.isArray(doc);
   console.log(`${ok ? '✅' : '❌'} YAML 顶层为数组（${Array.isArray(doc) ? doc.length + ' 项' : typeof doc}）`);
   if (!ok) failed += 1;
-  const ids = doc.filter((e) => e?.insert).flatMap((e) => e.insert.map((x) => x.id));
+  const entries = doc.filter((e) => e?.insert).flatMap((e) => e.insert);
+  const ids = entries.map((x) => x.id);
   console.log(`   解析出的 MCP id: ${ids.join(', ')}`);
+  // 断言 4b：生活参数 MCP 条目必须带仓库根/DSH 根 env（否则 MCP 进程找不到 sidecar），
+  // 且超时设成 60s（写操作要等 bridge manager 的锁/原子写）。
+  const life = entries.find((x) => x?.id === 'mcp-life-settings');
+  const samePath = (a, b) => String(a ?? '').replace(/\\/g, '/').toLowerCase() === String(b ?? '').replace(/\\/g, '/').toLowerCase();
+  const lifeOk = Boolean(life)
+    && samePath(life?.config?.env?.SURFCORE_ROOT, ROOT)
+    && samePath(life?.config?.env?.DSH_HOME, tmpHome)
+    && life?.config?.toolCallTimeoutMs === 60000
+    && /[\\/]src[\\/]mcp-life-settings\.js$/.test(String(life?.config?.args?.[0] ?? ''));
+  console.log(`${lifeOk ? '✅' : '❌'} mcp-life-settings 条目含 env(SURFCORE_ROOT/DSH_HOME)+timeout+脚本路径`);
+  if (!lifeOk) failed += 1;
 }
 
 // 断言 5：profile package.json 含唯一 bundle（surfcore），且未破坏其他 bundle
