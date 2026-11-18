@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { bridgeHarness } from './audit-bridge-harness.mjs';
+import { bridgeHarness, wavFixture } from './audit-bridge-harness.mjs';
 import http from 'node:http';
 
 let failures = 0;
@@ -121,7 +121,9 @@ await test('malformed HTTP request targets return 400 without hanging', async (h
 {
   const image = Buffer.from('89504e470d0a1a0a00000000', 'hex');
   let body;
-  const h = await bridgeHarness({ globals: {
+  const h = await bridgeHarness({files:{'state/stickers.json':[
+    {id:'fixture-sticker', no:19, emotion:'wronged', content:'投降',url:'https://public.invalid/sticker'}
+  ]}, globals: {
     safeFetchBuffer: async () => ({ buffer: image }),
     validateFetchUrl: async () => { throw new Error('must fetch validated bytes instead of passing a URL'); },
     fetch: async (_url, init) => {
@@ -130,7 +132,8 @@ await test('malformed HTTP request targets return 400 without hanging', async (h
     },
   } });
   try {
-    await h.sendStickerV2('group:456', 'fixture-sticker');
+    await h.sendStickerV2('group:456', '#19');
+    assert.deepEqual(body.message.map(part => part.type), ['image']);
     assert.equal(body.message.find((part) => part.type === 'image').data.file, 'base64://' + image.toString('base64'));
     console.log('PASS sticker sending gives OneBot validated bytes, never a URL to refetch');
   } catch (error) { failures++; console.error('FAIL safe sticker sending:', error.message); }
@@ -150,36 +153,36 @@ await test('malformed HTTP request targets return 400 without hanging', async (h
     // 语音库 fixture：临时 config 的 ROOT 之下，voice.dir 默认 'audio'
     const audioDir = path.join(h.temp, 'audio');
     fs.mkdirSync(audioDir, { recursive: true });
-    fs.writeFileSync(path.join(audioDir, 'hello.mp3'), Buffer.alloc(1024, 1));
+    fs.writeFileSync(path.join(audioDir, 'hello.wav'), wavFixture());
     // 库外的文件（模拟"随便一个本地文件"）
     const outside = path.join(h.temp, 'outside-secret.mp3');
     fs.writeFileSync(outside, Buffer.alloc(1024, 1));
 
     const names = h.voiceLibrary().map((v) => v.name);
-    assert.ok(names.includes('hello.mp3'), '语音库列出库内音频');
+    assert.ok(names.includes('hello.wav'), '语音库列出库内音频');
     assert.ok(!names.some((n) => n.includes(h.temp)), '语音库不返回绝对路径');
 
     // 1) AI 只能按语音库名字取文件
     const okPath = h.resolveVoicePathForV2('hello');
-    assert.equal(okPath.path, path.join(audioDir, 'hello.mp3'), 'AI 省略扩展名也能命中语音库文件');
+    assert.equal(okPath.path, path.join(audioDir, 'hello.wav'), 'AI 省略扩展名也能命中语音库文件');
 
     // 2) 绝对路径默认被拒（防 prompt injection 拿任意本地文件外发）
     assert.throws(() => h.resolveVoicePathForV2(outside), /语音库|绝对路径/, 'AI 传库外绝对路径被拒');
     assert.throws(() => h.resolveVoicePathForV2('C:\\Windows\\Media\\Alarm01.wav'), /语音库|绝对路径/, 'AI 传系统绝对路径被拒');
 
     // 3) 远程/内联来源被拒（体积与来源都不可控）
-    for (const bad of ['https://example.com/a.mp3', 'base64://AAAA', 'data:audio/mp3;base64,AAAA']) {
+    for (const bad of ['https://example.com/a.wav', 'base64://AAAA', 'data:audio/mp3;base64,AAAA']) {
       assert.throws(() => h.resolveVoicePathForV2(bad), /不接受|只能/, `AI 传 ${bad.split(':')[0]} 来源被拒`);
     }
 
     // 4) 真发一条（虚拟网关）：必须是 record 段、且 file 指向库内文件
-    const sent = await h.sendVoiceForV2('group:456', 'hello.mp3', { readback: false });
+    const sent = await h.sendVoiceForV2('group:456', 'hello.wav', { readback: false });
     const call = h.calls.http.find((c) => c.url.endsWith('/send_group_msg'));
     assert.ok(call, '语音走 send_group_msg');
     assert.equal(call.body.group_id, 456, '语音发给正确群');
     assert.equal(call.body.message.length, 1, '语音只发一个段');
     assert.equal(call.body.message[0].type, 'record', '段类型是 record');
-    assert.equal(call.body.message[0].data.file, path.join(audioDir, 'hello.mp3'), 'record 段指向库内绝对路径');
+    assert.equal(call.body.message[0].data.file, path.join(audioDir, 'hello.wav'), 'record 段指向库内绝对路径');
     assert.equal(sent.messageId, 9001, '返回网关 message_id');
     assert.equal(sent.readback, null, '显式关掉回读时不调 fetch_ptt_text');
 
@@ -188,8 +191,8 @@ await test('malformed HTTP request targets return 400 without hanging', async (h
     try {
       const dir2 = path.join(h2.temp, 'audio');
       fs.mkdirSync(dir2, { recursive: true });
-      fs.writeFileSync(path.join(dir2, 'hi.mp3'), Buffer.alloc(512, 1));
-      const sent2 = await h2.sendVoiceForV2('group:456', 'hi.mp3');
+      fs.writeFileSync(path.join(dir2, 'hi.wav'), wavFixture());
+      const sent2 = await h2.sendVoiceForV2('group:456', 'hi.wav');
       // 注意：这些对象来自 vm realm，deepEqual 会因原型不同而失败 → 逐字段断言
       assert.equal(sent2.verification?.confirmed, true, '默认回读 get_msg 确认 record 段');
       assert.equal(sent2.verification?.duration, 3, '回读到语音时长');
@@ -202,8 +205,8 @@ await test('malformed HTTP request targets return 400 without hanging', async (h
       try {
         const dir2b = path.join(h2b.temp, 'audio');
         fs.mkdirSync(dir2b, { recursive: true });
-        fs.writeFileSync(path.join(dir2b, 'hi.mp3'), Buffer.alloc(512, 1));
-        const sent2b = await h2b.sendVoiceForV2('group:456', 'hi.mp3', { verify: false });
+        fs.writeFileSync(path.join(dir2b, 'hi.wav'), wavFixture());
+        const sent2b = await h2b.sendVoiceForV2('group:456', 'hi.wav', { verify: false });
         assert.equal(sent2b.verification, null, 'verify=false 时不做回读校验');
         assert.ok(!h2b.calls.http.some((c) => c.url.endsWith('/get_msg')), 'verify=false 时不发 get_msg');
       } finally { await h2b.close(); }
@@ -223,22 +226,19 @@ await test('malformed HTTP request targets return 400 without hanging', async (h
     try {
       const dir3 = path.join(h3.temp, 'audio');
       fs.mkdirSync(dir3, { recursive: true });
-      fs.writeFileSync(path.join(dir3, 'a.mp3'), Buffer.alloc(512, 1));
-      await h3.sendVoiceForV2('group:456', 'a.mp3', { readback: false });
-      await assert.rejects(
-        () => h3.sendVoiceForV2('group:456', 'a.mp3', { readback: false }),
-        /频率超限|每分钟/,
-        '同一分钟内第二条语音被限流（每分钟 1 条）'
-      );
+      fs.writeFileSync(path.join(dir3, 'a.wav'), wavFixture());
+      await h3.sendVoiceForV2('group:456', 'a.wav', { readback: false });
+      const again = await h3.sendVoiceForV2('group:456', 'a.wav', { readback: false });
+      assert.ok(again.messageId, '旧的语音专属配额不再拦截发送');
       // 额度只在发出后才记账：参数错误不应吃掉配额
       const h4 = await bridgeHarness({ config: { socialV2: { voice: { enabled: true, maxPerMinute: 1, maxPerHour: 2 } } } });
       try {
         const dir4 = path.join(h4.temp, 'audio');
         fs.mkdirSync(dir4, { recursive: true });
-        fs.writeFileSync(path.join(dir4, 'a.mp3'), Buffer.alloc(512, 1));
+        fs.writeFileSync(path.join(dir4, 'a.wav'), wavFixture());
         await assert.rejects(() => h4.sendVoiceForV2('group:456', 'nope.mp3'), /找不到/, '不存在的音频被拒');
         // 失败没有消耗额度 → 紧接着真发一条应当成功
-        const ok2 = await h4.sendVoiceForV2('group:456', 'a.mp3', { readback: false });
+        const ok2 = await h4.sendVoiceForV2('group:456', 'a.wav', { readback: false });
         assert.equal(ok2.messageId, 9001, '失败不吃额度：随后发送成功');
       } finally { await h4.close(); }
     } finally { await h3.close(); }
@@ -246,7 +246,7 @@ await test('malformed HTTP request targets return 400 without hanging', async (h
     // 8) 语音功能总开关关闭时，**AI 通道**彻底拒绝
     const h5 = await bridgeHarness({ config: { socialV2: { voice: { enabled: false } } } });
     try {
-      await assert.rejects(() => h5.sendVoiceForV2('group:456', 'a.mp3'), /已关闭/, 'voice.enabled=false 时 AI 通道拒绝发送');
+      await assert.rejects(() => h5.sendVoiceForV2('group:456', 'a.wav'), /已关闭/, 'voice.enabled=false 时 AI 通道拒绝发送');
     } finally { await h5.close(); }
 
     // 9) 但**操作者通道**不受这个开关影响：否则"默认不启用"会变成"连手动试发都做不了"
@@ -254,8 +254,8 @@ await test('malformed HTTP request targets return 400 without hanging', async (h
     try {
       const dir6 = path.join(h6.temp, 'audio');
       fs.mkdirSync(dir6, { recursive: true });
-      fs.writeFileSync(path.join(dir6, 'a.mp3'), Buffer.alloc(512, 1));
-      const sent6 = await h6.sendVoiceV2('group:456', path.join(dir6, 'a.mp3'), { guard: false, audit: true });
+      fs.writeFileSync(path.join(dir6, 'a.wav'), wavFixture());
+      const sent6 = await h6.sendVoiceV2('group:456', path.join(dir6, 'a.wav'), { guard: false, audit: true });
       assert.equal(sent6.messageId, 9001, 'voice.enabled=false 时操作者仍能发（AI 开关不该封死手动路径）');
     } finally { await h6.close(); }
 
@@ -264,25 +264,25 @@ await test('malformed HTTP request targets return 400 without hanging', async (h
     try {
       const dir7 = path.join(h7.temp, 'audio');
       fs.mkdirSync(dir7, { recursive: true });
-      fs.writeFileSync(path.join(dir7, 'a.mp3'), Buffer.alloc(512, 1));
-      const loud = await h7.sendVoiceV2('group:456', path.join(dir7, 'a.mp3'), { guard: false, audit: true, audio: { volume: 2.5 } });
+      fs.writeFileSync(path.join(dir7, 'a.wav'), wavFixture());
+      const loud = await h7.sendVoiceV2('group:456', path.join(dir7, 'a.wav'), { guard: false, audit: true, audio: { volume: 2.5 } });
       assert.equal(loud.volume, 2.5, '音量倍数透传到音频处理');
       assert.equal(loud.audioMode, 'volume', 'mode 标为 volume');
       assert.match(loud.audioProcessing, /250%/, '处理说明含百分比');
-      const normal = await h7.sendVoiceV2('group:456', path.join(dir7, 'a.mp3'), { guard: false, audit: true });
+      const normal = await h7.sendVoiceV2('group:456', path.join(dir7, 'a.wav'), { guard: false, audit: true });
       assert.equal(normal.audioMode, 'original', '不传音量时保持原样（不转码）');
       assert.equal(normal.audioProcessing, '原始音量', '原样时说明为"原始音量"');
-      const smart = await h7.sendVoiceV2('group:456', path.join(dir7, 'a.mp3'), { guard: false, audit: true, audio: { normalize: true, loudness: 'loud' } });
+      const smart = await h7.sendVoiceV2('group:456', path.join(dir7, 'a.wav'), { guard: false, audit: true, audio: { normalize: true, loudness: 'loud' } });
       assert.equal(smart.audioMode, 'loudnorm', '智能音量 mode=loudnorm');
       assert.match(smart.audioProcessing, /-13/, '智能音量按档位给出目标 LUFS');
       // 非法音量必须被拦下（而不是把奇怪的值丢给 ffmpeg）
       await assert.rejects(
-        () => h7.sendVoiceForV2('group:456', 'a.mp3', { verify: false, audio: { volume: 99 } }),
+        () => h7.sendVoiceForV2('group:456', 'a.wav', { verify: false, audio: { volume: 99 } }),
         /0\.1~4/,
         '越界音量被拒'
       );
       await assert.rejects(
-        () => h7.sendVoiceForV2('group:456', 'a.mp3', { verify: false, audio: { normalize: true, loudness: 'nope' } }),
+        () => h7.sendVoiceForV2('group:456', 'a.wav', { verify: false, audio: { normalize: true, loudness: 'nope' } }),
         /未知的响度档位/,
         '未知响度档位被拒'
       );
@@ -307,7 +307,7 @@ await test('malformed HTTP request targets return 400 without hanging', async (h
     const outsideDir = path.join(h.temp, 'outside');
     fs.mkdirSync(libraryDir, { recursive: true });
     fs.mkdirSync(outsideDir, { recursive: true });
-    fs.writeFileSync(path.join(libraryDir, 'inside.mp3'), Buffer.alloc(512, 1));
+    fs.writeFileSync(path.join(libraryDir, 'inside.wav'), wavFixture());
     const outsideFile = path.join(outsideDir, 'secret.mp3');
     fs.writeFileSync(outsideFile, Buffer.alloc(512, 2));
 
@@ -324,7 +324,7 @@ await test('malformed HTTP request targets return 400 without hanging', async (h
       '相对路径穿越必须被拒绝'
     );
     // 库内的绝对路径应当仍然可用（开关的合理用途）
-    const inside = await h.sendVoiceForV2('group:456', path.join(libraryDir, 'inside.mp3'), { readback: false });
+    const inside = await h.sendVoiceForV2('group:456', path.join(libraryDir, 'inside.wav'), { readback: false });
     assert.equal(inside.messageId, 9001, '库内绝对路径仍可发送');
     console.log('PASS voice absolute paths stay confined to the library even when allowAbsolutePath is on');
   } catch (error) { failures++; console.error('FAIL voice library confinement:', error.message); }

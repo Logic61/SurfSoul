@@ -9,6 +9,7 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
+import { CODEX_EFFORTS } from '../lib/qq-codex-effort.js';
 
 const idle = () => {};
 const React = {
@@ -100,6 +101,9 @@ assert.ok(source.includes('把管理员移出黑名单'), '缺少「管理员在
 assert.ok(source.includes('仅拦私聊'), '私聊黑名单没有标明「只在私聊里生效」');
 assert.ok(source.includes('加到「拉黑的人」'), '缺少「只填在私聊黑名单」的一键迁移按钮');
 const qqPaths = client.QQ_FIELDS.flatMap((group) => group.fields.map((field) => field.path.join('.')));
+const codexEffort = client.QQ_FIELDS.flatMap(group => group.fields).find(f => f.path.join('.') === 'dsh.qqCodexEffort');
+assert.equal(codexEffort?.kind, 'select');
+assert.deepEqual(codexEffort.options, CODEX_EFFORTS.map(({id,name}) => [id, name + ' · ' + id]));
 for (const dup of ['deny.private', 'deny.groups', 'deny.users']) {
   assert.ok(!qqPaths.includes(dup), `黑名单应只在卡片里编辑（${dup} 不能被高级参数重复一份）`);
 }

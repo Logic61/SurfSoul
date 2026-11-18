@@ -261,6 +261,10 @@ export function normalizeTriggerRecord(record, { now = Date.now() } = {}) {
     turnActive: record.turnActive === true,
     wakeReason: truncatePlainText(record.wakeReason, 40),
     trigger,
+    ownerRequest: record.ownerRequest?.isOwner === true && record.ownerRequest.messageId && record.ownerRequest.at > 0
+      ? { isOwner: true, userId: messageUserId(record.ownerRequest), messageId: String(record.ownerRequest.messageId).slice(0, 64),
+          at: Number(record.ownerRequest.at), seq: messageSeq(record.ownerRequest), text: truncatePlainText(record.ownerRequest.text, TRIGGER_TEXT_MAX) }
+      : null,
     ownerInBatch: record.ownerInBatch === true,
     recent,
     updatedAt,
@@ -281,6 +285,13 @@ export function normalizeTriggerRecord(record, { now = Date.now() } = {}) {
  * @param {number} [options.now]
  * @param {(text:string)=>string} [options.sanitizeText] 脱敏函数（桥接传 redactSensitiveText）
  */
+export function selectOwnerRequest(messages, sanitize = String) {
+  const owner = (messages || []).filter(m => m?.isOwner === true && !m.isSelf && !m.history && m.kind !== 'poke'
+    && m.messageId && messageTime(m) && messageText(m).trim()).sort((a, b) => messageSeq(b) - messageSeq(a))[0];
+  return owner ? { userId: messageUserId(owner), isOwner: true, messageId: String(owner.messageId),
+    seq: messageSeq(owner), at: messageTime(owner), text: truncatePlainText(sanitize(messageText(owner)), TRIGGER_TEXT_MAX) } : null;
+}
+
 export function buildTriggerRecord({
   key,
   kind = '',
@@ -343,6 +354,7 @@ export function buildTriggerRecord({
     turnActive: false,
     wakeReason: reason,
     trigger,
+    ownerRequest: !nonMessageWake && reason ? selectOwnerRequest(snapshot?.messages, sanitize) : null,
     ownerInBatch,
     recent,
     updatedAt: now,
@@ -464,8 +476,8 @@ export function isOwnerTurnFromRecord(record, {
   if (!owner) return false;
   if (key.startsWith('private:')) return false;
   if (record.turnActive !== true) return false;
-  const trigger = record.trigger;
-  if (!trigger || typeof trigger !== 'object' || trigger.isOwner !== true) return false;
+  const trigger = record.ownerRequest;
+  if (!trigger?.messageId || trigger.isOwner !== true || 'private:' + trigger.userId !== owner) return false;
   const at = Number(trigger.at);
   if (!Number.isFinite(at) || at <= 0) return false;
   const age = now - at;

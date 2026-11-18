@@ -123,7 +123,7 @@ console.log('## 配置项（AI 发语音默认关闭，等语音库准备好再�
   ok(exCfg.socialV2?.tools?.sendVoice === false, 'config.example.json tools.sendVoice=false（出厂默认不给 AI 发语音）');
   ok(exCfg.socialV2?.voice?.enabled === false, 'config.example.json voice.enabled=false（出厂默认总闸关闭）');
   ok(exCfg.socialV2?.voice?.allowAbsolutePath === false, '出厂默认禁止绝对路径（安全默认）');
-  ok(Number(exCfg.socialV2?.voice?.maxPerHour) > 0, '出厂默认带每小时限流');
+  ok(!('maxPerHour' in exCfg.socialV2.voice) && !('maxPerMinute' in exCfg.socialV2.voice), '语音不设独立次数配额');
   try {
     const localCfg = JSON.parse(fs.readFileSync(path.join(ROOT, 'config.json'), 'utf8'));
     console.log(`  ℹ  你本机的值（仅供参考，不参与判定）：tools.sendVoice=${localCfg.socialV2?.tools?.sendVoice} / voice.enabled=${localCfg.socialV2?.voice?.enabled}`);
@@ -154,7 +154,7 @@ console.log('## MCP 工具与 bridge 路由');
   for (const s of [
     '/api/voice/send', '/api/socialV2/send-voice', '/api/socialV2/voices',
     'sendVoiceV2', 'sendVoiceForV2', 'resolveVoicePathForV2', 'resolveVoicePathForOperator',
-    'voiceBudgetCheck', 'assertOutboundAuditOk', 'type: \'record\''
+    'queueQqSend', 'assertOutboundAuditOk', 'type: \'record\''
   ]) {
     ok(bridge.includes(s), `bridge 包含 ${s}`);
   }
@@ -172,7 +172,7 @@ console.log('## 安全边界（AI 通道来源限制）');
   ok(sendRoute.includes('v2SessionAllowed(key)'), '语音发送校验会话白名单');
   ok(sendRoute.includes('agentTokenOk(key, token)'), '语音发送校验 agent token');
   ok(sendRoute.includes('shouldBlockSilentReply(key)'), '语音发送尊重静默模式');
-  ok(sendRoute.includes('voiceBudgetCheck'), '语音发送走语音限流');
+  ok(sendRoute.includes('sendVoiceForV2'), '语音走共用发送队列的语音入口');
 }
 
 console.log('## 独立工具（不依赖桥接；已拆到仓库上一级 voice-tool/）');

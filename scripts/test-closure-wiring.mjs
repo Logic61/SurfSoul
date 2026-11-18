@@ -69,15 +69,21 @@ await test('收尾接口：写结束点、保持唤醒配置、返回冷却，�
   assert.ok(st.lastActionAt >= now);
 });
 
-await test('对方还在提问：收尾接口硬拒绝，状态不变', async (h) => {
+await test('晚到消息要先看；上下文由聊天模型判断', async (h) => {
   h.appendSocialV2Message('private:123', '主人', '你最近在忙什么', '你最近在忙什么', false, true, 'm3');
   const st = h.getSocialV2State('private:123');
   const before = JSON.stringify({ closure: st.closure, unread: st.unread.length });
   assert.throws(
     () => h.closeConversationV2('private:123', {}),
-    (error) => error.statusCode === 409 && error.code === 'open-question' && /先.*回/.test(error.message),
+    (error) => error.statusCode === 409 && error.code === 'unseen-messages',
   );
   assert.equal(JSON.stringify({ closure: st.closure, unread: st.unread.length }), before);
+  st.modelSeenSeqs = new Set(st.unread.map(m=>m.seq));
+  assert.throws(()=>h.closeConversationV2('private:123',{openQuestion:'pending'}),e=>e.code==='open-question');
+  assert.equal(h.closeConversationV2('private:123',{openQuestion:'none'}).ok,true);
+  h.appendSocialV2Message('private:123','主人','等等，去哪见','等等，去哪见',false,true,'m4');
+  assert.throws(()=>h.closeConversationV2('private:123',{openQuestion:'none'}),e=>e.code==='unseen-messages');
+  assert.equal(st.unread.at(-1).messageId,'m4');
 });
 
 await test('收尾不走沉睡前观察；唤醒提示带「上次收在哪」（私聊不给评分表）', async (h) => {
@@ -96,15 +102,15 @@ await test('收尾不走沉睡前观察；唤醒提示带「上次收在哪」�
   // 2026-10-29 起私聊不再注入评分表（避免每轮评估「对面值不值得再聊」），只留连续性提示。
   assert.match(prompt, /【上次收在哪】/);
   assert.match(prompt, /qq_close_conversation/);
-  assert.match(prompt, /不用每轮都判断要不要收/);
+  assert.doesNotMatch(prompt, /静置满|对话收尾判断/);
   assert.match(prompt, /收在这里/);
 
-  // 群聊仍保留完整判断块。
+  // 群里同样只留下结束点。
   seedChat(h, 'group:456');
   h.state.sessions['group:456'] = h.state.sessions['group:456'] || 'fixture-session-group';
   h.closeConversationV2('group:456', { summary: '群里聊完了' });
   const groupPrompt = h.buildWakePromptV2('group:456', 'replyCheck');
-  assert.match(groupPrompt, /【对话收尾判断】先判断这段是否已经自然走到终点/);
+  assert.doesNotMatch(groupPrompt, /【对话收尾判断】|节奏疲劳/);
   assert.match(groupPrompt, /qq_close_conversation/);
   assert.match(groupPrompt, /群里聊完了/);
 });
@@ -130,8 +136,9 @@ await test('对方再开口：私聊重开；群聊普通消息不重开、叫�
   assert.ok(st.closure.reopenedAt > 0);
 
   h.appendSocialV2Message('group:456', '群友', '今天吃啥', '今天吃啥', false, false, 'g1');
-  h.closeConversationV2('group:456', {});
   const gst = h.getSocialV2State('group:456');
+  gst.modelSeenSeqs = new Set(gst.unread.map(m=>m.seq));
+  h.closeConversationV2('group:456', {});
   assert.equal(h.noteClosureReopenV2('group:456', gst, { plain: '今天吃啥', text: '今天吃啥' }), false);
   assert.equal(h.noteClosureReopenV2('group:456', gst, { plain: '弥在吗', text: '弥在吗', directAddress: true }), true);
 });
@@ -199,9 +206,61 @@ await test('换会话后计数归零：新会话从 0 重新数', async (h) => {
   h.retireSession('private:123');
   assert.equal(st.sessionClosures, 0, '退役/换会话应清零计数');
   h.state.sessions['private:123'] = 'fixture-session-new';
+  st.modelSeenSeqs = new Set(st.unread.map(m=>m.seq));
   closeNTimes(h, 'private:123', 1);
   assert.equal(h.sessionRotateTimers.size, 0, '新会话第 1 次收尾不换');
 });
+
+// ── 2026-11-10 主人改口径：会话轮换改成「上下文 220k 一换」────────────────────
+// 规则：本回合结束后看账本里**最近一轮真正带入模型的 input token**，≥ 阈值就挂 5s 后换会话；
+// 与「自然收尾 N 次」独立（live 里把 rotateAfterClosures 调 0 就是纯上下文模式）。
+function seedContextUsage(h, sessionId, contextTokens, { turn = 1, seq = 1 } = {}) {
+  // usage(inputTokens, outputTokens, cacheReadTokens)：input = 未命中 + 命中 = contextTokens。
+  const cacheRead = Math.max(0, contextTokens - 1200);
+  h.tokenLedger.ingestEvent({
+    sessionId,
+    event: {
+      seq,
+      time: Date.now(),
+      type: 'assistant/message',
+      data: { turn, step: 1, usage: { inputTokens: 1200, outputTokens: 80, cacheReadTokens: cacheRead } },
+    },
+  });
+}
+
+await test('没配上下文阈值（默认 0）：上下文再高也不换', async (h) => {
+  seedChat(h);
+  h.state.sessions['private:123'] = 'fixture-session-ctx-off';
+  seedContextUsage(h, 'fixture-session-ctx-off', 500000);
+  assert.equal(h.scheduleSessionRotationByContextV2('private:123'), false);
+  assert.equal(h.sessionRotateTimers.size, 0, '默认关闭时不能自己换会话');
+});
+
+await test('上下文没到阈值：不挂轮换定时器', async (h) => {
+  seedChat(h);
+  h.state.sessions['private:123'] = 'fixture-session-ctx-low';
+  seedContextUsage(h, 'fixture-session-ctx-low', 219999);
+  assert.equal(h.tokenLedger.sessionContextTokens('fixture-session-ctx-low'), 219999, '账本读到的就是 input 桶之和');
+  assert.equal(h.scheduleSessionRotationByContextV2('private:123'), false);
+  assert.equal(h.sessionRotateTimers.size, 0, '差 1 token 也不换');
+}, { config: { socialV2: { closure: { rotateAfterContextTokens: 220000 } } } });
+
+await test('上下文到阈值：5s 后（不忙）归档旧会话、清映射、计数归零', async (h) => {
+  seedChat(h);
+  h.state.sessions['private:123'] = 'fixture-session-ctx-high';
+  seedContextUsage(h, 'fixture-session-ctx-high', 220000);
+  assert.equal(h.scheduleSessionRotationByContextV2('private:123'), true, '到阈值应挂起换会话');
+  assert.equal(h.sessionRotateTimers.size, 1);
+  assert.equal(h.calls.archived.length, 0, '回合内不能立刻退役（会打断正在跑的回合）');
+  // 定时器 5s 后触发；轮询等归档落地，不用固定 sleep 把用例写脆。
+  const deadline = Date.now() + 9000;
+  while (h.calls.archived.length === 0 && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
+  assert.deepEqual(h.calls.archived, ['fixture-session-ctx-high'], '旧 DSH 会话应被归档');
+  assert.equal(h.state.sessions['private:123'], undefined, '映射删除，下一条消息重建新会话');
+  assert.equal(h.getSocialV2State('private:123').sessionClosures, 0, '换会话后自然收尾计数归零');
+}, { config: { socialV2: { closure: { rotateAfterContextTokens: 220000 } } } });
 
 console.log(`\n${failures ? 'FAILED' : 'OK'}（closure wiring）`);
 process.exitCode = failures ? 1 : 0;

@@ -122,7 +122,7 @@ console.log('## qq-bridge 语音系统：路由与开关');
     ok(bridge.includes(route), `路由 ${route}`);
   }
   ok(/v2ToolEnabled\('sendVoice'\)/.test(bridge), 'AI 路由受 tools.sendVoice 开关控制');
-  ok(/voiceBudgetCheck/.test(bridge) && /voiceBudgetCommit/.test(bridge), '语音额度：检查与记账分离');
+  ok(bridge.includes('voiceMs: info.duration * 1000') && !bridge.includes('voiceBudgetCheck('), '语音按实测时长进入共用发送队列');
   ok(/assertOutboundAuditOk/.test(bridge), '语音文件名审计存在');
   ok(/verifyVoiceMessageSent/.test(bridge), '发送后回读校验存在');
   ok(/shouldBlockSilentReply\(key\)/.test(bridge), 'AI 语音尊重静默模式');
@@ -171,8 +171,8 @@ console.log('## qq-bridge 语音系统：控制台与 preset');
   ok(/api\/voice\/list/.test(html) && /api\/voice\/send/.test(html), '面板调用操作者端点');
   const preset = read(path.join('dsh', 'agent-presets', 'qq-chat-v2', 'agent.cordis.yml'));
   ok(preset.includes('qq_send_voice') && preset.includes('qq_list_voices'), 'qq-chat-v2 人设描述语音能力');
-  ok(/语音工具默认关闭/.test(preset) && /能看到 qq_send_voice/.test(preset),
-    '人设说明默认关闭、是否可用以工具面为准');
+  ok(/能用语音时用 qq_send_voice/.test(preset) && /一次回复可以只有其中一种/.test(preset),
+    '人设允许可用语音单独回应');
   // DSH 0.1.7 起守卫的权威实现只有一份，在 surfcore bundle 里
   // （dsh/agent-presets/<preset>/qq-tool-restrict.mjs 只是 re-export 壳）。
   ok(read(path.join('plugins', 'surfcore', 'qq-tool-restrict.mjs')).includes("'mcp__snowluma__'"),

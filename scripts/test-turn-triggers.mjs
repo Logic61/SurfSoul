@@ -223,14 +223,14 @@ test('isOwnerTurnFromRecord：私聊旧语义 / 别人私聊 / 模式 / 新鲜�
   const now = Date.now();
   const base = {
     key: GROUP, kind: 'group', turnActive: true,
-    trigger: { userId: OWNER_QQ, isOwner: true, at: now - 1000 },
+    ownerRequest: { messageId:'m-owner', userId: OWNER_QQ, isOwner: true, at: now - 1000 },
   };
   const opts = { ownerKey: OWNER, mode: 'reserved2', now, windowMs: 600000, expectedKey: GROUP };
   assert.equal(isOwnerTurnFromRecord(base, opts), true);
   assert.equal(isOwnerTurnFromRecord({ ...base, turnActive: false }, opts), false, '回合已结束');
-  assert.equal(isOwnerTurnFromRecord({ ...base, trigger: { ...base.trigger, isOwner: false } }, opts), false, '触发者不是主人');
-  assert.equal(isOwnerTurnFromRecord({ ...base, trigger: { ...base.trigger, at: now - 11 * 60 * 1000 } }, opts), false, '超过授权窗口');
-  assert.equal(isOwnerTurnFromRecord({ ...base, trigger: { ...base.trigger, at: now + 10 * 60 * 1000 } }, opts), false, '未来时间戳不可信');
+  assert.equal(isOwnerTurnFromRecord({ ...base, ownerRequest: { ...base.ownerRequest, isOwner: false } }, opts), false, '触发者不是主人');
+  assert.equal(isOwnerTurnFromRecord({ ...base, ownerRequest: { ...base.ownerRequest, at: now - 11 * 60 * 1000 } }, opts), false, '超过授权窗口');
+  assert.equal(isOwnerTurnFromRecord({ ...base, ownerRequest: { ...base.ownerRequest, at: now + 10 * 60 * 1000 } }, opts), false, '未来时间戳不可信');
   assert.equal(isOwnerTurnFromRecord(base, { ...opts, mode: 'chat' }), false, '只在 reserved2 生效');
   assert.equal(isOwnerTurnFromRecord(base, { ...opts, expectedKey: 'group:999' }), false, 'key 必须匹配');
   assert.equal(isOwnerTurnFromRecord(base, { ...opts, ownerKey: '' }), false, '未配 ownerQQ → 不放行');
@@ -290,7 +290,9 @@ test('非 owner 触发：文件写 isOwner=false，端点拒绝；ownerInBatch �
     assert.equal(record.trigger.isOwner, false);
     assert.equal(record.trigger.userId, '111', '最新一条是群友 → 触发者是群友');
     assert.equal(record.ownerInBatch, true, '批次里出现过 owner（诊断用，不作为授权）');
-    assert.equal(h.ownerTurnAllowed(GROUP), false, '群友触发的回合不能授权');
+    assert.equal(record.ownerRequest.messageId, 'm-owner');
+    assert.equal(record.ownerRequest.text, '之前说过话');
+    assert.equal(h.ownerTurnAllowed(GROUP), true, '仅允许以原消息进入逐次审批');
     // 别人私聊即使有记录也不能授权
     assert.equal(h.ownerTurnAllowed('private:999'), false);
   } finally { await h.close(); }
@@ -344,7 +346,7 @@ test('唤醒提示：owner 回合 / 非 owner / 定时唤醒三种文案与实�
     h.appendSocialV2Message(GROUP, '群友', '随便聊聊', '随便聊聊', false, false, 'm1', [], '111', []);
     assert.match(h.buildWakePromptV2(GROUP, 'question'), /【本回合授权】这一轮不是你主人触发的/);
     h.appendSocialV2Message(GROUP, '管理员', '帮我看下', '帮我看下', false, true, 'm2', [], OWNER_QQ, []);
-    assert.match(h.buildWakePromptV2(GROUP, 'question'), /【本回合授权】这一轮是主人本人（.+?）的消息触发的/, 'owner 触发的唤醒要明确说可用');
+    assert.match(h.buildWakePromptV2(GROUP, 'question'), /【本回合授权】主人本人（.+?）的消息 m2 是本轮授权来源/, 'owner 触发的唤醒要明确说可用');
     // 主人私聊：旧语义
     assert.match(h.buildWakePromptV2(OWNER, 'question'), /【本回合授权】这是主人私聊/);
     // 非 reserved2 不注入
@@ -370,7 +372,7 @@ test('端到端：handleIncoming 群主人消息触发唤醒并写归因文件�
     h.alignTurnTriggerStart(sid, GROUP);
     assert.equal(h.ownerTurnAllowed(GROUP), true, '真实进线链路也要能授权');
     const delivered = promptTexts(h)[0];
-    assert.match(delivered, /【本回合授权】这一轮是主人本人/, '投递出去的 prompt 要带授权行');
+    assert.match(delivered, /【本回合授权】主人本人/, '投递出去的 prompt 要带授权行');
 
     // 会话退役（/reset、控制台重置、权限变化都走这里）→ 归因文件同步清空
     h.retireSession(GROUP);

@@ -646,6 +646,49 @@ export function createTokenLedger({
   }
 
   /**
+   * 某条会话最近一次**真正带入模型的上下文**大小（input token = cacheMiss + cacheHit + cacheWrite）。
+   *
+   * 为什么不用累计量：会话累计把每轮重发的历史都叠加一次，一条正常长会话两轮就能到几百万
+   * （见 PITFALLS 里会话滚动的教训）——拿它当阈值会变成"每轮都换"。换会话要的是
+   * 「模型这一轮到底看到了多少历史」，只看最近一条 assistant 采样。
+   *
+   * 这里直接扫 `samples`（上限 maxLines 条），调用点是「回合结束/换会话判断」，不是热路径；
+   * 刻意不维护 per-session 索引：那要多出「载入 / 实时摄入 / 淘汰 / 压缩 / 重置」五处同步，
+   * 漏一处就是静默读到 0（会话永远不滚）。读不到采样时返回 0，由调用方决定不触发。
+   *
+   * @param {string} sessionId
+   * @returns {number} input token 数；0 = 没有采样 / 会话不存在
+   */
+  function sessionContextTokens(sessionId) {
+    const sid = String(sessionId ?? '');
+    if (!sid) return 0;
+    let latest = null;
+    // 同一会话可能有多条采样（同一轮多步、重试）：按 (seq, t, turn, step, retry) 取最新。
+    const rank = (s) => [
+      Number.isFinite(Number(s.seq)) && Number(s.seq) >= 0 ? Number(s.seq) : -1,
+      Number(s.t) || 0,
+      Number(s.turn) || 0,
+      Number(s.step) || 0,
+      Number(s.retry) || 0
+    ];
+    for (const sample of samples.values()) {
+      if (sample.sessionId !== sid) continue;
+      if (!latest) { latest = sample; continue; }
+      const a = rank(sample);
+      const b = rank(latest);
+      for (let i = 0; i < a.length; i += 1) {
+        if (a[i] > b[i]) { latest = sample; break; }
+        if (a[i] < b[i]) break;
+      }
+    }
+    if (!latest) return 0;
+    const b = latest.buckets || {};
+    return Math.max(0, Number(b.cacheMiss) || 0)
+      + Math.max(0, Number(b.cacheHit) || 0)
+      + Math.max(0, Number(b.cacheWrite) || 0);
+  }
+
+  /**
    * 当天（自然日）按类别汇总的用量：QQ 会话 / 其他（黑话学习等）。
    *
    * 用途：设置页的「今日额度」和 QQ 桥接的兜底闸门。权威的当日用量由插件用
@@ -991,6 +1034,7 @@ export function createTokenLedger({
     stats,
     reset,
     compact,
+    sessionContextTokens,
     hasSession: (sid) => baselines.has(sid) || sessionSeen.has(sid),
     file
   };

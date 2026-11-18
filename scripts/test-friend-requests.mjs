@@ -1,3 +1,4 @@
+import { qqActionKey } from '../plugins/surfcore/lib/qq-action-key.js';
 // 好友申请（2026-11-06）回归：纯函数层 + 真实 bridge.js 接线（VM 夹具网关，绝不连真 QQ）。
 //
 // 背景：SnowLuma 只把「有人申请加好友」作为 request 事件推一次，QQ 侧没有「列出普通待处理
@@ -137,6 +138,12 @@ function onebotBodies(h, action) {
  * 造一个「主人本人触发的回合」（2026-11-06 场景放宽）：入站消息 → 投递（写归因）→
  * turn/start 对齐。与真实链路同一批函数（handleIncoming 只是多 8 秒批量窗，本测试不需要等）。
  */
+function approveGroupAction(h, tool, args = {}) {
+  const sid = h.state.sessions[GROUP];
+  const source = h.activeTurnTriggers.get(sid).ownerRequest;
+  assert.ok(h.approveAction(sid, source.messageId, qqActionKey(tool, {key: GROUP, ...args})));
+}
+
 async function startTurn(h, key, { owner = true, text = '处理一下好友申请' } = {}) {
   const userId = owner ? OWNER_QQ : '111';
   h.appendSocialV2Message(key, owner ? '管理员' : '群友', text, text, false, owner, `m-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, [], userId, []);
@@ -374,9 +381,14 @@ test('GET 权限：群会话 / 错误令牌 / 工具关闭 / 非 reserved2 一�
 
     // 2026-11-06 场景放宽：主人本人触发的回合里，群会话也能查看（账号级信息仍受工具开关/回合限制）
     await startTurn(h, GROUP);
+    approveGroupAction(h, 'qq_list_friend_requests');
     const groupOwnerTurn = await get(port, `friend-requests?key=${encodeURIComponent(GROUP)}`, { token: groupSt.agentToken });
     assert.equal(groupOwnerTurn.status, 200, groupOwnerTurn.raw);
     assert.equal(groupOwnerTurn.data.counts.request, 1);
+    for (const item of groupOwnerTurn.data.pending) {
+      assert.deepEqual(Object.keys(item).sort(), ['flag', 'kind']);
+      assert.notEqual(item.flag, FRIEND_EVENT.flag);
+    }
 
     // 非主人触发的回合：仍然拒绝（新回合覆盖上一回合归因）
     await h.alignTurnTriggerEnd(h.state.sessions[GROUP], GROUP);
@@ -527,7 +539,13 @@ test('POST 权限：仅主人私聊 + 参数校验；不再要求主人先开口
     // 2026-11-06 场景放宽：主人本人触发的回合里，群会话也能处理（账号级动作仍受开关/上限/flag 校验）
     h.emitRequest({ ...FRIEND_EVENT, flag: 'u_group_turn' });
     await startTurn(h, GROUP);
-    const groupTurn = await post(port, 'handle-friend-request', { key: GROUP, kind: 'request', flag: 'u_group_turn', approve: true }, { token: groupSt.agentToken });
+    approveGroupAction(h, 'qq_list_friend_requests');
+    const list = await get(port, `friend-requests?key=${encodeURIComponent(GROUP)}`, {token:groupSt.agentToken});
+    assert.equal(list.status, 200, list.raw);
+    const flag = list.data.pending.find(item => item.kind === 'request').flag;
+    const args = { key:GROUP, kind:'request', flag, approve:true };
+    approveGroupAction(h, 'qq_handle_friend_request', args);
+    const groupTurn = await post(port, 'handle-friend-request', args, { token:groupSt.agentToken });
     assert.equal(groupTurn.status, 200, groupTurn.raw);
     assert.deepEqual(onebotBodies(h, 'set_friend_add_request').at(-1), { flag: 'u_group_turn', approve: true });
   } finally {
@@ -702,11 +720,11 @@ test('静态接线：MCP 工具、桥接端点/默认开关、控制台开关、
   assert.equal(example.socialV2.friendRequests?.wakeOnRequest, true, '示例配置要含 friendRequests 行为配置（主动唤醒）');
 
   const preset = read('dsh/agent-presets/qq-chat-v2/agent.cordis.yml');
-  assert.match(preset, /qq_list_friend_requests/, '仿真预设要告诉模型有列表工具');
-  assert.match(preset, /qq_handle_friend_request/, '仿真预设要告诉模型有处理工具');
-  assert.match(preset, /【好友申请/, '仿真预设要有好友申请工具协议条目');
-  assert.match(preset, /主人本人触发的回合/, '仿真预设要写明放宽后的授权口径（主人本人触发的回合）');
-  assert.match(preset, /你可以自己判断/, '仿真预设要写明权限放开、模型自己判断');
+  assert.match(mcp, /'qq_list_friend_requests'/);
+  assert.match(mcp, /'qq_handle_friend_request'/);
+  assert.match(preset, /从群里查账号事务，只在群里说可公开的结论/);
+  assert.match(preset, /主人本人触发的回合/);
+  assert.match(bridge, /你可以自己判断要不要同意/);
 
   const rules = read('RULES.md');
   assert.ok(rules.includes('qq_handle_friend_request'), 'RULES.md 要写清好友申请的能力与硬边界');

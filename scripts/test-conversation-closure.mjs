@@ -15,6 +15,7 @@ import {
   closureStatus,
   reopenClosure,
   shouldRotateSessionAfterClosure,
+  shouldRotateSessionByContext,
 } from '../src/conversation-closure.js';
 
 let passed = 0;
@@ -84,7 +85,7 @@ test('用户原场景：对方收束 + 我回「嗯嗯」→ 可以收尾', () =
   assert.ok(a.score >= 0.62);
 });
 
-test('对方明确在提问、我还没答 → 不收尾，且 closeGate 硬拦', () => {
+test('控制台保留问句指标；执行依据模型结合前文的选择', () => {
   const a = assessConversationClosure({
     kind: 'private',
     messages: [
@@ -96,7 +97,9 @@ test('对方明确在提问、我还没答 → 不收尾，且 closeGate 硬拦'
   assert.equal(a.verdict, 'continue');
   assert.equal(a.signals.awaitingTheirAnswer, true);
   assert.equal(a.signals.openLoops, 1);
-  const gate = closeGate(a, {});
+  assert.equal(closeGate({openQuestion:'none'}).blocked,false);
+  assert.equal(closeGate({unseen:true,openQuestion:'none'}).reason,'unseen-messages');
+  const gate = closeGate({openQuestion:'pending'});
   assert.equal(gate.blocked, true);
   assert.equal(gate.reason, 'open-question');
 });
@@ -191,19 +194,11 @@ test('收尾记录：落盘/归一化/格式化/状态摘要', () => {
   assert.equal(reopened.reopenedAt, now + 60 * 1000);
 });
 
-test('提示词块：含判断参数与收尾/潜水边界；没有对话时不注入', () => {
-  const a = assessConversationClosure({
-    kind: 'private',
-    messages: [msg('那咱们扯平啦', { minutesAgo: 2 }), msg('嗯嗯', { self: true, minutesAgo: 1 })],
-    now,
-  });
-  const block = closurePromptBlock(a, { now, config: {} });
-  assert.match(block, /【对话收尾判断】/);
-  assert.match(block, /qq_close_conversation/);
-  assert.match(block, /不用沉睡前观察/);
-  assert.match(block, /不要用收尾逃避提问/);
-  const empty = assessConversationClosure({ kind: 'private', messages: [], now });
-  assert.equal(closurePromptBlock(empty, { now, config: {} }), '');
+test('收尾连续性只给上次结束点，无记录不额外提示', () => {
+  assert.equal(closurePromptBlock(), '');
+  const block=closurePromptBlock({record:{at:now,summary:'约好九点'},now});
+  assert.match(block,/上次收在哪.*约好九点/);
+  assert.doesNotMatch(block,/意愿|判断参数|评分/);
 });
 
 test('关掉开关：不注入、不收尾、不冷却', () => {
@@ -213,7 +208,7 @@ test('关掉开关：不注入、不收尾、不冷却', () => {
     now,
     config: { enabled: false },
   });
-  assert.equal(closurePromptBlock(a, { now, config: { enabled: false } }), '');
+  assert.equal(closurePromptBlock({record:{at:now}, now, config:{enabled:false}}), '');
   assert.equal(closeGate(a, { enabled: false }).blocked, true);
   const rec = makeClosureRecord({ key: 'private:1', kind: 'private', assessment: a, now, config: { enabled: false } });
   assert.equal(closureSuppressesWake(rec, 'probability', now), true, '显式关闭不会自动取消已写入的冷却；由 bridge 决定是否写记录');
@@ -255,6 +250,29 @@ test('会话轮换静置窗口：默认 5 分钟；0=不等；坏值收敛', () 
   // 静置窗口不影响「是否该轮换」的纯判断（bridge 里在 tick 时再按 lastIncomingAt 顺延）
   assert.equal(shouldRotateSessionAfterClosure(5, { rotateIdleMs: 300000 }), true);
   assert.equal(shouldRotateSessionAfterClosure(4, { rotateIdleMs: 300000 }), false);
+});
+
+// 2026-11-10 主人改口径：不再只数自然收尾次数，改成「上下文大小到 220k 就换」。
+// 判据是**当前这一轮真正带入模型的 input token**，不是会话累计计费量（那会每轮重发都叠加）。
+test('上下文滚动：默认关闭；220k 可配；只看当前上下文，坏值不触发', () => {
+  assert.equal(DEFAULT_CLOSURE_CONFIG.rotateAfterContextTokens, 0, '默认关闭，保持旧行为');
+  assert.equal(normalizeClosureConfig({}).rotateAfterContextTokens, 0);
+  assert.equal(normalizeClosureConfig({ rotateAfterContextTokens: 220000 }).rotateAfterContextTokens, 220000);
+  // 坏值收敛：负数 → 0（关闭）；超上限 → 2M，绝不因为配错就把会话按 0 阈值每轮拆
+  assert.equal(normalizeClosureConfig({ rotateAfterContextTokens: -1 }).rotateAfterContextTokens, 0);
+  assert.equal(normalizeClosureConfig({ rotateAfterContextTokens: 9_999_999 }).rotateAfterContextTokens, 2_000_000);
+
+  assert.equal(shouldRotateSessionByContext(219_999, { rotateAfterContextTokens: 220000 }), false, '差 1 token 也不换');
+  assert.equal(shouldRotateSessionByContext(220_000, { rotateAfterContextTokens: 220000 }), true, '正好 220k 就换');
+  assert.equal(shouldRotateSessionByContext(300_000, { rotateAfterContextTokens: 220000 }), true);
+  // 没配阈值 = 不触发；读不到/坏值也不触发（宁可晚换，绝不因为读不到配置拆会话）
+  assert.equal(shouldRotateSessionByContext(999_999, {}), false);
+  assert.equal(shouldRotateSessionByContext(999_999, { rotateAfterContextTokens: 0 }), false);
+  assert.equal(shouldRotateSessionByContext(undefined, { rotateAfterContextTokens: 220000 }), false);
+  assert.equal(shouldRotateSessionByContext('x', { rotateAfterContextTokens: 220000 }), false);
+  // 两个触发互相独立：收尾阈值调成 0 不影响上下文阈值。
+  assert.equal(shouldRotateSessionAfterClosure(0, { rotateAfterContextTokens: 220000 }), false);
+  assert.equal(shouldRotateSessionByContext(220_000, { rotateAfterClosures: 0, rotateAfterContextTokens: 220000 }), true);
 });
 
 console.log(`\n${process.exitCode ? 'FAILED' : 'OK'}（conversation-closure ${passed} 组）`);

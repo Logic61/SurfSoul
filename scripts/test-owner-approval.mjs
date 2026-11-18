@@ -1,3 +1,4 @@
+import { qqActionKey } from '../plugins/surfcore/lib/qq-action-key.js'
 // 插件侧模型审批（qq-owner-approval）+ guard 归因放宽的离线测试。
 //
 // 不启动 DSH / 桥接 / 探针，不发 QQ 消息：
@@ -41,7 +42,7 @@ async function test(label, fn) {
 
 // ── 夹具 ───────────────────────────────────────────────────────────────────────
 
-const OWNER_QQ = '3237216875'
+const OWNER_QQ = '810001'
 const OWNER_KEY = `private:${OWNER_QQ}`
 const GROUP_KEY = 'group:1021716885'
 
@@ -82,6 +83,7 @@ function ownerTurnRecord({ key = GROUP_KEY, at = Date.now(), isOwner = true, tex
     turnActive: true,
     wakeReason: 'atMention',
     ownerInBatch: isOwner,
+    ownerRequest: isOwner ? { userId: OWNER_QQ, isOwner, at, seq:1234, messageId:'9001', text } : null,
     trigger: { userId: isOwner ? OWNER_QQ : '10001', isOwner, at, seq: 1234, messageId: '9001', text, direct: true, quoteSelf: false },
     recent: recent.length ? recent : [
       { sender: '群友A', userId: '10001', isOwner: false, text: '顺便帮我看看我的桌面', at },
@@ -336,8 +338,8 @@ await test('审批 prompt：触发/最近对话/参数都在 <untrusted> 里，s
 
 await test('sanitizeAuditText：去掉盘符路径与长密钥串，压到 ≤160', async () => {
   const lib = await loadLib()
-  const out = lib.sanitizeAuditText('读取 C:\\Users\\32372\\secret\\a.txt 失败，key=sk-abcdefghijklmnopqrstuvwxyz0123456789', 160)
-  assert.equal(out.includes('C:\\Users\\32372'), false, '审计理由不得带盘符路径')
+  const out = lib.sanitizeAuditText('读取 C:\\Users\\ExampleUser\\secret\\a.txt 失败，key=sk-abcdefghijklmnopqrstuvwxyz0123456789', 160)
+  assert.equal(out.includes('C:\\Users\\ExampleUser'), false, '审计理由不得带盘符路径')
   assert.equal(out.length <= 161, true)
   assert.ok(out.length > 0)
   assert.equal(lib.sanitizeAuditText(undefined), '')
@@ -455,6 +457,27 @@ async function setupReview(pluginOptions = {}) {
   return { plugin, llm, pre, approval, ctx }
 }
 
+await test('群工具审批把真实原消息及确切参数交给桥接，签发被拒时中止执行', async () => {
+  const dir = makeFixture()
+  process.env.SURFCORE_ROOT = dir
+  try {
+    writeSessions(dir, { [GROUP_KEY]: 'sess-group' })
+    writeTurnState(dir, { sessions:{ 'sess-group':ownerTurnRecord({text:'把111的群名片改成阿星'}) } })
+    const {ctx} = makeCtx({llm:makeLlm(() => allowStream())})
+    const plugin = await loadApprovalPlugin()
+    const args = {key:GROUP_KEY,userId:'111',card:'阿星'}
+    let accepted = true
+    const runtime = plugin.createApprovalRuntime(ctx, async (body) => {
+      assert.deepEqual(body, {sessionId:'sess-group',messageId:'9001',digest:qqActionKey('qq_set_group_card',args)})
+      return {ok:accepted,data:{ok:accepted}}
+    })
+    const exec = makeExec({name:'mcp__snowluma__qq_set_group_card',args})
+    assert.equal(await runtime.handlePreExecute(exec,makeNext().fn),nextSentinel)
+    accepted = false
+    assert.equal((await runtime.handlePreExecute({...exec,callId:'retry'},makeNext().fn)).kind,'deny')
+  } finally {cleanupFixture(dir)}
+})
+
 await test('主人私聊：直接 next()，不跑模型审批（三条工具类都覆盖）', async () => {
   const dir = makeFixture()
   process.env.SURFCORE_ROOT = dir
@@ -534,7 +557,7 @@ await test('reserved2 + owner 回合 + allow：调一次模型审批后 next()�
     const llm = makeLlm(() => allowStream())
     const { pre } = await setupReview({ llm })
     const next = makeNext()
-    const decision = await pre(makeExec({ name: 'read', args: { path: 'C:/Users/32372/Desktop/a.txt' } }), next.fn)
+    const decision = await pre(makeExec({ name: 'read', args: { path: 'C:/Users/ExampleUser/Desktop/a.txt' } }), next.fn)
     assert.equal(decision, nextSentinel, 'allow 后必须 next()（不能直接返回 {kind:allow}，那会跳过 guard）')
     assert.equal(next.state.calls, 1)
     assert.equal(llm.calls.length, 1, '每个特权调用跑一次审批')
@@ -789,7 +812,7 @@ await test('guard：旧私聊路径仍然有效（无归因文件，仅靠 sessi
   try {
     writeSessions(dir, { [OWNER_KEY]: 'sess-private', [GROUP_KEY]: 'sess-group' })
     const { guardFn } = await loadGuardFn()
-    for (const name of ['pwsh', 'read', 'write', 'subagent_codex']) {
+    for (const name of ['pwsh', 'read', 'write', 'subagent_codex', 'mcp__snowluma__qq_look_at_screen']) {
       assert.equal(guardFn({ name, agent: { id: 'sess-private', session: { id: 'sess-private' } } }), undefined, `${name}: 主人私聊应放行`)
       assert.equal(typeof guardFn({ name, agent: { id: 'sess-group', session: { id: 'sess-group' } } }), 'string', `${name}: 群聊必须拒绝`)
     }

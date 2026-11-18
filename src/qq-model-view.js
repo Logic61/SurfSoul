@@ -45,6 +45,8 @@ export function compactModelMessage(message) {
   const result = { ...message };
   // No trimming or truncation: differing plain text can contain resolved quote
   // context, and tail can carry the end of a long message absent from text.
+  // Older stored poke notices used the quote flag for their recipient.
+  if (result.kind === 'poke' && result.poke) delete result.quoteTargetIsSelf;
   const seenText = new Set();
   for (const key of ['text', 'plain', 'tail']) {
     if (typeof result[key] !== 'string') continue;

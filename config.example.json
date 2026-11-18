@@ -1,5 +1,8 @@
 {
   "dsh": {
+    "qqEngine": "deepseek",
+    "qqCodexModel": "gpt-6.1-sol",
+    "qqCodexEffort": "low",
     "baseUrl": "http://127.0.0.1:3080",
     "provider": "deepseek-official",
     "model": "deepseek-flash",
@@ -252,6 +255,7 @@
       "setGroupCard": true,
       "setGroupBan": true,
       "friendRequests": true,
+      "recallMessage": true,
       "setStickerRemark": false,
       "stickerNote": true,
       "collectSticker": true,
@@ -311,7 +315,8 @@
       "maxSummaryChars": 160,
       "maxNextOpeningChars": 120,
       "rotateAfterClosures": 5,
-      "rotateIdleMs": 300000
+      "rotateIdleMs": 300000,
+      "rotateAfterContextTokens": 0
     },
     "send": {
       "burstEnabled": true,
@@ -367,8 +372,6 @@
       "dir": "audio",
       "maxSeconds": 300,
       "maxBytes": 20971520,
-      "maxPerMinute": 2,
-      "maxPerHour": 10,
       "allowAbsolutePath": false,
       "defaultVolume": 1,
       "loudness": "normal",
@@ -457,6 +460,11 @@
       "wakeOnRequest": true,
       "wakeMinIntervalMs": 300000
     },
+    "messageRecall": {
+      "enabled": true,
+      "windowMs": 120000,
+      "maxPerHour": 30
+    },
     "scenes": {
       "defaultPrivate": {
         "label": "私聊",
@@ -526,6 +534,7 @@
     "retryMs": 900000,
     "maxAttempts": 3,
     "maxCandidates": 6,
+    "pendingTtlDays": 14,
     "promptMaxChars": 16000,
     "carrier": "qq",
     "petModality": "text",
@@ -555,7 +564,21 @@
       "softBand": 0,
       "maxLeakPerDay": 1,
       "leakCooldownMin": 90,
-      "lotterySnoozeMin": 15
+      "lotterySnoozeMin": 15,
+      "interruptTrigger": "departure",
+      "targetPerDay": 6,
+      "triggerMinGapMin": 20
+    }
+  },
+  "lifeSettings": {
+    "enabled": true,
+    "maxWritesPerHour": 12,
+    "dailyReview": {
+      "enabled": true,
+      "time": "08:00",
+      "maxChanges": 2,
+      "notifyOwner": true,
+      "graceHours": 3
     }
   },
   "greetings": {

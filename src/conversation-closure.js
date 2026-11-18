@@ -41,6 +41,12 @@ export const DEFAULT_CLOSURE_CONFIG = Object.freeze({
   // 每次新会话都要重发很长的 bootstrap（环境说明 + 记忆卡注入），token 成本高、上下文还断。
   // 默认 5 分钟；0 = 不等（回合结束即换，旧行为）。
   rotateIdleMs: 5 * 60 * 1000,
+  // 上下文滚动（2026-11-10 主人要求「改成上下文大小，220k 一换」）：
+  // 当前会话最近一轮**真正带入模型**的上下文 ≥ 该 token 数时，在这一回合结束后换新会话，
+  // 不再让之后每一轮都重发几百 k 的历史（DSH 自动压缩阈值高达 727k，等它压缩黄花菜都凉了）。
+  // 与「自然收尾 N 次」是两个独立触发，谁先到算谁；0 = 关闭（默认，保持旧行为）。
+  // 口径是「当前上下文」不是「会话累计计费量」——累计量每轮都叠加，几轮就能到几百万。
+  rotateAfterContextTokens: 0,
 });
 
 const BOOL = (v, fallback) => (typeof v === 'boolean' ? v : fallback);
@@ -64,6 +70,7 @@ export function normalizeClosureConfig(raw = {}) {
     promptInWake: BOOL(src.promptInWake, DEFAULT_CLOSURE_CONFIG.promptInWake),
     rotateAfterClosures: NUM(src.rotateAfterClosures, DEFAULT_CLOSURE_CONFIG.rotateAfterClosures, 0, 100),
     rotateIdleMs: NUM(src.rotateIdleMs, DEFAULT_CLOSURE_CONFIG.rotateIdleMs, 0, 60 * 60 * 1000),
+    rotateAfterContextTokens: NUM(src.rotateAfterContextTokens, DEFAULT_CLOSURE_CONFIG.rotateAfterContextTokens, 0, 2_000_000),
   };
 }
 
@@ -85,6 +92,28 @@ export function shouldRotateSessionAfterClosure(closureCount, config = {}) {
   const minClosures = normalizeClosureConfig(config).rotateAfterClosures;
   if (!minClosures) return false;
   return (Number(closureCount) || 0) >= minClosures;
+}
+
+/**
+ * 上下文滚动：当前会话最近一轮真实带入的上下文 ≥ `rotateAfterContextTokens` 时是否该换会话。
+ *
+ * 和 `shouldRotateSessionAfterClosure` 的区别：
+ * - 收尾次数看「聊完了几段对话」，上下文看「这一轮模型真正看到了多少 token」——
+ *   一段超长的对话可能一次都不收尾，但每轮都在为 20 万、30 万的历史付费；
+ *   这时按上下文换会话比按收尾次数更直接。
+ * - 传进来的必须是**当前上下文**（最近一条 assistant usage 的 input 桶之和），
+ *   不是会话累计计费量；累计量每轮重发都叠加，正常长会话几轮就几百万，阈值会变成"每轮都换"。
+ *
+ * 0 / 坏值一律不触发（宁可晚换，也不要因为读不到配置把会话拆了）。
+ *
+ * @param {number} contextTokens - 最近一轮带入模型的 input token 数
+ * @param {object} [config] - socialV2.closure 配置
+ * @returns {boolean}
+ */
+export function shouldRotateSessionByContext(contextTokens, config = {}) {
+  const threshold = normalizeClosureConfig(config).rotateAfterContextTokens;
+  if (!threshold) return false;
+  return Math.max(0, Math.round(Number(contextTokens) || 0)) >= threshold;
 }
 
 // ── 消息分类 ────────────────────────────────────────────────────────────────
@@ -380,18 +409,6 @@ export function assessConversationClosure(input = {}) {
 
 // ── 提示词块 ────────────────────────────────────────────────────────────────
 
-const VERDICT_ADVICE = {
-  close: '可以自然收尾',
-  linger: '先等一等，别急着补话',
-  continue: '还在聊，正常接',
-};
-
-function level(n, low, high) {
-  if (n >= high) return '高';
-  if (n >= low) return '中';
-  return '低';
-}
-
 function minutesAgo(ms) {
   if (ms == null) return '';
   const min = Math.max(0, Math.round(ms / 60000));
@@ -414,7 +431,7 @@ export function formatClosureRecord(record, now = Date.now()) {
   }[record.reason] ?? '自然收尾';
   const parts = [`上次这段在${when}${reasonText}`];
   if (record.summary) parts.push(`收在「${record.summary}」`);
-  if (record.nextOpening) parts.push(`下次可以这样接「${record.nextOpening}」`);
+  if (record.nextOpening && record.kind !== 'group') parts.push(`下次可以这样接「${record.nextOpening}」`);
   return parts.join('；') + '。';
 }
 
@@ -422,43 +439,10 @@ export function formatClosureRecord(record, now = Date.now()) {
  * 每次唤醒注入的判断块。只给「参数 + 建议」，不替模型做决定。
  * 有近期对话才注入；没有对话时返回空串，避免每轮白烧 token。
  */
-export function closurePromptBlock(assessment, { record = null, now = Date.now(), config = {}, platform = 'group' } = {}) {
+export function closurePromptBlock({ record, now = Date.now(), config = {} } = {}) {
   const cfg = normalizeClosureConfig(config);
-  if (!cfg.enabled || !cfg.promptInWake) return '';
-  // 私聊不做「该不该收尾」的评分。一对一的对话里塞一张「我的继续意愿 / 对方的继续意愿 /
-  // 话题闭环 / 节奏疲劳」的表，等于让她每轮都在评估对面这个人值不值得再聊 —— 2026-10-29
-  // 羽反馈的「说话很疏离」主要就来自这里。私聊只保留「上次收在哪」这条连续性，加上一句
-  // 「不用每轮判断要不要收」。
-  if (platform === 'private') {
-    const lines = [];
-    if (record && record.at) {
-      const recent = record.reopenedAt && now - Number(record.reopenedAt) < 10 * 60 * 1000;
-      lines.push(recent
-        ? `上次这段刚收过尾，现在他又开口了：这是新的开始，别复读上次的结尾。${formatClosureRecord(record, now)}`
-        : `【上次收在哪】${formatClosureRecord(record, now)}`);
-    }
-    lines.push('聊到自然收住就不用再补一句，直接 qq_close_conversation 记一笔；不用每轮都判断要不要收。');
-    return lines.join('\n');
-  }
-  if (!assessment || (!assessment.signals?.lastOtherKind && !assessment.signals?.lastSelfKind)) return '';
-  const s = assessment.signals;
-  const lastOther = s.lastOtherKind ? labelOf(s.lastOtherKind) : '暂无';
-  const lastSelf = s.lastSelfKind ? labelOf(s.lastSelfKind) : '暂无';
-  const lines = [];
-  lines.push('【对话收尾判断】先判断这段是否已经自然走到终点，再决定要不要开口。');
-  lines.push(`- 对方最后一句：${lastOther}；我最后一句：${lastSelf}。`);
-  lines.push(`- 我的继续意愿：${level(s.ownIntent, 0.25, 0.6)}（想说没说的 ${s.thoughtCount} 条）；对方的继续意愿：${level(s.theirIntent, 0.25, 0.6)}；话题闭环：${level(s.topicClosure, 0.4, 0.75)}；节奏疲劳：${level(s.fatigue, 0.25, 0.55)}。`);
-  const openText = s.openLoops > 0 ? '有未答的提问/请求' : '没有未答的提问';
-  lines.push(`- 未完成：${openText}。判断：${VERDICT_ADVICE[assessment.verdict] ?? '继续观察'}。`);
-  lines.push('如果判断可以收尾：不要再补一句，调用 qq_close_conversation（可留 summary / nextOpening）。这不是潜水，不用沉睡前观察；对方再找你、开新话题仍会照常醒。如果还要聊就正常回；只是等对方补充，用 qq_wait_for_messages(purpose="reply")。不要用收尾逃避提问/求助，也不要每轮都收尾。');
-  if (record && record.at) {
-    if (record.reopenedAt && now - Number(record.reopenedAt) < 10 * 60 * 1000) {
-      lines.push(`上次这段刚收过尾，现在对方又开口了：这是新的开始，别复读上次的结尾。${formatClosureRecord(record, now)}`);
-    } else {
-      lines.push(formatClosureRecord(record, now));
-    }
-  }
-  return lines.join('\n');
+  if (!cfg.enabled || !cfg.promptInWake || !record?.at) return '';
+  return '【上次收在哪】' + formatClosureRecord(record, now);
 }
 
 /** 控制台 / 状态接口用的摘要（时间、原因、摘要、下次接法、是否在冷却）。 */
@@ -515,6 +499,7 @@ export function normalizeClosureRecord(raw, config = {}) {
   const cfg = normalizeClosureConfig(config);
   return {
     at: Math.round(at),
+    ...(Number.isSafeInteger(raw.afterSeq) && raw.afterSeq >= 0 ? { afterSeq: raw.afterSeq } : {}),
     key: String(raw.key ?? ''),
     kind: raw.kind === 'private' ? 'private' : 'group',
     reason: ['natural', 'topic-done', 'explicit-end', 'busy', 'tired', 'other'].includes(raw.reason) ? raw.reason : 'natural',
@@ -552,19 +537,16 @@ export function reopenClosure(record, { reason = 'new-message', now = Date.now()
   return { ...record, reopenedAt: now, reopenReason: truncateChars(reason, 40) };
 }
 
-/**
- * 收尾前的人性化硬闸：对方明确在提问/求助、且我还没接时，不接受「结束」。
- * 这不是不信任模型，而是把「不想回」和「逃避」分开：前者可以收尾，后者必须先答。
- */
-export function closeGate(assessment, config = {}) {
+/** 新消息必须先展示；是否还有问题在等答复由当前聊天模型判断。 */
+export function closeGate({ unseen = false, openQuestion } = {}, config = {}) {
   const cfg = normalizeClosureConfig(config);
   if (!cfg.enabled) return { blocked: true, reason: 'disabled', error: '对话收尾判断已关闭' };
-  if (!assessment) return { blocked: false };
-  if (cfg.requireNoOpenQuestion && assessment.signals?.awaitingTheirAnswer) {
+  if (unseen) return {blocked:true,reason:'unseen-messages',error:'还有新到的消息没看。先用 qq_get_unread_messages 读到最新，再决定这段是否说完。'};
+  if (cfg.requireNoOpenQuestion && openQuestion === 'pending') {
     return {
       blocked: true,
       reason: 'open-question',
-      error: '对方最后一句是在提问/求助，还没回答；先用 qq_send_message 回完再收尾。如果已经答完，先发出去，再调用 qq_close_conversation。',
+      error: '你判断还有在等你回应的问题，先接那一句，处理完再收尾。',
     };
   }
   return { blocked: false };

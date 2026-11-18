@@ -360,8 +360,8 @@ export function looksLikeImageBuffer(buf) {
   return false;
 }
 
-/** 抓取图片字节并返回 Buffer（带 SSRF 防护，且校验确实为图片）。 */
-export async function safeFetchBuffer(urlString, maxBytes = 8 * 1024 * 1024) {
+/** Bounded binary download. Each redirect goes through the same address checks. */
+export async function safeFetchFileBuffer(urlString, maxBytes = 8 * 1024 * 1024) {
   validateLimit(maxBytes, 'maxBytes');
   const MAX_REDIRECTS = 5;
   let { url, addresses } = await validateFetchUrl(urlString);
@@ -376,10 +376,13 @@ export async function safeFetchBuffer(urlString, maxBytes = 8 * 1024 * 1024) {
     if (result.statusCode < 200 || result.statusCode >= 300) {
       throw new Error(`图片抓取失败：HTTP ${result.statusCode}`);
     }
-    if (!looksLikeImageBuffer(result.buffer)) {
-      throw new Error(`抓取内容不是有效图片（PNG/JPEG/GIF/WebP）`);
-    }
     return { url: url.toString(), statusCode: result.statusCode, buffer: result.buffer };
   }
   throw new Error('重定向次数过多，已停止');
+}
+
+export async function safeFetchBuffer(urlString, maxBytes = 8 * 1024 * 1024) {
+  const result = await safeFetchFileBuffer(urlString, maxBytes);
+  if (!looksLikeImageBuffer(result.buffer)) throw new Error('抓取内容不是有效图片（PNG/JPEG/GIF/WebP）');
+  return result;
 }

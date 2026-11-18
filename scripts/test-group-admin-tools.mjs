@@ -24,6 +24,7 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import http from 'node:http';
+import { qqActionKey } from '../plugins/surfcore/lib/qq-action-key.js';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
@@ -37,6 +38,8 @@ const GROUP = 'group:456';
 const BOT_QQ = '2756294428';
 
 function post(port, route, body, { token } = {}) {
+  const tool = {'set-group-ban':'qq_set_group_ban','set-group-card':'qq_set_group_card'}[route];
+  if (tool && token) approveFixture(port, tool, body);
   return new Promise((resolve, reject) => {
     const req = http.request({
       hostname: '127.0.0.1',
@@ -64,10 +67,18 @@ function post(port, route, body, { token } = {}) {
   });
 }
 
+const bridges = new Map();
+function approveFixture(port, tool, args) {
+  const h = bridges.get(port);
+  const sid = h?.state.sessions[args.key];
+  const source = h?.activeTurnTriggers.get(sid)?.ownerRequest;
+  if (source) h.approveAction(sid, source.messageId, qqActionKey(tool, args));
+}
 async function withServer(h) {
   const server = h.startConsoleServer();
   if (!server.listening) await new Promise((resolve) => server.once('listening', resolve));
   ACTIVE_SERVERS.add(server);
+  bridges.set(server.address().port, h);
   return server.address().port;
 }
 
@@ -165,7 +176,7 @@ test('禁言：管理员刚在群里说过话 → 放行，且 OneBot 参数正�
     fixtureMembers(h);
     const port = await withServer(h);
     const st = h.getSocialV2State(GROUP);
-    ownerSpoke(h);
+    await startTurn(h, GROUP);
     assert.ok(st.ownerAt > 0, 'appendSocialV2Message(isOwner=true) 必须记下管理员发言时间');
 
     const res = await post(port, 'set-group-ban', {
@@ -196,7 +207,7 @@ test('解禁：durationSeconds=0 → action=unmute，OneBot duration=0', async (
     fixtureMembers(h);
     const port = await withServer(h);
     const st = h.getSocialV2State(GROUP);
-    ownerSpoke(h);
+    await startTurn(h, GROUP);
     const res = await post(port, 'set-group-ban', {
       key: GROUP, userId: '111', durationSeconds: 0
     }, { token: st.agentToken });
@@ -239,8 +250,8 @@ test('授权窗口：管理员发言超过窗口（默认 10 分钟）→ 403', 
     fixtureMembers(h);
     const port = await withServer(h);
     const st = h.getSocialV2State(GROUP);
-    ownerSpoke(h);
-    st.ownerAt = Date.now() - 11 * 60 * 1000; // 11 分钟前
+    await startTurn(h, GROUP);
+    h.activeTurnTriggers.get(h.state.sessions[GROUP]).ownerRequest.at = Date.now() - 11 * 60 * 1000; // 11 分钟前
     const res = await post(port, 'set-group-ban', {
       key: GROUP, userId: '111', durationSeconds: 600
     }, { token: st.agentToken });
@@ -254,14 +265,14 @@ test('授权窗口：管理员发言超过窗口（默认 10 分钟）→ 403', 
 });
 
 test('授权窗口：可配置（windowMs 调大后同一时间点放行）', async () => {
-  const h = await bridgeHarness({ config: baseConfig({ adminActions: { windowMs: 60 * 60 * 1000 } }) });
+  const h = await bridgeHarness({ config: baseConfig({ toolApproval: { triggerWindowMs: 30 * 60 * 1000 } }) });
   try {
     h.setMode('reserved2');
     fixtureMembers(h);
     const port = await withServer(h);
     const st = h.getSocialV2State(GROUP);
-    ownerSpoke(h);
-    st.ownerAt = Date.now() - 30 * 60 * 1000; // 30 分钟前，但窗口是 1 小时
+    await startTurn(h, GROUP);
+    h.activeTurnTriggers.get(h.state.sessions[GROUP]).ownerRequest.at = Date.now() - 20 * 60 * 1000;
     const res = await post(port, 'set-group-ban', {
       key: GROUP, userId: '111', durationSeconds: 60
     }, { token: st.agentToken });
@@ -340,7 +351,7 @@ test('目标校验：非本群成员 / 自己 / 管理员本人 / 群主 / 其�
     fixtureMembers(h);
     const port = await withServer(h);
     const st = h.getSocialV2State(GROUP);
-    ownerSpoke(h);
+    await startTurn(h, GROUP);
     const call = (userId) => post(port, 'set-group-ban', { key: GROUP, userId, durationSeconds: 600 }, { token: st.agentToken });
 
     const outsider = await call('999');
@@ -378,7 +389,7 @@ test('时长校验：负数 / 小数 / 超过 30 天 → 400', async () => {
     fixtureMembers(h);
     const port = await withServer(h);
     const st = h.getSocialV2State(GROUP);
-    ownerSpoke(h);
+    await startTurn(h, GROUP);
     const call = (durationSeconds) => post(port, 'set-group-ban', { key: GROUP, userId: '111', durationSeconds }, { token: st.agentToken });
     for (const bad of [-1, 1.5, 30 * 24 * 3600 + 1]) {
       const res = await call(bad);
@@ -399,7 +410,7 @@ test('工具开关关闭 → 403（控制台「工具开关」能整条关掉）
     fixtureMembers(h);
     const port = await withServer(h);
     const st = h.getSocialV2State(GROUP);
-    ownerSpoke(h);
+    await startTurn(h, GROUP);
     const res = await post(port, 'set-group-ban', { key: GROUP, userId: '111', durationSeconds: 600 }, { token: st.agentToken });
     assert.equal(res.status, 403, res.raw);
     assert.match(res.data.error, /工具未启用/);
@@ -417,7 +428,7 @@ test('每小时频率上限 → 429（管理员在也不能刷屏）', async () 
     fixtureMembers(h);
     const port = await withServer(h);
     const st = h.getSocialV2State(GROUP);
-    ownerSpoke(h);
+    await startTurn(h, GROUP);
     st.adminActionTimes = Array.from({ length: 20 }, (_, i) => Date.now() - i * 1000);
     const res = await post(port, 'set-group-ban', { key: GROUP, userId: '111', durationSeconds: 60 }, { token: st.agentToken });
     assert.equal(res.status, 429, res.raw);
@@ -443,7 +454,7 @@ test('群名片：管理员在群里开口后可以改别人名片（旧行为�
     assert.equal(denied.status, 403, denied.raw);
     assert.match(denied.data.error, /管理员/);
 
-    ownerSpoke(h, '把 111 的名片改成新名字');
+    await startTurn(h, GROUP, {text:'把 111 的名片改成新名字'});
     const allowed = await post(port, 'set-group-card', { key: GROUP, card: '新名字', userId: '111' }, { token: st.agentToken });
     assert.equal(allowed.status, 200, allowed.raw);
     assert.equal(onebotBodies(h, 'set_group_card').length, 1);
@@ -475,15 +486,10 @@ test('唤醒提示：窗口有效时注入【管理员在群里】，过期/私�
   try {
     h.setMode('reserved2');
     const st = h.getSocialV2State(GROUP);
-    assert.ok(!h.buildWakePromptV2(GROUP, 'question').includes('【管理员在群里】'), '没有管理员发言时不该注入');
     ownerSpoke(h);
     const prompt = h.buildWakePromptV2(GROUP, 'question');
-    assert.ok(prompt.includes('【管理员在群里】'), '管理员刚发言 → 唤醒提示要告诉她群管理动作有效');
-    assert.ok(prompt.includes('qq_set_group_ban'), '要告诉她用哪个工具');
-    assert.ok(h.buildWakePromptV2(OWNER, 'question').indexOf('【管理员在群里】') < 0, '私聊不需要群管理授权块');
-
-    st.ownerAt = Date.now() - 11 * 60 * 1000;
-    assert.ok(!h.buildWakePromptV2(GROUP, 'question').includes('【管理员在群里】'), '窗口过期后不再注入');
+    assert.ok(!prompt.includes('群管理动作现在有效'));
+    assert.ok(!prompt.includes('【管理员在群里】'));
   } finally {
     await h.close();
   }
@@ -539,7 +545,7 @@ test('静态接线：MCP 工具、桥接端点、控制台开关、示例配置�
   assert.match(bridge, /url\.pathname === '\/api\/socialV2\/group-members'/, '群成员名单端点必须存在');
   assert.match(bridge, /setGroupBan: true/, '桥接默认工具开关必须开');
   assert.match(bridge, /adminActions:/, '授权窗口配置必须存在');
-  assert.match(bridge, /groupAdminAuthority/, '授权窗口必须有硬闸实现');
+  assert.match(bridge, /takeAction\(key, 'qq_set_group_ban'/, '授权窗口必须有硬闸实现');
 
   assert.match(read('public/console.html'), /data-v2-tool="setGroupBan"/, '控制台「工具开关」必须能开关它');
 
@@ -548,9 +554,9 @@ test('静态接线：MCP 工具、桥接端点、控制台开关、示例配置�
   assert.ok(example.socialV2.adminActions?.windowMs > 0, '示例配置要含 adminActions');
 
   const preset = read('dsh/agent-presets/qq-chat-v2/agent.cordis.yml');
-  assert.match(preset, /qq_set_group_ban/, '仿真预设要告诉模型有这个工具');
-  assert.match(preset, /qq_get_group_members\(key, token\)/, '仿真预设要教模型按昵称找 QQ 号');
-  assert.match(preset, /群管理：禁言\/解禁（主人本人触发的回合/, '仿真预设要写明放宽后的群管理授权口径');
+  assert.match(mcp, /qq_set_group_ban/, '仿真预设要告诉模型有这个工具');
+  assert.match(preset, /qq_get_group_members/, '仿真预设要教模型按昵称找 QQ 号');
+  assert.match(preset, /主人本人触发的回合/, '仿真预设要写明放宽后的群管理授权口径');
   // 安全不变量不能被这次改动顺手删掉（preset-prompt 硬校验也依赖它们）
   for (const needle of ['主人本人触发的回合', '群友没有管理权限', '角色由桥接注入']) {
     assert.ok(preset.includes(needle), `安全不变量丢了：${needle}`);

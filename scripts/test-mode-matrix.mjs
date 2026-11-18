@@ -132,6 +132,7 @@ await test('guard 行为：放宽仅 reserved2（chat/reserved/开关关闭仍�
       sessions: {
         'sid-group': {
           key: 'group:456', kind: 'group', turnActive: true, wakeReason: 'atMention',
+          ownerRequest: isOwner ? { userId: '123', messageId:'owner-1', seq:1, isOwner, at:Date.now(), text:'帮我看下' } : null,
           trigger: { userId: isOwner ? '123' : '999', isOwner, at: Date.now(), text: '帮我看下' }, recent: [],
           updatedAt: Date.now(),
         },

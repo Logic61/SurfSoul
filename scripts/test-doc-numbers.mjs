@@ -27,7 +27,11 @@ check('CURRENT-NUMBERS.md 存在且与代码一致', () => {
 check('关键数字可信（不是空表/占位）', () => {
   assert.match(expected, /\| bridge\.js 行数 \| [1-9]\d{3,} \|/);
   assert.match(expected, /\| qq_\* MCP 工具数 \| [1-9]\d* \|/);
-  assert.match(expected, /\| MCP server 数 \| 4 \|/);
+  // MCP server 数不再写死：以后加 server 时这里跟着 src/mcp-*.js 的实际文件数走，
+  // 避免「功能加了、断言还在 4」把真正的漂移掩盖掉（2026-11-08 加 life-settings 时踩过）。
+  const mcpServers = fs.readdirSync(path.join(ROOT, 'src')).filter((name) => /^mcp-.+\.js$/.test(name)).length;
+  assert.ok(mcpServers >= 4, `src/mcp-*.js 应至少 4 个，实际 ${mcpServers}`);
+  assert.match(expected, new RegExp(`\\| MCP server 数 \\| ${mcpServers} \\|`));
   assert.match(expected, /\| restrict 名单条数 \| [1-9]\d* \|/);
 });
 

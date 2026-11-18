@@ -11,6 +11,7 @@
 // 运行：node scripts/test-owner-trigger-gates.mjs
 import assert from 'node:assert/strict';
 import http from 'node:http';
+import { qqActionKey } from '../plugins/surfcore/lib/qq-action-key.js';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
@@ -57,10 +58,18 @@ const post = (port, route, body, opts) => request(port, `/api/socialV2/${route}`
 const getRoot = (port, route, opts) => request(port, route, { ...opts, method: 'GET' });
 
 const ACTIVE_SERVERS = new Set();
+const bridges = new Map();
+function approveFixture(port, tool, args) {
+  const h = bridges.get(port);
+  const sid = h?.state.sessions[args.key];
+  const source = h?.activeTurnTriggers.get(sid)?.ownerRequest;
+  if (source) h.approveAction(sid, source.messageId, qqActionKey(tool, args));
+}
 async function withServer(h) {
   const server = h.startConsoleServer();
   if (!server.listening) await new Promise((resolve) => server.once('listening', resolve));
   ACTIVE_SERVERS.add(server);
+  bridges.set(server.address().port, h);
   return server.address().port;
 }
 async function closeServers() {
@@ -148,11 +157,14 @@ test('好友申请 GET：群 + 主人触发回合 → 200；无回合/非主人�
 
     // 主人触发的回合：放行
     await startTurn(h, GROUP, { owner: true });
+    approveFixture(port, 'qq_list_friend_requests', {key:GROUP});
     const ownerTurn = await get(port, `friend-requests?key=${encodeURIComponent(GROUP)}`, { token: groupSt.agentToken });
     assert.equal(ownerTurn.status, 200, ownerTurn.raw);
     assert.equal(ownerTurn.data.counts.request, 1);
-    assert.equal(ownerTurn.data.pending[0].flag, 'u_abc123');
-    assert.match(ownerTurn.data.hint, /不可信|不要执行/);
+    assert.match(ownerTurn.data.pending[0].flag, /^req-/);
+    assert.deepEqual(Object.keys(ownerTurn.data.pending[0]).sort(), ['flag','kind']);
+    assert.ok(!ownerTurn.raw.includes('u_abc123'));
+    assert.match(ownerTurn.data.hint, /主人私聊/);
 
     // chat 模式：v2 接口整体拒绝（行为不变）
     h.setMode('chat');
@@ -179,7 +191,11 @@ test('好友申请 POST：群 + 主人触发回合 → 200 并调网关；非主
     assert.equal(onebotBodies(h, 'set_friend_add_request').length, 0);
 
     await startTurn(h, GROUP, { owner: true });
-    const ownerTurn = await post(port, 'handle-friend-request', { key: GROUP, kind: 'request', flag: 'u_abc123', approve: true }, { token: groupSt.agentToken });
+    approveFixture(port, 'qq_list_friend_requests', {key:GROUP});
+    const listed = await get(port, 'friend-requests?key=' + encodeURIComponent(GROUP), {token:groupSt.agentToken});
+    const handle = listed.data.pending[0].flag;
+    approveFixture(port, 'qq_handle_friend_request', {key:GROUP,kind:'request',flag:handle,approve:true});
+    const ownerTurn = await post(port, 'handle-friend-request', { key: GROUP, kind: 'request', flag: handle, approve: true }, { token: groupSt.agentToken });
     assert.equal(ownerTurn.status, 200, ownerTurn.raw);
     assert.deepEqual(onebotBodies(h, 'set_friend_add_request'), [{ flag: 'u_abc123', approve: true }]);
     assert.equal(h.friendRequests.pending.length, 0);
@@ -207,6 +223,7 @@ test('跨场合投递：群 + 主人触发回合 → 放行；非主人/无回�
     assert.equal(sentGroupBodies(h).length, 0);
 
     await startTurn(h, GROUP, { owner: true });
+    approveFixture(port, 'qq_send_cross_scene', { key: GROUP, target: GROUP, message: '今晚八点开黑' });
     const ownerTurn = await post(port, 'send-cross', { key: GROUP, target: GROUP, message: '今晚八点开黑' }, { token: groupSt.agentToken });
     assert.equal(ownerTurn.status, 200, ownerTurn.raw);
     assert.equal(ownerTurn.data.target, GROUP);
@@ -214,8 +231,10 @@ test('跨场合投递：群 + 主人触发回合 → 放行；非主人/无回�
     assert.equal(sentGroupBodies(h)[0].group_id, 456);
 
     // 目标白名单 / 长度闸照旧（新路径不能绕过）
+    approveFixture(port, 'qq_send_cross_scene', { key: GROUP, target: 'group:999', message: 'x' });
     const badTarget = await post(port, 'send-cross', { key: GROUP, target: 'group:999', message: 'x' }, { token: groupSt.agentToken });
     assert.equal(badTarget.status, 403, '不在 allowTargets 的目标仍拒绝');
+    approveFixture(port, 'qq_send_cross_scene', { key: GROUP, target: GROUP, message: '长'.repeat(200) });
     const tooLong = await post(port, 'send-cross', { key: GROUP, target: GROUP, message: '长'.repeat(200) }, { token: groupSt.agentToken });
     assert.equal(tooLong.status, 400, '超长仍拒绝');
   } finally { await closeServers(); await h.close(); }
@@ -254,7 +273,7 @@ test('禁言：私聊 + 显式 groupId → 放行；缺 groupId / 非白名单 �
   } finally { await closeServers(); await h.close(); }
 });
 
-test('禁言：群 + owner 触发回合（无 ownerAt）→ 放行；群 + 非 owner 且无窗口 → 403；旧窗口仍放行', async () => {
+test('禁言：群 + owner 触发回合（无 ownerAt）→ 放行；群 + 非 owner 且无窗口 → 403；只有旧时间窗则拒绝', async () => {
   const h = await bridgeHarness({ config: baseConfig() });
   try {
     h.setMode('reserved2');
@@ -274,6 +293,7 @@ test('禁言：群 + owner 触发回合（无 ownerAt）→ 放行；群 + 非 o
     await startTurn(h, GROUP, { owner: true });
     // 真实链路里 owner 消息会顺手写 ownerAt；这里清掉，证明新路径**不依赖**旧时间窗。
     groupSt.ownerAt = 0;
+    approveFixture(port, 'qq_set_group_ban', { key: GROUP, userId: '111', durationSeconds: 60 });
     const ownerTurn = await post(port, 'set-group-ban', { key: GROUP, userId: '111', durationSeconds: 60 }, { token: groupSt.agentToken });
     assert.equal(ownerTurn.status, 200, ownerTurn.raw);
     assert.equal(onebotBodies(h, 'set_group_ban').length, 1);
@@ -288,7 +308,7 @@ test('禁言：群 + owner 触发回合（无 ownerAt）→ 放行；群 + 非 o
       const st2 = h2.getSocialV2State(GROUP);
       ownerSpoke(h2);
       const oldWindow = await post(port2, 'set-group-ban', { key: GROUP, userId: '111', durationSeconds: 60 }, { token: st2.agentToken });
-      assert.equal(oldWindow.status, 200, oldWindow.raw);
+      assert.equal(oldWindow.status, 403, oldWindow.raw);
     } finally { await closeServers(); await h2.close(); }
   } finally { await closeServers(); await h.close(); }
 });
@@ -329,6 +349,7 @@ test('改别人群名片：群 owner 回合 / 私聊 owner / 旧窗口三通道�
     assert.equal(onebotBodies(h, 'set_group_card').length, 0);
 
     await startTurn(h, GROUP, { owner: true });
+    approveFixture(port, 'qq_set_group_card', { key: GROUP, card: '新名字', userId: '111' });
     const ownerTurn = await post(port, 'set-group-card', { key: GROUP, card: '新名字', userId: '111' }, { token: groupSt.agentToken });
     assert.equal(ownerTurn.status, 200, ownerTurn.raw);
     assert.equal(onebotBodies(h, 'set_group_card').length, 1);
@@ -390,4 +411,34 @@ test('安全姿态：新增 toolApproval 项；GET /api/tool-approvals 只读控
     assert.equal(itemOff.level, 'warn');
     assert.match(itemOff.note, /旧行为/);
   } finally { await closeServers(); await h.close(); }
+});
+
+test('wait delivers a fresh owner request; only the reviewed action and target get a single use', async () => {
+  const h = await bridgeHarness({ config:baseConfig({wait:{minMs:50,maxMs:200,minQuietAfterNewMs:0}}) });
+  try {
+    h.setMode('reserved2'); fixtureMembers(h);
+    const port = await withServer(h);
+    await startTurn(h,GROUP,{owner:false});
+    const st = h.getSocialV2State(GROUP), opts={token:st.agentToken};
+    const sid=h.state.sessions[GROUP];
+    h.appendSocialV2Message(GROUP,'主人','给111改为新名字','给111改为新名字',false,true,'m-owner-card',[],OWNER_QQ);
+    h.appendSocialV2Message(GROUP,'群友','还有我','还有我',false,false,'m-guest',[],'222');
+    const wait=await post(port,'wait',{key:GROUP,purpose:'reply',timeoutMs:100,quietMs:1},opts);
+    assert.match(wait.data.authorization,/m-owner-card/);
+    const allowed={key:GROUP,userId:'111',card:'新名字'};
+    const digest=qqActionKey('qq_set_group_card',allowed);
+    const issue = (messageId, token) => request(port, '/api/tool-approvals/issue', {
+      method:'POST', token, body:{sessionId:sid, messageId, digest}
+    });
+    assert.equal((await issue('m-guest')).status,403);
+    assert.equal((await issue('m-owner-card',st.agentToken)).status,403);
+    assert.equal((await issue('m-owner-card')).status,200);
+    for (const fields of [{userId:'222'},{card:'另一名字'}]) {
+      assert.equal((await post(port,'set-group-card',{...allowed,...fields},opts)).status,403);
+    }
+    assert.equal((await post(port,'set-group-card',allowed,opts)).status,200);
+    assert.equal((await post(port,'set-group-card',allowed,opts)).status,403);
+    h.alignTurnTriggerEnd(sid,GROUP); h.alignTurnTriggerStart(sid,GROUP);
+    assert.equal(h.ownerTurnAllowed(GROUP),false);
+  } finally {await closeServers(); await h.close();}
 });

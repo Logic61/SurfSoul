@@ -90,7 +90,7 @@ test('情景块：场合头/状态/最近对话都进，且不超预算', () => 
 
 test('情景块：预算极小时优先保场合头，对话从最新往前塞', () => {
   const scene = buildReviewScene({
-    key: 'private:3237216875', kind: 'private', personaName: '甘棠',
+    key: 'private:810001', kind: 'private', personaName: '甘棠',
     statusLines: [], recent: sampleRecent(), maxChars: 150,
   });
   assert.ok(scene.text.includes('QQ 私聊'), '私聊场合头必须保留');
@@ -124,8 +124,34 @@ test('评审 prompt：分段齐全、预算生效、空段落不出现', () => {
   assert.ok(!noEmpty.user.includes('<她的说话习惯>'));
 });
 
+test('评审同时保留引用来源和当前问句，普通旧记录继续可读', () => {
+  const current = '那你拿什么签的字？';
+  const note = '陶杯已经给老板写了工伤申请。'.repeat(8);
+  const recent = [
+    {sender:'乙', text:'旧版本只有正文'},
+    {sender:'丙', text:'[引用 甲：问一声]啥事', plain:'啥事'},
+    {sender:'甲', text:'[引用 甘棠：' + note + ']' + current, plain:current, quoteTargetIsSelf:true},
+    {sender:'丁', text:'[引用 戊：我来记]对', plain:'[引用 戊：我来记]对'},
+  ];
+  const scene = buildReviewScene({key:'group:11', kind:'group', personaName:'甘棠', recent, maxChars:300});
+  assert.match(scene.text, /乙：旧版本只有正文/);
+  assert.match(scene.text, /丙：\[引用 甲：问一声\] 啥事/);
+  assert.match(scene.text, /甲：\[引用 甘棠：陶杯.*…\] 那你拿什么签的字？/);
+  assert.equal(scene.text.split(current).length, 2);
+  assert.equal(scene.text.split('[引用 戊').length, 2);
+  assert.ok(scene.usedChars <= 300);
+  const older = buildReviewScene({recent:[
+    {sender:'甲', plain:'你在演谁', quoteTargetIsSelf:true},
+    {sender:'乙', text:'[引用 己：我来]', plain:''}
+  ], personaName:'甘棠'});
+  assert.match(older.text, /甲：\[回甘棠\] 你在演谁/);
+  assert.match(older.text, /乙：\[引用 己：我来\]/);
+});
+
 test('评审 system prompt 要求「证据不足从宽」，避免误杀', () => {
   const system = buildReviewSystemPrompt({ personaName: '甘棠', threshold: 80 });
+  assert.match(system, /明确在逗你.*只报画面元素.*退回/);
+  assert.match(system, /据此办事.*实际结论.*分数必须低于阈值/);
   assert.ok(system.includes('从宽'));
   assert.ok(system.includes('甘棠'));
   assert.ok(buildMemoryCompressSystemPrompt({ maxChars: 620 }).includes('高度抽象'));
@@ -310,6 +336,44 @@ test('reviewer：通过时放行并记录评分；2 分钟内的后续发送跳�
   assert.equal(third.score, 91, '冷却后重新审');
 });
 
+test('reviewer：只有新的群内定向来信能打破通过冷却，同一条来信的多气泡继续共用', async () => {
+  const { reviewer, calls } = reviewerHarness({ verdicts: ['{"score":91,"reason":"合适"}'], cfgOverrides: { maxReviews: 3 } });
+  const draft = async (recent, extra = {}) => reviewer.review({ ...sceneArgs, recent, ...extra });
+  const ordinary = { sender: '甲', plain: '你觉得呢', seq: 1 };
+  assert.equal((await draft([ordinary])).score, 91);
+  const quote = { sender: '乙', plain: '真的假的', quoteTargetIsSelf: true, messageId: '-300' };
+  assert.equal((await draft([quote, { ...ordinary, seq: 2 }])).skipped, 'after-pass', '不从之前的定向消息里补找触发');
+  for (const message of [
+    { ...ordinary, text: '[引用 乙：发啦] 你觉得呢', quoteTargetIsSelf: false },
+    { ...ordinary, atSelf: false, plain: '@另一个人 你觉得呢' },
+    { kind: 'poke', quoteTargetIsSelf: true, seq: 3 },
+    { ...quote, messageId: null, seq: undefined },
+  ]) assert.equal((await draft([message])).skipped, 'after-pass');
+  assert.equal((await draft([quote], { messages: ['嗯'] })).skipped, 'too-short');
+  assert.equal((await draft([quote])).score, 91, '旧记录缺 seq 时仍可用 OneBot ID');
+  assert.equal((await draft([{ ...quote, seq: 4 }, { isSelf: true, seq: 5 }])).skipped, 'after-pass');
+  const mention = { sender: '甲', plain: '你确定吗', atSelf: true, seq: 6 };
+  assert.equal((await draft([mention])).score, 91, '没有网关 ID 时用本地 seq');
+  assert.equal((await draft([{ ...mention, seq: '6' }])).skipped, 'after-pass');
+  assert.equal((await draft([{ ...mention, seq: 7 }])).skipped, 'review-cap');
+  assert.equal(calls.length, 3);
+  const privateArgs = { key: 'private:101', kind: 'private' };
+  assert.equal((await draft([ordinary], privateArgs)).score, 91);
+  assert.equal((await draft([quote], privateArgs)).skipped, 'after-pass');
+});
+
+test('reviewer：新的定向来信退回后允许原样走改写评审，仍受退回额度限制', async () => {
+  const verdicts = [94, 42, 91, 42].map((score) => JSON.stringify({ score, reason: '测试意见' }));
+  const { reviewer } = reviewerHarness({ verdicts, cfgOverrides: { maxRejects: 2 } });
+  const run = (seq) => reviewer.review({ ...sceneArgs, recent: [{ atSelf: true, seq, plain: '确定吗' }] });
+  assert.equal((await run(1)).score, 94);
+  assert.equal((await run(2)).allow, false);
+  assert.equal((await run(2)).score, 91, '改写仍需要通过');
+  assert.equal((await run(2)).skipped, 'after-pass');
+  assert.equal((await run(3)).allow, false);
+  assert.equal((await run(4)).skipped, 'reject-cap');
+});
+
 test('reviewer：低于阈值不发，返回可读错误；连续退回达上限后放行', async () => {
   let clock = 1_000_000;
   const controlled = createPresendReviewer({
@@ -393,6 +457,41 @@ test('reviewer：评审回复不是 JSON 时先重试一次，拿到合法 JSON 
   assert.ok(skipped.raw.includes('不是 JSON'), 'parse-fail 要带原始回复片段便于排障');
 });
 
+test('reviewer：仅输出预算耗尽扩大预算，遵守重试次数和失败策略', async () => {
+  const exhausted = Object.assign(new Error('no body'), {code:'EMPTY', stopReason:'max_tokens'});
+  const timeout = Object.assign(new Error('timeout'), {code:'TIMEOUT'});
+  const empty = Object.assign(new Error('empty'), {code:'EMPTY', stopReason:'end_turn'});
+  const good = {text:'{"score":67,"reason":"未核对就声称签字"}'};
+  const malformed = {text:'没写成 JSON'};
+  async function run(replies, cfg = {}) {
+    const budgets = [];
+    const reviewer = createPresendReviewer({
+      getConfig: () => ({enabled:true, maxTokens:400, parseRetries:2, ...cfg}),
+      completeText: async ({maxTokens}) => {
+        const next = replies[budgets.length];
+        budgets.push(maxTokens);
+        if (next instanceof Error) throw next;
+        return next;
+      },
+    });
+    return {result:await reviewer.review(sceneArgs), budgets};
+  }
+  const recovered = await run([exhausted, good]);
+  assert.deepEqual(recovered.budgets, [400,1200]);
+  assert.equal(recovered.result.score, 67);
+  assert.equal(recovered.result.allow, false);
+  const capped = await run([exhausted, exhausted, exhausted], {maxTokens:900, failOpen:false});
+  assert.deepEqual(capped.budgets, [900,1200,1200]);
+  assert.equal(capped.result.allow, false);
+  assert.deepEqual((await run([malformed, good])).budgets, [400,400]);
+  assert.equal((await run([exhausted, malformed], {parseRetries:1})).result.skipped, 'parse-fail');
+  for (const [failure,cfg] of [[exhausted,{parseRetries:0}], [timeout,{}], [empty,{}]]) {
+    const stopped = await run([failure], cfg);
+    assert.deepEqual(stopped.budgets, [400]);
+    assert.equal(stopped.result.skipped, 'error');
+  }
+});
+
 test('退回兜底：到点补发、cancel 取消、重复退回只更新稿子不延长截止', async () => {
   const timers = [];
   const sends = [];
@@ -429,6 +528,23 @@ test('退回兜底：到点补发、cancel 取消、重复退回只更新稿子�
   await Promise.resolve();
   assert.equal(sends.length, 1, '取消后到点也不补发');
 
+  // 合成尚未结束时到期：发语音成功就撤稿，真正失败才释放到期的那一份。
+  fallback.schedule('group:3', ['晚到的稿子']);
+  const finish = fallback.hold('group:3');
+  timers.at(-1).fn();
+  assert.equal(sends.length, 1);
+  fallback.cancel('group:3');
+  finish();
+  assert.equal(sends.length, 1);
+  fallback.schedule('group:4', ['失败才补']);
+  const firstAttempt = fallback.hold('group:4');
+  const secondAttempt = fallback.hold('group:4');
+  timers.at(-1).fn();
+  firstAttempt();
+  assert.equal(sends.length, 1);
+  secondAttempt();
+  assert.deepEqual(sends.at(-1), { key: 'group:4', messages: ['失败才补'] });
+
   // 0/负数 = 关闭
   assert.equal(fallback.schedule('group:3', ['x'], { delay: 0 }).scheduled, false);
   assert.equal(fallback.schedule('group:3', ['x'], { delay: -1 }).scheduled, false);
@@ -463,4 +579,56 @@ test('reviewer：短消息不审、prompt 带预算上下文', async () => {
   assert.ok(promptText.length < 2000, '整体 prompt 不该无限膨胀');
   assert.ok(okResult.context.memoryChars <= 120);
   assert.ok(okResult.context.styleChars <= 60);
+});
+
+test('旧拍一拍与 @、引用的收件人各按自己的事件字段呈现', () => {
+  const recent = [
+    {sender:'甲',kind:'poke',plain:'[拍一拍] 甲戳了戳你',quoteTargetIsSelf:true,poke:{targetId:'70',targetIsSelf:true}},
+    {isSelf:true,kind:'poke',plain:'[拍一拍] 我拍了拍 80',poke:{targetId:'80',targetName:'甲'}},
+    {sender:'乙',plain:'@群名片 我说的是甲',atSelf:true},
+    {sender:'丙',plain:'@甲 你刚才说谁',mentionedIds:['80']}
+  ];
+  const {text} = buildReviewScene({kind:'group',personaName:'甘棠',recent});
+  assert.match(text,/甲 → 甘棠/);
+  assert.match(text,/甘棠（我） → 甲/);
+  assert.match(text,/乙：\[@甘棠\] @群名片 我说的是甲/);
+  assert.match(text,/丙：\[群内@\] @甲/);
+  assert.doesNotMatch(text,/\[回甘棠\]/);
+});
+
+test('四条连发仍能看见另一方提出的条件，保留同名、点名、引用和动作的边界', () => {
+  const t = 123456789;
+  const line = (words, sec, extra={}) => ({sender:'甲',userId:'10',time:t+sec*1000,plain:words,...extra});
+  const recent = [
+    line('谁拿走了纸箱',0,{isSelf:true}),
+    line('我替你搬一回抵一张票',30,{isSelf:true}),
+    line('你给我搬箱子',48),line('搬完三回',52),line('那该你给票',55),line('票拿来',58)
+  ];
+  const scene = buildReviewScene({kind:'group',recent,maxChars:220});
+  assert.match(scene.text,/我替你搬一回抵一张票/);
+  assert.match(scene.text,/你给我搬箱子 \/ 搬完三回 \/ 那该你给票 \/ 票拿来/);
+  assert.ok(scene.usedChars<=220);
+  for (const extra of [{userId:'20'},{atSelf:true},{text:'[引用 乙] 前一句 新话'},{kind:'poke',poke:{targetName:'乙'}},{hasMedia:true},{time:t+90000}]) {
+    const separate = buildReviewScene({recent:[line('先一句',0),line('后一句',1,extra)]});
+    assert.equal(separate.dialogueLines,2,JSON.stringify(extra));
+  }
+  const tight = buildReviewScene({recent:[line('旧'.repeat(40),0),line('最后一句',1)],maxChars:80});
+  assert.match(tight.text,/最后一句/);
+});
+
+test('没有显式引用时，连发中沿用的原话在插话后仍能对照', () => {
+  const t = 1000000;
+  const self = (plain,sec) => ({isSelf:true,plain,time:t+sec*1000});
+  const peer = (userId,plain,sec) => ({sender:userId,userId,plain,time:t+sec*1000});
+  const recent = [
+    self('搬一箱抵一张票，先搬十箱',0),peer('乙','你们欺负人',8),self('我找谁说理',16),
+    peer('甲','小梨发票',21),self('你叫的是谁',30),peer('甲','不对啊',31),self('早点两清',35),
+    peer('甲','你替我搬一箱抵一张票',47),peer('甲','搬完十箱',50),peer('甲','那你欠我票',55),peer('甲','票呢',57)
+  ];
+  const result = buildReviewScene({recent,kind:'group',maxChars:250});
+  assert.match(result.text,/（前文）.*搬一箱抵一张票，先搬十箱/);
+  assert.match(result.text,/你替我.*票呢/);
+  assert.ok(result.dialogueLines <= 4 && result.usedChars <= 250);
+  const stale = buildReviewScene({recent:[{...recent[0],time:t-600000},...recent.slice(1)]});
+  assert.doesNotMatch(stale.text,/先搬十箱/);
 });

@@ -114,9 +114,32 @@ export function normalizePresendReviewConfig(raw = {}) {
 function formatDialogueLine(message, personaName, maxChars) {
   const m = message && typeof message === 'object' ? message : {};
   const speaker = m.isSelf ? `${personaName || '她'}（我）` : String(m.sender || '群友').trim() || '群友';
-  const raw = String(m.plain ?? m.text ?? '').replace(/\s+/gu, ' ').trim();
+  if (m.kind === 'poke' && m.poke) {
+    const target = m.poke.targetIsSelf ? personaName || '本账号' : m.poke.targetName || m.poke.targetId || '未知对象';
+    return '- ' + truncateChars(`[拍一拍] ${speaker} → ${target}`, maxChars);
+  }
+  const plain = String(m.plain ?? '').replace(/\s+/gu, ' ').trim();
+  const text = String(m.text ?? '').replace(/\s+/gu, ' ').trim();
+  const raw = plain || text;
   if (!raw) return '';
-  return `- ${speaker}：${truncateChars(raw, maxChars)}`;
+  // The bridge resolves the quoted speaker and excerpt in text; plain contains the new remark.
+  const quoted = plain && text !== plain ? text.match(/\[引用 ([^\]]+)/u)?.[1] : '';
+  let target = '';
+  if (quoted) target = `[引用 ${truncateChars(quoted, 18)}] `;
+  else if (m.quoteTargetIsSelf && !raw.includes('[引用 ')) target = `[回${personaName || '她'}] `;
+  if (m.mentionedIds?.length && !m.atSelf) target = '[群内@] ' + target;
+  if (m.atSelf === true) target = `[@${personaName || '本账号'}] ` + target;
+  return `- ${speaker}：${truncateChars(target + raw, maxChars)}`;
+}
+
+// Only combine short, unaddressed speech. Quoted replies, media, and actions
+// need their own lines to retain the target and the order of events.
+function joinableSpeech(message) {
+  if (!message || message.kind || message.atSelf || message.mentionedIds?.length || message.quoteTargetIsSelf
+    || message.hasMedia || message.media?.length || message.hasForward || message.forwardIds?.length
+    || (message.plain && message.text && message.plain !== message.text)) return '';
+  const words = String(message.plain || message.text || '').replace(/\s+/gu, ' ').trim();
+  return /[\[【@＠]/u.test(words) ? '' : words;
 }
 
 /**
@@ -153,24 +176,63 @@ export function buildReviewScene({
     if (pickedStatus.length >= SCENE_STATUS_MAX_LINES) break;
   }
 
-  const recentList = Array.isArray(recent) ? recent.slice(-SCENE_DIALOGUE_MAX_LINES * 2) : [];
-  const dialogueCandidates = [];
-  for (const message of recentList) {
-    const line = formatDialogueLine(message, personaName, SCENE_DIALOGUE_LINE_CHARS);
-    if (line) dialogueCandidates.push(line);
-  }
-
-  // 从最新往前塞对话，保证「刚才发生了什么」优先于更早的。
+  const recentList = Array.isArray(recent) ? recent.slice(-24) : [];
   const chosen = [];
   let used = header.length + (pickedStatus.length ? 1 + pickedStatus.join('；').length : 0);
   const dialogueHeader = '【最近对话】';
-  for (let i = dialogueCandidates.length - 1; i >= 0; i -= 1) {
-    if (chosen.length >= SCENE_DIALOGUE_MAX_LINES) break;
-    const line = dialogueCandidates[i];
-    const extra = line.length + 1 + (chosen.length === 0 ? dialogueHeader.length : 0);
+  let newestWords = '';
+  let earliest = recentList.length;
+  for (let i = recentList.length - 1; i >= 0; i--) {
+    const message = recentList[i];
+    const next = recentList[i + 1];
+    const words = joinableSpeech(message);
+    const sameSpeaker = message && next && (message.isSelf && next.isSelf ||
+      !message.isSelf && !next.isSelf && message.userId && message.userId === next.userId && message.sender === next.sender);
+    const gap = next?.time - message?.time;
+    const together = words + ' / ' + newestWords;
+    if (words && newestWords && sameSpeaker && gap >= 0 && gap <= 20000
+      && [...together].length <= SCENE_DIALOGUE_LINE_CHARS && used + words.length + 3 <= budget) {
+      chosen[0] = formatDialogueLine({ ...message, plain: together, text: together }, personaName, SCENE_DIALOGUE_LINE_CHARS);
+      earliest = i;
+      newestWords = together;
+      used += words.length + 3;
+      continue;
+    }
+    newestWords = '';
+    const line = formatDialogueLine(message, personaName, SCENE_DIALOGUE_LINE_CHARS);
+    if (!line) continue;
+    if (chosen.length === SCENE_DIALOGUE_MAX_LINES) break;
+    const extra = line.length + 1 + (chosen.length ? 0 : dialogueHeader.length + 1);
     if (used + extra > budget) break;
     chosen.unshift(line);
+    earliest = i;
     used += extra;
+    newestWords = words;
+  }
+  // A callback can quote our words without using QQ's reply feature. Restore
+  // one matching earlier line within the same four-line and character budgets.
+  const last = recentList.at(-1);
+  if (!last?.isSelf && chosen.length && earliest > 0) {
+    const fragments = new Set();
+    for (let i = recentList.length - 1; i >= earliest; i--) {
+      const item = recentList[i];
+      if (!item || item.isSelf || !last?.userId || item.userId !== last.userId) break;
+      for (const match of joinableSpeech(item).matchAll(/(?=([\p{L}\p{N}]{5}))/gu)) fragments.add(match[1]);
+    }
+    if (fragments.size) {
+      const anchor = recentList.slice(0, earliest).findLast(item => item?.isSelf &&
+        last.time >= item.time && last.time - item.time <= 10 * 60000 &&
+        [...fragments].some(fragment => joinableSpeech(item).includes(fragment)));
+      if (anchor) {
+        const line = '（前文）' + formatDialogueLine(anchor, personaName, SCENE_DIALOGUE_LINE_CHARS);
+        const replace = chosen.length === SCENE_DIALOGUE_MAX_LINES;
+        const available = budget - used + (replace ? chosen[0].length + 1 : 0);
+        if (line.length + 1 <= available) {
+          if (replace) chosen.shift();
+          chosen.unshift(line);
+        }
+      }
+    }
   }
   const parts = [header];
   if (pickedStatus.length) parts.push(pickedStatus.join('；'));
@@ -189,6 +251,8 @@ export function buildReviewSystemPrompt({ personaName = '她', threshold = 80 } 
     `你是一个独立的中文对话评审员。你在评审 QQ 人格号「${name}」准备发出的一条（或几条）消息。`,
     '你只能看到有限上下文：场合/状态、最近几条对话、她的抽象记忆卡、她的说话习惯；记忆卡是高度压缩的摘要，不要求逐条对应。',
     '判断标准：这条消息是否接住了对方的话（答到点上）、是否符合她的人设与说话习惯、是否符合这个场合（私聊/群聊/群规矩）、有没有重复啰嗦或自相矛盾、有没有说出不该在群里说的隐私或敏感暗示。',
+    '区分发言人、被叫到的人和谈论的对象。动作看谁对谁做了什么。有人用普通求助的句式装进荒唐愿望，单句也能成梗。看上下文：转托别人时，来帮忙的人可以换，原先要修的东西仍是同一个。明显在玩却只纠正称呼，或把往外给说成等着收，判低于阈值。真在核对身份或托办实事，按实际问题评。真托办时，原图没发、事情没做，却报已办妥或让对方验收、报账，要退回。双方故意换位、改口或抬价也可能是笑点。没写主语时可保留歧义；把旁人的动作、话或处境硬扣给某个人，结合前文评判。',
+    '结合前文和引用对象判断这句要拿来做什么。熟人丢梗图、给你递戏，你可以顺势反串，有个自己的看法也行。明确在逗你时，候选只报画面元素、道歉自证、索要证据，整个没接上梗，退回说明漏接了什么。对方真问图中文字或依据，就照实答。对方接下来要据此办事、记档或取证时，优先核对候选给出的实际结论。记录明说空白、未核实或不能辨认，候选却让人按已签、已办或能辨认去做，分数必须低于阈值；这类矛盾已经有证据，哪怕候选同时在开玩笑。',
     `评分 1-100（阈值 ${threshold}）：90-100 很合适；80-89 可用、小瑕疵；60-79 有明确问题（答非所问/重复/语气不对/说了不该说的）；1-59 不该发（失礼、泄密、破坏人设或群规、明显暴露模型身份）。`,
     '如果上下文不足以判断，给 80-85 的从宽分，不要因为「没看到完整证据」就压低分；只有能明确指出问题时才低于阈值。',
     '只输出一个 JSON 对象，不要 Markdown 代码块，不要解释：',
@@ -275,11 +339,20 @@ export function formatReviewRejection({ verdict, threshold, personaName = '她' 
     `消息未发送：发送前独立评审 ${score}/100，低于 ${threshold} 分门槛（${personaName} 的这条回复不够合适）。`,
     `理由：${reason}`,
     fix ? `建议：${fix}` : '',
-    '请按这个意见直接改写后再调用发送工具（只发改写后的版本，不要向对方解释评审过程）。',
+    '可以改写这条；若只想给个反应，也可以用手边可用的表情单独回复。',
   ].filter(Boolean).join('\n');
 }
 
 // ── 节流（按 key 计）──────────────────────────────────────────────────────────
+
+function latestDirectGroupTurn(recent) {
+  const incoming = Array.isArray(recent) && recent.findLast((message) => message && !message.isSelf);
+  if (!incoming || incoming.kind === 'poke' || !(incoming.atSelf === true || incoming.quoteTargetIsSelf === true)) return '';
+  const id = String(incoming.messageId ?? '').trim();
+  if (id && id !== '0') return `id:${id}`;
+  const seq = Number(incoming.seq);
+  return Number.isSafeInteger(seq) && seq > 0 ? `seq:${seq}` : '';
+}
 
 /**
  * 每个会话 key 的评审节流状态。
@@ -293,7 +366,7 @@ export function createReviewThrottle({ now = Date.now } = {}) {
     const k = String(key ?? '');
     let st = states.get(k);
     if (!st) {
-      st = { lastPassAt: 0, reviews: [], rejects: [] };
+      st = { lastPassAt: null, lastPassTurn: '', reviews: [], rejects: [] };
       states.set(k, st);
     }
     return st;
@@ -303,19 +376,21 @@ export function createReviewThrottle({ now = Date.now } = {}) {
     st.rejects = st.rejects.filter((t) => at - Number(t) < windowMs);
   };
   return {
-    decide(key, { config, totalChars = 0, at = now() } = {}) {
+    decide(key, { config, totalChars = 0, directTurn = '', at = now() } = {}) {
       const cfg = config ?? DEFAULT_PRESEND_REVIEW_CONFIG;
       const st = get(key);
       prune(st, cfg.reviewWindowMs, at);
       if (Number(totalChars) < Number(cfg.minChars ?? 0)) return { action: 'skip', reason: 'too-short' };
-      if (st.lastPassAt && at - st.lastPassAt < Number(cfg.skipAfterPassMs ?? 0)) return { action: 'skip', reason: 'after-pass' };
+      const newDirectTurn = directTurn && directTurn !== st.lastPassTurn;
+      if (!newDirectTurn && st.lastPassAt != null && at - st.lastPassAt < Number(cfg.skipAfterPassMs ?? 0)) return { action: 'skip', reason: 'after-pass' };
       if (st.reviews.length >= cfg.maxReviews) return { action: 'allow', reason: 'review-cap' };
       if (st.rejects.length >= cfg.maxRejects) return { action: 'allow', reason: 'reject-cap' };
       return { action: 'review', reason: '' };
     },
-    recordPass(key, { at = now() } = {}) {
+    recordPass(key, { at = now(), directTurn = '' } = {}) {
       const st = get(key);
       st.lastPassAt = at;
+      st.lastPassTurn = directTurn;
       st.reviews.push(at);
     },
     recordReject(key, { at = now() } = {}) {
@@ -367,7 +442,7 @@ export function createRejectFallback({
     pending.delete(key);
   };
   return {
-    schedule(key, messages, { delay = delayMs } = {}) {
+    schedule(key, messages, { delay = delayMs, delivery } = {}) {
       const k = String(key ?? '');
       const list = normalize(messages);
       const wait = Number(delay);
@@ -376,25 +451,38 @@ export function createRejectFallback({
       const existing = pending.get(k);
       if (existing) {
         existing.messages = list;
+        existing.delivery = delivery;
         existing.updatedAt = now();
         return { scheduled: true, updated: true, deadline: existing.deadline };
       }
-      const entry = { messages: list, at: now(), deadline: now() + wait, timer: undefined };
-      entry.timer = setTimeoutFn(() => {
+      const entry = { messages: list, delivery, at: now(), deadline: now() + wait, holds: 0, due: false, timer: undefined };
+      entry.deliver = () => {
         const current = pending.get(k);
-        if (!current) return;
+        if (current !== entry) return;
+        if (entry.holds > 0) { entry.due = true; return; }
         pending.delete(k);
         try {
-          void Promise.resolve(send(k, current.messages)).catch((error) => {
+          void Promise.resolve(send(k, current.messages, current.delivery)).catch((error) => {
             log(`[预发送评审] 兜底补发失败 ${k}:`, error?.message ?? error);
           });
         } catch (error) {
           log(`[预发送评审] 兜底补发异常 ${k}:`, error?.message ?? error);
         }
-      }, wait);
+      };
+      entry.timer = setTimeoutFn(entry.deliver, wait);
       entry.timer?.unref?.();
       pending.set(k, entry);
       return { scheduled: true, updated: false, delay: wait, deadline: entry.deadline };
+    },
+    // Slow synthesis or a gateway acknowledgement can outlast a rejected draft's deadline.
+    hold(key) {
+      const entry = pending.get(String(key ?? ''));
+      if (!entry) return null;
+      entry.holds++;
+      return () => {
+        entry.holds--;
+        if (entry.holds === 0 && entry.due) entry.deliver();
+      };
     },
     cancel(key) {
       const k = String(key ?? '');
@@ -549,11 +637,13 @@ export function createPresendReviewer({
       if (!list.length) return { allow: true, skipped: 'empty' };
       const totalChars = list.reduce((sum, m) => sum + m.length, 0);
       const at = now();
-      const decision = throttle.decide(key, { config: cfg, totalChars, at });
+      const group = kind ? kind === 'group' : String(key).startsWith('group:');
+      const directTurn = group ? latestDirectGroupTurn(recent) : '';
+      const decision = throttle.decide(key, { config: cfg, totalChars, directTurn, at });
       if (decision.action !== 'review') return { allow: true, skipped: decision.reason };
 
       let memoryText = '';
-      try { memoryText = String((await memory?.get?.()) ?? ''); } catch (error) { log('[预发送评审] 记忆摘要不可用:', error?.message ?? error); }
+      try { memoryText = String((await memory?.get?.(key)) ?? ''); } catch (error) { log('[预发送评审] 记忆摘要不可用:', error?.message ?? error); }
       let style = '';
       try { style = String(styleFor?.(key) ?? ''); } catch { /* 说话习惯拿不到就不带 */ }
       const scene = buildReviewScene({
@@ -568,6 +658,7 @@ export function createPresendReviewer({
       // 一次评审最多尝试 1 + parseRetries 次：模型偶尔会输出非 JSON（不是结论错误，是格式翻车），
       // 重试一次通常就能拿到合法 JSON，比直接 fail-open 放行更稳。
       const maxAttempts = 1 + (Number(cfg.parseRetries) || 0);
+      let maxTokens = cfg.maxTokens;
       let reply = null;
       let verdict = null;
       let lastError = null;
@@ -576,11 +667,17 @@ export function createPresendReviewer({
           reply = await completeText({
             system: prompt.system, user: prompt.user,
             model: cfg.model || undefined,
-            maxTokens: cfg.maxTokens,
+            maxTokens,
             timeoutMs: cfg.timeoutMs,
           });
           onUsage?.(reply?.usage ?? null);
         } catch (error) {
+          if (error?.code === 'EMPTY' && error.stopReason === 'max_tokens' && attemptNo + 1 < maxAttempts) {
+            // Thinking consumed the output budget. Use the reviewer's configured upper bound on retry.
+            maxTokens = 1200;
+            log(`[预发送评审] ${key} 输出预算用尽，以 ${maxTokens} token 重试`);
+            continue;
+          }
           lastError = error;
           break;
         }
@@ -609,7 +706,7 @@ export function createPresendReviewer({
         };
       }
       if (verdict.score >= cfg.threshold) {
-        throttle.recordPass(key, { at });
+        throttle.recordPass(key, { at, directTurn });
         log(`[预发送评审] ${key} 通过 ${verdict.score}/${cfg.threshold}（场景${prompt.stats.sceneChars}+记忆${prompt.stats.memoryChars}+习惯${prompt.stats.styleChars}字）`);
         return { allow: true, score: verdict.score, threshold: cfg.threshold, reason: verdict.reason, context: prompt.stats };
       }
@@ -617,7 +714,7 @@ export function createPresendReviewer({
       const attempt = throttle.rejectCount(key, { at, windowMs: cfg.reviewWindowMs }) + 1;
       if (attempt > cfg.maxRejects) {
         // 连续被退回太多次：多半是评审标准过严或模型卡住了，放行以免消息永远发不出去。
-        throttle.recordPass(key, { at });
+        throttle.recordPass(key, { at, directTurn });
         log(`[预发送评审] ${key} 退回达上限（${attempt - 1}/${cfg.maxRejects}），本轮放行 ${verdict.score}/${cfg.threshold}`);
         return { allow: true, skipped: 'reject-cap', score: verdict.score, context: prompt.stats };
       }

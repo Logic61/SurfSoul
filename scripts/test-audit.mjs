@@ -5,6 +5,8 @@ import { spawnSync } from 'node:child_process';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 const tests = [
+  'test-qq-codex.mjs',
+  'test-session-prompt.mjs', 'test-recall-calibration.mjs', 'test-episode-recall.mjs', 'test-conversation-memory.mjs',
   'test-audit-bridge.mjs', 'test-audit-protocol.mjs', 'test-audit-protocol-helpers.mjs',
   'test-audit-security.mjs', 'test-audit-security-mcp.mjs',
   'test-audit-setup.mjs', 'test-audit-setup-guards.mjs',
@@ -213,6 +215,17 @@ const tests = [
   // DSH 侧内部模型审批（2026-11-06）：qq-owner-approval 插件 pre-execute 主门 + approval/request
   // 领取 + fail-closed verdict；fake ctx/llm（不启动 DSH 进程）。
   'test-owner-approval.mjs',
+  // 生活参数自调（2026-11-08）：闭集目录 + 事务 sidecar（预览/执行/验证/回滚）+ MCP stdio 代理 +
+  // QQ 热采用 + bridge 面 owner 回合闸/限频/审计 + B站 overlay/证据/重排。
+  // 全部离线 fixture：不读真实 ~/.dsh、不联网、不启真实服务。
+  'test-life-settings.mjs', 'test-life-mcp.mjs', 'test-life-qq-runtime.mjs',
+  'test-life-bridge-auth.mjs', 'test-life-bili-wiring.mjs',
+  // 每日生活参数心跳（2026-11-08 用户要求「就在早安一个心跳」）：排程/提示词/与早安合并/每天一次。
+  'test-life-review.mjs',
+  // 消息撤回（2026-11-08 用户要求「接上群撤回的接口，权限放开，不需要主人点头，自己判断」）：
+  // 普通工具（不走 owner 回合/模型审批），硬边界只剩平台与防滥用层（reserved2/令牌/白名单/工具开关/
+  // 暂停/消息归属/约 2 分钟窗口/每小时上限；撤别人要求机器人是本群管理员）。真实 bridge.js + 夹具网关。
+  'test-recall-message.mjs',
   // 文档数字防漂移（2026-11-03）：docs/guides/CURRENT-NUMBERS.md 由脚本生成并与代码比对；
   // 手写文档不得再自称「三个 MCP server / 约 15,000 行」。
   'test-doc-numbers.mjs',

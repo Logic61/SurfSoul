@@ -46,6 +46,8 @@ await test('只读预览：会读素材/拼提示词，但不建会话、不投�
 
 await test('强制投递：落到 private:owner，状态先记 pending', async (h) => {
   seedOwner(h);
+  const background = '# 角色卡：角色夹具';
+
   const r = await h.runPurpose({ force: true });
   assert.equal(r.ok, true);
   assert.equal(r.delivered, true);
@@ -55,7 +57,12 @@ await test('强制投递：落到 private:owner，状态先记 pending', async (
   assert.equal(h.purposeState.lastOutcome, 'pending');
   assert.equal(h.purposeState.nextFireAt, 0);
   assert.ok(r.selected?.text);
-});
+  const text = h.calls.prompts[0].content[0].text;
+  assert.equal(text.split(background).length-1,1);
+  assert.doesNotMatch(text,/【人格卡（你是这样的人）】/);
+  await h.deliverPrompt('private:123','后台任务继续',{silent:true});
+  assert.equal(h.calls.prompts.at(-1).content[0].text.includes(background),false);
+}, {files:{'dsh/surfcore/persona.md':'# 角色卡：角色夹具\n喜欢画画的测试角色'}});
 
 await test('回合回执：真发了 = sent；内部备忘的「待续」进 pending', async (h) => {
   seedOwner(h);
@@ -207,6 +214,77 @@ await test('看屏幕闸门：screen 关闭时根本不发请求（返回 null�
   disabledFetchCalls += 1;
   throw new Error('should not fetch');
 }, { enabled: false }));
+
+// ── perLook（2026-11-08）：每张截图抽签触发；定时器让位，screenTriggered 可越过 nextFireAt ──
+const perLookPurposeConfig = {
+  enabled: true,
+  quietStart: '00:00', quietEnd: '00:00', idleThresholdMs: 0, dailyMax: 6,
+  gapMinMs: 60 * 60 * 1000, gapMaxMs: 2 * 60 * 60 * 1000,
+  screen: { enabled: true, interruptTrigger: 'perLook', targetPerDay: 6, triggerMinGapMin: 20 },
+};
+
+await test('perLook：截图管道健康时，定时器不再出发（只由每张截图抽中触发）', async (h) => {
+  seedOwner(h);
+  h.purposeState.nextFireAt = 0;
+  h.purposeState.countToday = 0;
+  const r = await h.runPurpose({});
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, 'screen-trigger-mode');
+  assert.equal(h.calls.created.length, 0, '定时轮次不应创建会话');
+  assert.equal(h.calls.prompts.length, 0, '定时轮次不应投递');
+}, {
+  config: { purpose: perLookPurposeConfig },
+  files: { 'dsh/surfcore/pet/host.json': PET_SCREEN_HOST },
+  globals: { fetch: async (url) => {
+    if (String(url).endsWith('/purpose/screen')) {
+      return { ok: true, status: 200, json: async () => ({ ok: true, screen: { last: { ok: true, at: Date.now() } } }) };
+    }
+    throw new Error(`unexpected fetch ${url}`);
+  } },
+});
+
+await test('perLook：截图管道坏了 → 定时器兜底出发（fail-open）', async (h) => {
+  seedOwner(h);
+  h.purposeState.nextFireAt = 0;
+  h.purposeState.countToday = 0;
+  const r = await h.runPurpose({});
+  assert.equal(r.ok, true);
+  assert.equal(r.delivered, true);
+  assert.equal(h.calls.prompts.length, 1, '截图管道不可用时定时器应兜底投递');
+}, {
+  config: { purpose: perLookPurposeConfig },
+  files: { 'dsh/surfcore/pet/host.json': PET_SCREEN_HOST },
+  globals: { fetch: async (url) => {
+    if (String(url).endsWith('/purpose/screen')) {
+      return { ok: true, status: 200, json: async () => ({ ok: true, screen: { last: { ok: false, at: Date.now() - 60 * 60 * 1000, error: 'boom' } } }) };
+    }
+    throw new Error(`unexpected fetch ${url}`);
+  } },
+});
+
+await test('perLook：screenTriggered 触发越过 nextFireAt 并投递（不再重复抽签）', async (h) => {
+  seedOwner(h);
+  h.purposeState.nextFireAt = Date.now() + 60 * 60 * 1000; // 定时器还在等，但截图抽中可以直接出发
+  h.purposeState.countToday = 0;
+  const r = await h.runPurpose({ screenTriggered: true });
+  assert.equal(r.ok, true);
+  assert.equal(r.delivered, true);
+  assert.equal(h.calls.prompts.length, 1, '截图触发应真的投递');
+  assert.equal(h.purposeState.countToday, 1, '投递占用今日次数');
+}, {
+  config: { purpose: perLookPurposeConfig },
+  globals: { fetch: async () => { throw new Error('perLook 触发不应再调 pet-api 抽签'); } },
+});
+
+await test('perLook：screenTriggered 也受每日上限约束（越过排程不等于越过硬闸）', async (h) => {
+  seedOwner(h);
+  h.purposeState.nextFireAt = 0;
+  h.purposeState.countToday = 6;
+  const r = await h.runPurpose({ screenTriggered: true });
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, 'daily-max');
+  assert.equal(h.calls.prompts.length, 0);
+}, { config: { purpose: perLookPurposeConfig } });
 
 console.log(`\n${failures ? 'FAILED' : 'OK'}（purpose wiring）`);
 process.exitCode = failures ? 1 : 0;

@@ -21,8 +21,9 @@ import { DEFAULT_LIMITS, normalizeLimits } from '../tools/lib/limits.mjs';
 import { dynamicDefaults, normalizeDynamics } from '../tools/lib/kinds.mjs';
 import { DEFAULT_QQ_FISH_GUARD, normalizeQqFishGuard } from '../../../src/fish-guard.js';
 import { adminFromSources, normalizeAdmin } from '../../../src/admin-identity.js';
-import { DEFAULT_MEMORY_CARD_CONFIG, normalizeMemoryCardConfig } from '../../../src/memory-card.js?rev=memfix-d913f4f63b';
+import { DEFAULT_MEMORY_CARD_CONFIG, normalizeMemoryCardConfig } from '../../../src/memory-card.js?rev=memfix-60b63add51';
 import { normalizeCardMode } from '../../../src/share-mode.js';
+import { validateCodexEffort } from './qq-codex-effort.js';
 
 export const MASK = '********';
 
@@ -444,6 +445,7 @@ function normalizeTimes(value, fallback) {
 /** 保存前的 QQ 侧收敛：只做安全范围/类型校正，不认识的键原样保留。 */
 export function normalizeQqConfig(input) {
   const cfg = clone(input ?? {});
+  if (cfg.dsh?.qqCodexEffort !== undefined) validateCodexEffort(cfg.dsh.qqCodexEffort);
   cfg.allow = isPlainObject(cfg.allow) ? cfg.allow : {};
   cfg.deny = isPlainObject(cfg.deny) ? cfg.deny : {};
   cfg.allow.private = normalizeIdList(cfg.allow.private);

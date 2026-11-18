@@ -12,14 +12,18 @@ import * as markdown from '../src/md-to-plain.js';
 import * as sensitive from '../src/sensitive.js';
 import * as wait from '../src/v2-wait.js';
 import * as safeFetch from '../src/safe-fetch.js';
+import { readQqMessageFiles } from '../src/qq-message-files.js';
 import * as forward from '../src/forward.js';
 import * as selfIdentity from '../src/self-identity.js';
 import * as slang from '../src/slang-learner.js';
+import {qqActionKey} from '../plugins/surfcore/lib/qq-action-key.js';
+import { readReactionScene } from '../src/qq-reaction.js';
+import * as stickerSemantics from '../src/sticker-semantics.js';
 import * as sticker from '../src/sticker-lib.js';
 import * as modelPrices from '../src/model-prices.js';
 import * as tokenLedger from '../src/token-ledger.js';
 import * as voiceLib from '../src/send-voice-lib.js';
-import { synthesizeToFile } from '../src/voice-tts.js';
+import { synthesizeToFile, wavDurationMs } from '../src/voice-tts.js';
 import * as presetPrompt from '../src/preset-prompt.js';
 import * as imagegen from '../src/imagegen.js';
 import * as identityGuard from '../src/identity-guard.js';
@@ -35,7 +39,10 @@ import * as historyCatchup from '../src/history-catchup.js';
 import * as purposeEngine from '../src/purpose-engine.js';
 import * as conversationClosure from '../src/conversation-closure.js';
 import * as sceneScope from '../src/scene-scope.js';
+import * as conversationMemory from '../src/conversation-memory.js';
+import * as episodeRecall from '../src/episode-recall.js';
 import * as memoryDocs from '../src/memory-docs.js';
+import {createEventRecall, formatRecallHits} from '../src/memory-search.js';
 // selfNote 自我认知层（2026-11-02）：按角色共享、只在 bootstrap 注入
 import * as selfNotes from '../src/self-notes.js';
 // 唤醒决策流水（2026-11-03）：桥接用它记「为什么醒/为什么没醒」，测试里也断言它被接线。
@@ -48,16 +55,27 @@ import * as turnTriggers from '../src/turn-trigger.js';
 // SnowLuma 连接/token 自发现（bridge.js 的 /api/security-posture 会读它判断 token 是否 staged）：
 // 纯函数 + 文件读取，测试里注入桩后不会碰真实用户配置。
 import * as snowlumaConn from '../src/snowluma-conn.js';
+// 生活参数（2026-11-08）：bridge 现在 import 三个 life 绑定；VM 里必须注入同名实现，
+// 否则 main() 开头 applyManagedSettings / createQqLifeRuntime 直接 ReferenceError。
+// 三个模块都接受 {root,dshHome} 注入；bridge 在 VM 里传的是 temp/temp/dsh，不会碰真实 ~/.dsh。
+import { createLifeApi } from '../src/life-bridge-api.js';
+import { applyManagedSettings } from '../src/life-settings/runtime.js';
+import { createQqLifeRuntime } from '../src/life-settings/qq-runtime.js';
+// 每日生活参数心跳（2026-11-08）：bridge 里 import 的纯函数要在 VM context 里有同名绑定。
+import * as lifeReview from '../src/life-review.js';
+import * as codexEffort from '../plugins/surfcore/lib/qq-codex-effort.js';
+// 早安排程纯函数同样要在 VM 里可调用（心跳复用 parseGreetingTime / localDateKey 等）。
+import * as greetingSchedule from '../src/greeting-schedule.js';
 import { fetchVideoInfo } from '../src/bili-api.js';
 import * as stateAcl from '../src/state-acl.mjs';
 import { createBiliMemory } from '../src/bili-memory.js';
 import { isLoopbackBaseUrl } from '../src/dsh-port.js';
-import { unwrap, createTurnCollector } from '../src/dsh-client.js';
+import { unwrap, createTurnCollector, inboxItemsOfProjections } from '../src/dsh-client.js';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 
 /** 0.1s / 16k 单声道的最小 wav（只要头正确，voice-tts 就不会当成空文件）。 */
-function wavFixture() {
+export function wavFixture() {
   const n = 1600;
   const data = Buffer.alloc(n * 2);
   const h = Buffer.alloc(44);
@@ -245,7 +263,7 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
   source = source.replace('  bot.onPrivateMessage(async (event) => {', `
   return {
     ensureSession, ensureSlangLearnerSession, resolvePresetName, deliverPrompt, drainPromptQueue,
-    sendToQQ, sendStickerV2, handleIncoming, startConsoleServer, cfg, state, api, promptQueues,
+    reportAgentFailure, sendToQQ, sendStickerV2, isSendToolName, handleIncoming, startConsoleServer, cfg, state, api, promptQueues,
     getSocialV2State, appendSocialV2Message, recordSentMessagesV2,
     fishChatWindows, evaluateConversationFishGuard, fishGuardSendBlock, recordFishWindow,
     tokenGuardWakeBlock, tokenGuardSendBlock, bridgeDailyUsage, learnerBudgetBlock,
@@ -269,13 +287,18 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
       selfUserId = String(id ?? '');
       selfNickname = selfDisplayName.toLowerCase() || 'deepseek';
     },
-    flushQueue, retireSession,
+    flushQueue, retireSession, refreshPresetRevision, reconcileSessionPolicies, recordSessionSnapshot,
     // 本回合触发者归因（2026-11-06）：测试直接驱动 turn/start·turn/end 对齐、读内存 map、
     // 断言 ownerTurnAllowed / 安全姿态统计（不启服务、不连真 QQ、不写真实 state/）。
-    pendingTurnTriggers, activeTurnTriggers, lastTurnTrigger,
+    pendingTurnTriggers, activeTurnTriggers, lastTurnTrigger, approveAction, noteOfferedOwnerRequest,
     alignTurnTriggerStart, alignTurnTriggerEnd, forgetTurnTriggers, forgetAllTurnTriggers,
     writeTurnTriggerState, ownerTurnAllowed, ownerTurnForDelivery, activeOwnerTurnCount,
     toolApprovalCfg, buildTriggerRecordV2, readToolApprovalStats,
+    // 生活参数（2026-11-08）：真实 bridge 里的 runtime / HTTP 面是否初始化成功、限频表可断言。
+    lifeSettings: () => lifeSettings, lifeApi: () => lifeApi, lifeWriteRateLimit, lifeRuntimeDetails,
+    // 每日生活参数心跳（2026-11-08）：测试直接驱动投递/状态，不等真实 08:00 定时器。
+    fireLifeReview, scheduleLifeReview, lifeReviewState: () => readLifeReviewState(),
+    lifeReviewConfig, lifeReviewPiggybackGreeting, fireMorningGreeting,
     // 上线补历史：测试可手动触发，不依赖真实 WebSocket / QQ。
     runHistoryCatchUp, historyCatchUpConfig, appendHistoryCatchupV2, fetchOneBotHistory,
     beginHistoryCatchupWindow, hasHistoryCatchupRetryTimer: () => historyCatchupRetryTimer !== null,
@@ -297,8 +320,10 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     closeConversationV2, assessClosureV2, closureConfigV2, closureSuppressesWake, noteClosureReopenV2,
     // 收尾后换会话（2026-11-01）：测试可检查挂起的定时器并手动清掉，避免 5s 后真的触发。
     sessionRotateTimers, clearSessionRotateTimer, scheduleSessionRotationAfterCloseV2,
+    // 上下文滚动（2026-11-10）：测试可灌采样、直接触发判断，并断言 5s 后真的退役重建。
+    tokenLedger, scheduleSessionRotationByContextV2,
     voiceCfg, voiceLibrary, resolveVoicePathForV2, resolveVoicePathForOperator, synthesizeVoiceText,
-    voiceBudgetCheck, sendVoiceV2, sendVoiceForV2, assertOutboundAuditOk,
+    queueQqSend, sendVoiceV2, sendVoiceForV2, assertOutboundAuditOk,
     setMode(value) { currentMode = value; },
     setReady(value) { dshReady = value; },
     setPresets(value) { dshPresetIds = value; dshDefaultPreset = 'standard'; },
@@ -320,15 +345,15 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     clearTimeout, setInterval: () => ({ unref() {} }), clearInterval: () => {},
     NodeApiClient: class { constructor() { return api; } },
     SnowLumaWebSocketClient: FakeBot, text: (s) => s,
-    discoverDshLaunchToken: () => '', unwrap, createTurnCollector, createBiliMemory, fetchVideoInfo,
+    discoverDshLaunchToken: () => '', unwrap, createTurnCollector, inboxItemsOfProjections, createBiliMemory, fetchVideoInfo,
     // DSH 端口兜底：isLoopbackBaseUrl 是真身（纯函数），两条探测是桩——
     // 测试不该在宿主机上真跑 netstat / 真去连 3080。
     isLoopbackBaseUrl,
     probeDshBaseUrl: async () => true,
     discoverDshBaseUrl: async () => null,
-    ...markdown, ...sensitive, ...wait, ...safeFetch, ...forward, ...selfIdentity, ...slang, ...sticker,
+    ...markdown, ...sensitive, ...wait, ...safeFetch, ...forward, ...selfIdentity, ...slang, ...sticker, ...stickerSemantics, readReactionScene,
     ...modelPrices, ...tokenLedger, ...voiceLib, ...stateAcl, ...presetPrompt, ...imagegen, ...identityGuard, ...fishGuard, ...tokenGuard,
-    synthesizeToFile,
+    synthesizeToFile, wavDurationMs, readQqMessageFiles,
     ...tokenBudget,
     ...adminIdentity, ...roleCard, ...memoryCard, ...biliCard, ...characterStore, ...historyCatchup,
     ...purposeEngine,
@@ -336,7 +361,7 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     // 场合作用域（规矩 scope / style-notes 作用域 / 场合档位 / 记忆卡 audience 过滤）
     ...sceneScope,
     // 文档记忆（2026-11-02）：语感本/两本日记的压缩与检索（桥接唤醒提示/qq_recall 用）
-    ...memoryDocs,
+    ...memoryDocs, createEventRecall, formatRecallHits, ...episodeRecall, ...conversationMemory,
     // selfNote 自我认知层（2026-11-02）：按角色共享、只在 bootstrap 注入一次
     ...selfNotes,
     // 唤醒决策流水（2026-11-03）：写失败不影响主流程；测试会断言决策点真的被记录。
@@ -345,9 +370,16 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     ...friendRequests,
     // 本回合触发者归因（2026-11-06）：纯函数（选择最新入站/归一化/ownerTurn 判定），
     // 桥接 import 后直接用；测试也可用 globals 覆盖做边界注入。
-    ...turnTriggers,
+    ...turnTriggers, qqActionKey,
     // SnowLuma 连接/token 自发现：/api/security-posture 会用到；纯函数 + 只读配置探测。
     ...snowlumaConn,
+    // 生活参数（2026-11-08）：bridge 的三个 import 绑定（VM 无 ESM import，必须显式注入）。
+    // createLifeApi 用 bridge 传进来的 {root:ROOT, dshHome:DSH_HOME}，VM 里都是 temp 路径。
+    createLifeApi, applyManagedSettings, createQqLifeRuntime,
+    // 每日生活参数心跳的纯函数（配置归一/排程/提示词/与早安合并判定）。
+    ...lifeReview,
+    ...codexEffort,
+    ...greetingSchedule,
     // 角色系统在 fixture 里等价于「没有角色」：当前角色 null，记忆卡指向 temp/dsh/surfcore/memory。
     // 不能直接用真实 character-store 的 DSH_HOME（它在主进程 import 时已固定）。
     readCurrentCharacter: () => null,
@@ -380,8 +412,10 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     processAudioVolume: async (file, { volume = 1, normalize = false, loudness = 'normal' } = {}) => {
       const v = Number(volume);
       const changed = normalize === true || Math.abs(v - 1) > 1e-9;
+      const output = changed ? file + '.volume' + path.extname(file) : file;
+      if (changed) fs.copyFileSync(file, output);
       return {
-        path: changed ? `${file}.vol` : file,
+        path: output,
         converted: changed,
         applied: changed,
         volume: normalize ? 1 : v,

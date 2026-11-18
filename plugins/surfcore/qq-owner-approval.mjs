@@ -48,6 +48,8 @@ export const name = 'qq-owner-approval'
 // llm 缺失/启动顺序问题时该行会 pending → preset invalid → QQ 会话建不出来（dsh-scout Q4）。
 export const inject = ['tools']
 
+import { qqActionKey } from './lib/qq-action-key.js'
+import { callBridge } from './lib/bridge.js'
 import fs from 'node:fs'
 import path from 'node:path'
 import crypto from 'node:crypto'
@@ -189,7 +191,7 @@ function resolveReviewRoute(exec, config) {
  *   · 测试可以反复 import 出独立实例，互不串状态；
  *   · `apply` 里任何一步抛错都能被兜住，不会拖垮 preset。
  */
-export function createApprovalRuntime(ctx) {
+export function createApprovalRuntime(ctx, issueAction = body => callBridge('/api/tool-approvals/issue', { method: 'POST', body })) {
   const life = new AbortController()
   /** `${sessionId}\0${callId}` → {until, toolName}：模型已批准、待领取人工审批的调用。 */
   const grants = new Map()
@@ -216,14 +218,14 @@ export function createApprovalRuntime(ctx) {
   }
 
   /** 登记「该 callId 已获模型批准」——只对这一对 sessionId+callId 生效，领取即删。 */
-  function registerGrant(sessionIds, callId, toolName, now) {
+  function registerGrant(sessionIds, callId, toolName, now, requestId) {
     if (callId === undefined || callId === null) return
     const idPart = String(callId)
     const seen = new Set()
     for (const sid of sessionIds) {
       if (!sid || seen.has(sid)) continue
       seen.add(sid)
-      grants.set(`${sid}\u0000${idPart}`, { until: now + GRANT_TTL_MS, toolName })
+      grants.set(`${sid}\u0000${idPart}`, { until: now + GRANT_TTL_MS, toolName, requestId })
     }
   }
 
@@ -273,6 +275,7 @@ export function createApprovalRuntime(ctx) {
       model: typeof model === 'string' ? model.slice(0, 120) : '',
       latencyMs: Number.isFinite(latencyMs) ? Math.max(0, Math.trunc(latencyMs)) : 0,
       triggerUserId: turn?.trigger?.userId ?? '',
+      messageId: turn?.trigger?.messageId || '',
       triggerIsOwner: turn?.isOwnerTrigger === true,
       // wakeReason 来自 turn-triggers 记录（atMention/timeout/proactiveCheck/…）——诊断用；
       // 授权只看 trigger.isOwner，不看它（bridge 已把系统唤醒的 isOwner 置 false）。
@@ -347,12 +350,24 @@ export function createApprovalRuntime(ctx) {
     sweep()
     const sessionId = turn.sessionId || sessionIds[0] || ''
     const turnKey = `${sessionId}\u0000${turn.triggerAt}`
+    const requestId = turn.trigger.messageId
+    const approveCurrent = async () => {
+      const current = resolveTurnContext(sessionIds)
+      if (!current.isValidOwnerTurn || current.trigger.messageId !== requestId || current.sessionId !== sessionId) return false
+      if (localTool) return true
+      const args = exec.arguments || {}
+      const digest = qqActionKey(toolName.split('__').at(-1), args)
+      if (!digest || args.key !== turn.key) return false
+      const result = await issueAction({ sessionId, messageId:requestId, digest })
+      return result.ok && result.data?.ok === true
+    }
     const argsHash = hashArguments(exec.arguments)
-    const dedupeKey = `${turnKey}\u0000${toolName}\u0000${argsHash}`
+    const dedupeKey = `${requestId}\u0000${turnKey}\u0000${toolName}\u0000${argsHash}`
     const now = Date.now()
     const deduped = reviewed.get(dedupeKey)
-    if (deduped && deduped.until > now) {
-      registerGrant(sessionIds, exec.callId, toolName, now)
+    if (localTool && deduped && deduped.until > now) {
+      if (!await approveCurrent()) return denyDecision(toolName, '原授权已失效', '')
+      registerGrant(sessionIds, exec.callId, toolName, now, requestId)
       auditDecision({ decision: 'allow', risk: deduped.risk, reason: '同一回合内相同调用已批准（去重）', model: '', latencyMs: 0, turn, sessionId, tool: toolName })
       return next()
     }
@@ -426,8 +441,9 @@ export function createApprovalRuntime(ctx) {
 
     // ⑧ 批准：登记领取凭据，再 next() 走 guard 硬边界与下游 listener。
     //    **不能**直接返回 {kind:'allow'}——那会跳过 guard 与下游 listener。
+    if (!await approveCurrent()) return denyDecision(toolName, '原授权已失效', '')
     reviewed.set(dedupeKey, { until: now + DEDUPE_TTL_MS, risk: verdict.risk })
-    registerGrant(sessionIds, exec.callId, toolName, now)
+    registerGrant(sessionIds, exec.callId, toolName, now, requestId)
     auditDecision({ decision: 'allow', risk: verdict.risk, reason: '', model: `${route.provider}/${route.model}`, latencyMs, turn, sessionId, tool: toolName })
     return next()
   }
@@ -451,6 +467,8 @@ export function createApprovalRuntime(ctx) {
       if (!grant) return next()
       if (!(grant.until > Date.now())) return next()
       if (grant.toolName && grant.toolName !== toolName) return next()
+      const current = resolveTurnContext(sessionIds)
+      if (!current.isValidOwnerTurn || current.trigger.messageId !== grant.requestId) return next()
       return 'allowed-once'
     } catch (error) {
       logError('approval/request 领取异常', error)

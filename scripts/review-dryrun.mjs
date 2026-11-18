@@ -8,7 +8,7 @@
 // 用法（仓库根目录）：
 //   node scripts/review-dryrun.mjs --key group:1021716885 --text "要发的内容" [--llm] [--json]
 //   node scripts/review-dryrun.mjs --key group:1021716885 --text "..." --text "第二条"
-//   node scripts/review-dryrun.mjs --key private:3237216875 --text "..." --prompt-only
+//   node scripts/review-dryrun.mjs --key private:810001 --text "..." --prompt-only
 //
 // 默认不调模型（--prompt-only 默认行为），只打印拼好的 prompt 与字数预算；
 // 加 --llm 才会真的调用一次评审模型（会消耗 token，但不会发 QQ）。
@@ -69,7 +69,7 @@ const socialState = (() => {
   try { return JSON.parse(fs.readFileSync(path.join(STATE_DIR, 'social-v2.json'), 'utf8')); } catch { return {}; }
 })();
 const conversation = socialState?.conversations?.[key] ?? {};
-const recent = Array.isArray(conversation.recentMessages) ? conversation.recentMessages.slice(-8) : [];
+const recent = Array.isArray(conversation.recentMessages) ? conversation.recentMessages : [];
 const statusLines = [];
 if (String(key).startsWith('group:')) {
   const recentList = Array.isArray(conversation.recentMessages) ? conversation.recentMessages : [];
@@ -77,7 +77,7 @@ if (String(key).startsWith('group:')) {
   const others = recentList.filter((m) => m && !m.isSelf && now - Number(m.time || 0) < 10 * 60 * 1000);
   if (others.length) statusLines.push(`近10分钟群友发言 ${others.length} 条${others.filter((m) => m.fish).length ? `（钓鱼号 ${others.filter((m) => m.fish).length} 条）` : ''}`);
   const closure = conversation.closure;
-  if (Number(closure?.cooldownUntil) > now) statusLines.push('刚自然收尾过（冷却中），这轮不该主动刷');
+  if (Number(closure?.cooldownUntil) > now) statusLines.push('刚自然收尾过，新来信可能另起话头');
 }
 
 const kind = key.startsWith('private:') ? 'private' : 'group';

@@ -362,7 +362,7 @@ async function cmdSend() {
         });
         console.log('DRY-RUN（经桥接校验）：未发送。');
         if (data?.limits) {
-          console.log(`  桥接上限：时长 ≤ ${formatDuration(data.limits.maxSeconds)} · 体积 ≤ ${formatBytes(data.limits.maxBytes)} · ${data.limits.maxPerMinute}/分钟 · ${data.limits.maxPerHour}/小时`);
+          console.log(`  桥接上限：时长 ≤ ${formatDuration(data.limits.maxSeconds)} · 体积 ≤ ${formatBytes(data.limits.maxBytes)} · 与普通消息共用发送间隔`);
         }
         console.log(`  桥接解析：${data?.file ?? r.path}`);
         return;

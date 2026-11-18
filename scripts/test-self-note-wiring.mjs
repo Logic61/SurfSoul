@@ -89,7 +89,7 @@ test('源码接线：selfNote 有独立模块、写入端点、bootstrap 门控�
   const mcp = read('src/mcp-snowluma-safe.js');
   assert.match(bridge, /from '\.\/self-notes\.js'/, '桥接没有引入 selfNote 模块');
   assert.match(bridge, /if \(category === 'selfNote'\)/, '写入/删除端点没有 selfNote 分支');
-  assert.match(bridge, /reason === 'bootstrap' && cfg\.socialV2\?\.selfNotes\?\.enabled !== false/, '注入没有按 bootstrap 门控');
+  assert.match(bridge, /sessionOpening && cfg\.socialV2\?\.selfNotes\?\.enabled !== false/, '注入没有按实际会话首次投递门控');
   assert.match(bridge, /qq_memory_append\(category="selfNote"/, 'bootstrap 提示没有告诉她怎么写');
   assert.match(mcp, /'rule', 'selfNote'\]/, 'qq_memory_* 工具的参数枚举缺 selfNote');
   assert.match(mcp, /selfNote=/, '工具描述里没有 selfNote 的说明');

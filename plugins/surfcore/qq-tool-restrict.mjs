@@ -197,7 +197,7 @@ const LOCAL_EXECUTION_TOOLS = [
   //   ③ 插件装载权（= 任意代码执行）
   'plugin_manager',
   //   ④ 无人值守的自我调度
-  'schedule_create', 'schedule_list', 'schedule_update', 'schedule_delete',
+  'schedule_create', 'schedule_list', 'schedule_view', 'schedule_edit', 'schedule_update', 'schedule_delete',
   // 已装但当前未进 bundles 的插件（一旦加回就是新口子）
   'dev_mode_set', 'dev_mode_status', 'dev_mode_subagent',
   // ── DSH 0.2.1 新增工具（2026-11-03 从运行中的 app.asar 对账扫出来的）──────
@@ -253,6 +253,11 @@ const SAFE_PREFIXES = [
   'mcp__browser__bilibili_',
   // 小红书（同日「xhs 也放给她」）：搜索/笔记/评论/点赞/收藏/下载/账号笔记。
   'mcp__browser__xhs_',
+  // 生活参数（2026-11-08，IMPL-SPEC §5.2）：9 个 life_* 工具（读 5 + 写 4）。
+  // 前缀放行只是「允许执行」；写工具真正生效要走 bridge `/api/life/*` 的
+  // owner 回合闸 + 频率上限 + 审计，且 qq-owner-approval 会再跑一次模型审批
+  // （见 lib/turn-trigger.js 的 LIFE_SETTINGS_TOOL_NAMES）。
+  'mcp__life-settings__',
 ]
 
 /**
@@ -398,6 +403,11 @@ export function apply(ctx) {
     //      必须同时看 toolApprovalEnabled：回滚开关一关就回到旧的「仅主人私聊」。
     //   ② 旧路径：会话 key 就是 `private:<ownerQQ>`（读 sessions.json 映射）。
     // 归因/配置/映射的读盘都在 lib 里（mtime 缓存）；任何读失败都落到「无归因 → 拒绝」。
+    if (name === 'mcp__snowluma__qq_look_at_screen') {
+      const turn = resolveTurnContext(sessionIdCandidates(exec))
+      if (isOwnerPrivateKey(turn.key, turn.ownerKey)) return
+      return '看屏幕仅在主人私聊中可用'
+    }
     if (LOCAL_OWNER_ONLY_TOOLS.has(name)) {
       const candidates = sessionIdCandidates(exec)
       const turn = resolveTurnContext(candidates)

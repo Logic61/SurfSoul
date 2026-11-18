@@ -229,6 +229,7 @@ const DESIRED_FIELDS = ROOT_PATCH.fields ?? {
     './locale/*.json': './plugins/surfcore/locale/*.json',
     './icon': './plugins/surfcore/icon.svg',
     './qq-tool-restrict.mjs': './plugins/surfcore/qq-tool-restrict.mjs',
+    './qq-model-route': './plugins/surfcore/lib/qq-model-route.js',
     './qq-owner-approval.mjs': './plugins/surfcore/qq-owner-approval.mjs',
     './package.json': './package.json',
   },
@@ -335,7 +336,7 @@ function copyTree(sourceDir, targetDir, topName) {
       const toPath = path.join(to, entry.name);
       const rel = posix(path.relative(SOURCE, fromPath));
       if (entry.isDirectory()) {
-        if (EXCLUDED_DIR_NAMES.has(entry.name)) {
+        if (EXCLUDED_DIR_NAMES.has(entry.name) || rel === 'plugins/surfcore/tools/covers') {
           copyStats.skipped.push(`${rel}/ （排除目录）`);
           continue;
         }

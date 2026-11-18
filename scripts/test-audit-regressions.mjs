@@ -29,6 +29,7 @@ import { extractJsonArray } from '../src/slang-learner.js';
 import { sanitizeStickerText } from '../src/sticker-lib.js';
 import { createTokenLedger } from '../src/token-ledger.js';
 import { DEFAULT_PRICE_TABLE } from '../src/model-prices.js';
+import { createRejectFallback, normalizePresendReviewConfig } from '../src/presend-review.js';
 
 const CONSOLE = { 'x-console-token': 'fixture-console-token' };
 let failures = 0;
@@ -436,6 +437,269 @@ await test('R16 appendSocialV2Message 保留 kind/emojiId/summary/subType', asyn
     // 兜底地址仍然能从落库后的字段推出来（这是 fetchOneBotImage 的实际输入）。
     assert.match(String(h.emojiCdnCandidates(stored.media[0].emojiId)[0] ?? ''), /gxh\.vip\.qq\.com/, '落库字段应足以推出 CDN 兜底地址');
   } finally { await h.close(); }
+});
+
+await test('R17 reserved2 reply and legacy sends share review, target and quota', async () => {
+  let verdict = false;
+  const reviews = [];
+  let pending;
+  let fireFallback;
+  let fallbackFinished;
+  const h = await bridgeHarness({
+    config: { socialV2: { review: { enabled:true, rejectFallbackMs:90000 } } },
+    globals: {
+      normalizePresendReviewConfig,
+      createPresendReviewer: () => ({review: async ({messages}) => {
+        reviews.push([...messages]);
+        return verdict ? {allow:true} : {allow:false, score:45, threshold:75, reason:'换个落点', attempt:1, error:'测试退回'};
+      }}),
+      createRejectFallback: options => {
+        pending = createRejectFallback({...options,
+          send:(...args) => (fallbackFinished = options.send(...args)),
+          setTimeoutFn:fire=>{fireFallback=fire;return 1;}, clearTimeoutFn:()=>{}});
+        return pending;
+      },
+    },
+  });
+  try {
+    h.setMode('reserved2');
+    const key='group:456', st=h.getSocialV2State(key);
+    h.appendSocialV2Message(key,'甲','被引用的一句','被引用的一句',false,false,'-432',[],'9',[]);
+    const seq=st.recentMessages.at(-1).seq;
+    const reply={groupId:'456',message:'第一稿',replyToMessageId:String(seq),atUserId:'9',token:st.agentToken};
+    await withServer(h, async port => {
+      const post=(endpoint,body,token=st.agentToken)=>call(port,endpoint,{method:'POST',token,body});
+      const sent=()=>h.calls.http.filter(c=>String(c.url).endsWith('/send_group_msg'));
+      assert.equal((await post('/api/send/reply',reply)).status,422);
+      assert.equal(reviews.length,1);
+      assert.equal(st.sendTimes.length,0);
+      assert.equal(sent().length,0);
+      const retry=await post('/api/send/reply',{...reply,message:'第二稿'});
+      assert.equal(retry.json.review.reason,'换个落点');
+      fireFallback(); await fallbackFinished;
+      assert.deepEqual(sent().at(-1)?.body.message,[
+        {type:'reply',data:{id:'-432'}},{type:'at',data:{qq:'9'}},{type:'text',data:{text:'第二稿'}},
+      ]);
+      assert.equal(st.sendTimes.length,1);
+      const again=await post('/api/send/reply',reply);
+      assert.equal(again.status,422);
+      verdict=true;
+      const accepted=await post('/api/send/reply',{...reply,message:'改写稿'});
+      assert.equal(accepted.status,200);
+      assert.equal(accepted.json.quoted.messageId,'-432');
+      assert.equal(accepted.json.sent,1);
+      assert.equal(accepted.json.messageIds.length,1);
+      assert.equal(pending.size(),0);
+      verdict=false;
+      const group=await post('/api/send/group',{groupId:'456',message:'群消息',token:st.agentToken});
+      assert.equal(group.status,422);
+      h.cfg.socialV2.send.maxSendPerMinute=2;
+      fireFallback(); await fallbackFinished;
+      assert.equal(sent().length,2,'at the limit, a delayed message must not be sent');
+      const privateToken=h.getSocialV2State('private:123').agentToken;
+      const privateMsg=await post('/api/send/private',{userId:'123',message:'私聊',token:privateToken},privateToken);
+      assert.equal(privateMsg.status,422);
+      const before=reviews.length;
+      h.setMode('closed-agent');
+      const plain=await call(port,'/api/send/private',{method:'POST',headers:{'x-agent-call':'1'},body:{userId:'123',message:'一代发送'}});
+      assert.equal(plain.status,200); assert.equal(reviews.length,before);
+    });
+  } finally {pending?.dispose(); await h.close();}
+});
+
+await test('R18 reserved2 只把网关指向自己的 @ 落为定向来信', async () => {
+  const h = await bridgeHarness();
+  try {
+    h.setMode('reserved2');
+    h.socialV2.paused = true;
+    h.setSelfIdentity('甘棠', '1234');
+    const targets = ['5678', 'all', undefined, '1234'];
+    for (const [index, target] of targets.entries()) {
+      const message = [{ type: 'text', data: { text: '@甘棠 你觉得呢' } }];
+      if (target) message.unshift({ type: 'at', data: { qq: target } });
+      await h.handleIncoming('group', '456', {
+        post_type: 'message', message_type: 'group', group_id: 456, user_id: 777,
+        message_id: 8000 + index, sender: { user_id: 777, nickname: '乙' }, message
+      }, h.cfg);
+      const stored = h.getSocialV2State('group:456').recentMessages.at(-1);
+      assert.equal(stored.messageId, String(8000 + index));
+      assert.equal(!!stored.atSelf, target === '1234');
+    }
+  } finally { await h.close(); }
+});
+
+await test('R19 群聊动作、发言、@ 与后来澄清按发生顺序归属', async () => {
+  const h = await bridgeHarness();
+  const key = 'group:456';
+  const names = { 11:'群名片', 22:'甲', 33:'乙', 44:'丙' };
+  const state = h.getSocialV2State(key);
+  const notice = (sender, target) => h.handlePokeNotice({ sub_type:'poke', group_id:456, sender_id:sender, target_id:target });
+  try {
+    h.setMode('reserved2');
+    h.setSelfIdentity('甘棠','11');
+    h.socialV2.paused = true;
+    h.bot.getGroupMemberInfo = async (_, id) => ({card:names[id]});
+    h.bot.getGroupMemberList = async () => Object.entries(names).map(([user_id,card]) => ({user_id,card}));
+    h.bot.raw = async () => ({});
+    await notice(22,11);
+    await notice(33,22);
+    await notice(11,33); // own gateway echo, not an incoming action
+    assert.equal(state.unread.length,2);
+    assert.equal(state.unread[0].poke.targetIsSelf,true);
+    assert.equal(state.unread[0].quoteTargetIsSelf,false);
+    assert.match(state.unread[1].text,/乙.*甲/);
+    h.socialV2.paused = false;
+    await withServer(h,async port => {
+      const r = await call(port,'/api/socialV2/send-poke',{method:'POST',token:state.agentToken,body:{key,targetUserId:'33'}});
+      assert.equal(r.status,200,JSON.stringify(r.json));
+    });
+    const own = state.recentMessages.at(-1);
+    assert.equal(own.isSelf,true);
+    assert.equal(own.poke.targetName,'乙');
+    assert.match(own.text,/本账号.*乙/);
+    assert.equal(state.unread.length,2);
+    // Already read actions are background. The first utterance has no explicit addressee.
+    state.lastReadThroughSeq = state.lastUnreadSeq;
+    state.unread = [];
+    h.appendSocialV2Message(key,'丙','只伸手了','只伸手了',false,false,'514',[],'44');
+    await h.deliverPrompt(key,'',{wakeReason:'question',silent:true});
+    const text = h.calls.prompts.at(-1).content[0].text;
+    const snapshot = JSON.parse(text.split('【本次消息快照】\n')[1].split('\n')[0]);
+    assert.ok(text.indexOf('"recent"') < text.indexOf('"messages"', text.indexOf('【本次消息快照】')));
+    assert.equal(snapshot.messages[0].sender,'丙');
+    assert.equal(snapshot.messages[0].atSelf,undefined);
+    assert.equal(snapshot.messages[0].mentionedIds,undefined);
+    assert.equal(snapshot.recent.at(-1).poke.targetId,'33');
+    assert.match(text,/省了主语/);
+    const clarify = target => h.handleIncoming('group','456',{
+      group_id:456, self_id:11, user_id:44, sender:{nickname:'丙'}, message_id:600+target,
+      message:[{type:'at',data:{qq:String(target)}},{type:'text',data:{text:' 我说的是刚才动手的那位'}}]
+    },h.cfg);
+    h.socialV2.paused = true;
+    await clarify(22);
+    assert.deepEqual([...state.unread.at(-1).mentionedIds],['22']);
+    assert.equal(!!state.unread.at(-1).atSelf,false);
+    await clarify(11);
+    assert.deepEqual([...state.unread.at(-1).mentionedIds],['11']);
+    assert.equal(state.unread.at(-1).atSelf,true);
+    assert.equal(state.unread.at(-1).quoteTargetIsSelf,false);
+    assert.ok(!text.includes('我说的是刚才动手的那位'));
+  } finally { await h.close(); }
+});
+
+
+await test('R20 群内运行错误留本地，投递被拒不更新会话回执', async () => {
+  const h = await bridgeHarness();
+  try {
+    h.setMode('reserved2');
+    const detail = 'DeepSeek Messages stream ended before message_stop';
+    await h.reportAgentFailure('group:456', 'agent 处理出错', detail);
+    h.api.sessions.prompt = async () => ({result:{ok:false,error:{code:'fixture',message:'暂时不可用'}}});
+    const rejected = await h.deliverPrompt('group:456','',{wakeReason:'question'});
+    assert.equal(rejected.ok,false);
+    assert.equal(h.state.promptReceipts?.['group:456'],undefined);
+    assert.equal(h.calls.sent.length,0);
+    const activity = fs.readFileSync(path.join(h.temp,'state','qq-activity.log'),'utf8');
+    assert.ok(activity.includes(detail) && activity.includes('消息未被接受'));
+    await h.reportAgentFailure('private:123','agent 处理出错',detail);
+    assert.equal(h.calls.sent.length,1);
+    assert.equal(h.calls.sent[0].kind,'private');
+  } finally { await h.close(); }
+});
+
+await test('R21 旧话与迟来的表情同批时保留收尾边界，引用仍可续聊', async () => {
+  const h = await bridgeHarness();
+  const key = 'group:456';
+  try {
+    h.setMode('reserved2');
+    const st = h.getSocialV2State(key);
+    const add = (who, words, id) => h.appendSocialV2Message(key,who,words,words,false,false,id,[],'77');
+    add('甲','找他要','301');
+    await h.deliverPrompt(key,'',{wakeReason:'question',silent:true});
+    h.closeConversationV2(key,{reason:'topic-done',summary:'这段聊完了',nextOpening:'问他账算得如何',throughSeq:0});
+    assert.equal(st.closure.afterSeq,1);
+    st.recentMessages[0].time -= 20 * 60000;
+    st.closure.at -= 19 * 60000;
+    add('乙','[表情317]','302');
+    await withServer(h,async port => {
+      const getUnread = async () => (await call(port,'/api/socialV2/unread?key=group:456',{token:st.agentToken})).json;
+      const mixed = await getUnread();
+      assert.equal(mixed.messages.length,2);
+      assert.match(mixed.conversationBreak,/19 分钟后.*seq=2/);
+      const boundary = st.closure.afterSeq;
+      delete st.closure.afterSeq;
+      assert.match((await getUnread()).conversationBreak,/seq=2/,'旧版落盘记录仍能定位');
+      st.closure.afterSeq = boundary;
+      await h.deliverPrompt(key,'',{wakeReason:'probability',silent:true});
+      let prompt = h.calls.prompts.at(-1).content[0].text;
+      assert.match(prompt,/19 分钟后.*seq=2/);
+      assert.doesNotMatch(prompt,/问他账算得如何/);
+      const packet = JSON.parse(prompt.split('【本次消息快照】\n')[1].split('\n')[0]);
+      assert.equal(packet.messages.at(-1).text,'[表情317]');
+      assert.equal(h.calls.sent.length,0);
+      st.unread = [];
+      add('乙','刚才那事后来呢','303');
+      st.unread[0].quoteTargetIsSelf = true;
+      const renewed = await getUnread();
+      assert.equal(renewed.conversationBreak,undefined);
+      assert.equal(renewed.messages[0].quoteTargetIsSelf,true);
+      h.closeConversationV2(key,{reason:'natural'});
+      st.closure.at -= 25 * 60000;
+      add('甲','你那句还算数吗','304');
+      st.unread[0].quoteTargetIsSelf = true;
+      // Test a fresh reply-wait without an intervening read, as on a live turn.
+      st.lastIncomingAt -= 60000;
+      const wait = await call(port,'/api/socialV2/wait',{method:'POST',token:st.agentToken,body:{key,purpose:'reply',quietMs:10,timeoutMs:2000}});
+      assert.equal(wait.status,200,JSON.stringify(wait.json));
+      assert.match(wait.json.conversationBreak,/25 分钟后.*seq=4/);
+      assert.match(wait.json.conversationBreak,/直接 @ 或引用了你/);
+      assert.doesNotMatch(wait.json.conversationBreak,/让它过去/);
+      assert.equal(wait.json.newMessages[0].quoteTargetIsSelf,true);
+    });
+  } finally { await h.close(); }
+});
+
+
+await test('R22 收藏表情成功后取消同场退回文字，失败仍能重试', async () => {
+  let fallback, fire, downloadWorks = false;
+  const h = await bridgeHarness({
+    config: {socialV2:{review:{enabled:true,rejectFallbackMs:90000}}},
+    files: {'state/stickers.json':[{id:'fixture-sticker',no:19,emotion:'speechless',content:'捂脸',url:'https://public.invalid/sticker'}]},
+    globals: {
+      normalizePresendReviewConfig,
+      safeFetchBuffer: async () => {
+        if (!downloadWorks) throw Error('模拟下载失败');
+        return {buffer:Buffer.from('89504e470d0a1a0a00000000','hex')};
+      },
+      createPresendReviewer: () => ({review:async () => ({allow:false,score:45,threshold:75,reason:'修错对象',error:'测试退回'})}),
+      createRejectFallback: options => (fallback = createRejectFallback({...options,
+        setTimeoutFn: callback => { fire = callback; return 1; }, clearTimeoutFn: () => {}}))
+    }
+  });
+  try {
+    h.setMode('reserved2');
+    const key = 'group:456', st = h.getSocialV2State(key);
+    await withServer(h,async port => {
+      const post = (route,body) => call(port,route,{method:'POST',token:st.agentToken,body});
+      const sticker = () => post('/api/socialV2/send-sticker',{key,stickerId:'#19'});
+      const draft = await post('/api/send/group',{groupId:'456',message:'叫坏掉的那位去修另一位',token:st.agentToken});
+      assert.equal(draft.status,422);
+      assert.equal(fallback.size(),1);
+      assert.equal((await sticker()).status,500);
+      assert.equal(fallback.size(),1);
+      assert.equal(st.sendTimes.length,0);
+      downloadWorks = true;
+      const reply = await sticker();
+      assert.equal(reply.status,200,JSON.stringify(reply.json));
+      assert.equal(fallback.size(),0);
+      fire(); // even a stale timer callback must find no draft for this chat
+      await Promise.resolve();
+      const sends = h.calls.http.filter(item => String(item.url).endsWith('/send_group_msg'));
+      assert.deepEqual(sends.map(item => item.body.message.map(part => part.type)),[['image']]);
+      assert.equal(st.sendTimes.length,1);
+      assert.ok(st.recentMessages.at(-1).sticker);
+    });
+  } finally {fallback?.dispose(); await h.close();}
 });
 
 if (failures) {

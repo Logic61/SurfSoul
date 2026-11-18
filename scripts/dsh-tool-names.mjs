@@ -237,5 +237,7 @@ export function isExternalMcpToolName(name) {
  */
 export const LEGACY_UNREGISTERED_TOOL_NAMES = new Set([
   'dsh_snapshot', 'dsh_rollback', 'incident_resolved', // dsh-plugin-guard（web profile bundle）
+  // 早期团队与调度工具。当前桌面包的调度工具注册为 schedule_view / schedule_edit。
+  'spawn_teammate', 'schedule_update', 'schedule_delete',
   'subagent_claude_code', // DSH 0.1.x 自带 preset 里出现过；0.2.1 安装包未注册
 ]);

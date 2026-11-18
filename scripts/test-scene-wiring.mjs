@@ -1,3 +1,4 @@
+import { qqActionKey } from '../plugins/surfcore/lib/qq-action-key.js';
 // 场合作用域（2026-10-31 路线 A）真实 bridge 接线回归：夹具网关 + 临时 DSH_HOME，绝不连真 QQ。
 //
 // 覆盖：
@@ -107,6 +108,12 @@ const sentGroupBodies = (h) => h.calls.http
  * 造一个「主人本人触发的回合」（2026-11-06 场景放宽）：入站消息 → 投递（写归因）→ turn/start。
  * 与真实链路同一批函数（handleIncoming 只是多 8 秒批量窗，本测试不需要等）。
  */
+function approveGroupAction(h, tool, args = {}) {
+  const sid = h.state.sessions[GROUP];
+  const source = h.activeTurnTriggers.get(sid).ownerRequest;
+  assert.ok(h.approveAction(sid, source.messageId, qqActionKey(tool, {key: GROUP, ...args})));
+}
+
 async function startTurn(h, key, { owner = true, text = '帮我把这句话发到群里' } = {}) {
   const userId = owner ? OWNER_QQ : '111';
   h.appendSocialV2Message(key, owner ? '管理员' : '群友', text, text, false, owner, `m-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, [], userId, []);
@@ -244,12 +251,12 @@ test('记忆卡：audience 标记按场合过滤（默认共享；groupExcludePr
     // 2026-11-02：记忆卡改成只在 bootstrap 注入（每轮重发 = 重复烧 5.9k 字）；这里断言的
     // 是「注入时按场合过滤」的规则，所以用 bootstrap 这一份来验。
     const groupPrompt = h.buildWakePromptV2(GROUP, 'bootstrap');
-    assert.ok(groupPrompt.includes('私聊里说过的事'), '默认记忆共同：[私聊] 普通记录进群');
-    assert.ok(groupPrompt.includes('群里发生的事'));
+    assert.ok(!groupPrompt.includes('私聊里说过的事'), '无来源的旧卡不能进群');
+    assert.ok(!groupPrompt.includes('群里发生的事'));
     assert.ok(!groupPrompt.includes('只在私聊可见的事'), 'private-only 记录不得进群');
-    assert.ok(groupPrompt.includes('只在群里可见的事'));
+    assert.ok(!groupPrompt.includes('只在群里可见的事'));
     const privatePrompt = h.buildWakePromptV2(OWNER, 'bootstrap');
-    assert.ok(privatePrompt.includes('只在私聊可见的事'));
+    assert.ok(!privatePrompt.includes('只在私聊可见的事'));
     assert.ok(!privatePrompt.includes('只在群里可见的事'), 'group-only 记录不得进私聊');
   } finally { await h.close(); }
 
@@ -261,7 +268,7 @@ test('记忆卡：audience 标记按场合过滤（默认共享；groupExcludePr
     h2.setMode('reserved2');
     const groupPrompt = h2.buildWakePromptV2(GROUP, 'bootstrap');
     assert.ok(!groupPrompt.includes('私聊里说过的事'), 'groupExcludePrivate=true 时群聊连 [私聊] 记录也过滤');
-    assert.ok(groupPrompt.includes('群里发生的事'));
+    assert.ok(!groupPrompt.includes('群里发生的事'));
   } finally { await h2.close(); }
 });
 
@@ -348,6 +355,7 @@ test('跨场合投递：群 + 主人触发回合 → 放行；群 + 非主人回
     h.alignTurnTriggerEnd(h.state.sessions[GROUP], GROUP);
 
     await startTurn(h, GROUP, { owner: true });
+    approveGroupAction(h, 'qq_send_cross_scene', {target:'group:456', message:'帮我把这句带过去'});
     const ownerTurn = await post(port, 'send-cross', { key: GROUP, target: 'group:456', message: '帮我把这句带过去' }, { token: groupSt.agentToken });
     assert.equal(ownerTurn.status, 200, JSON.stringify(ownerTurn.data));
     assert.equal(ownerTurn.data.target, 'group:456');
@@ -355,8 +363,10 @@ test('跨场合投递：群 + 主人触发回合 → 放行；群 + 非主人回
     assert.equal(sentGroupBodies(h)[0].group_id, 456);
 
     // 目标白名单 / 身份/敏感闸照旧（新路径不能绕过旧闸）
+    approveGroupAction(h, 'qq_send_cross_scene', {target:'group:999', message:'x'});
     const notAllowed = await post(port, 'send-cross', { key: GROUP, target: 'group:999', message: 'x' }, { token: groupSt.agentToken });
     assert.equal(notAllowed.status, 403, 'allowTargets 之外的目标仍拒绝');
+    approveGroupAction(h, 'qq_send_cross_scene', {target:'group:456', message:`他的QQ是 ${OWNER_QQ}`});
     const identityLeak = await post(port, 'send-cross', { key: GROUP, target: 'group:456', message: `他的QQ是 ${OWNER_QQ}` }, { token: groupSt.agentToken });
     assert.equal(identityLeak.status, 403, '身份泄露仍拒绝');
   } finally { await closeServers(); await h.close(); }
@@ -390,4 +400,27 @@ test('静态接线：端点/工具/示例配置/审计链', () => {
   const audit = fs.readFileSync(path.join(ROOT, 'scripts/test-audit.mjs'), 'utf8');
   assert.ok(audit.includes("test-scene-scope.mjs"), '纯函数测试要进 test:audit');
   assert.ok(audit.includes("test-scene-wiring.mjs"), '接线测试要进 test:audit');
+});
+
+test('同一批来信在唤醒、等待返回、会话中查询得到相同约定和证据',async()=>{
+ const cfg=baseConfig();cfg.socialV2.sticker={enabled:false};cfg.socialV2.wait={minMs:100,defaultMs:100,maxMs:200};
+ const h=await bridgeHarness({config:cfg});
+ try{
+  h.setMode('reserved2');
+  const port=await withServer(h);
+  h.appendSocialV2Message(OWNER,'主人','以后叫我阿林','以后叫我阿林',false,true,'address-1',[],OWNER_QQ,[]);
+  const wake=h.buildWakePromptV2(OWNER,'question');
+  const lookup=await get(port,'prompt?key='+encodeURIComponent(OWNER));
+  const wait=await post(port,'wait',{key:OWNER,purpose:'reply',timeoutMs:100});
+  assert.equal(lookup.status,200,lookup.data?.error);
+  assert.equal(wait.status,200,wait.data?.error);
+  const m=wait.data.conversationMemory;
+  assert.ok(m,'新消息必须获得记忆上下文');
+  assert.match(wake,/当前称呼：阿林/);
+  assert.equal(m.styleNotes,lookup.data.styleNotes);
+  assert.deepEqual(m.evidence,lookup.data.memoryEvidence);
+  assert.equal(m.evidence[0].refs[0],'address-1');
+  const other=await get(port,'prompt?key='+encodeURIComponent(GROUP));
+  assert.ok(!JSON.stringify(other.data).includes('address-1'));
+ }finally{await closeServers();await h.close();}
 });

@@ -120,6 +120,25 @@ await test('#29 唤醒 prompt 必须写明机器人自己的昵称与 QQ 号', a
   } finally { await h.close(); }
 });
 
+await test('只有意外留下的 QQ 草稿得到一次可自行放弃的发送提醒', async () => {
+  const h = await bridgeHarness();
+  try {
+    function finish(tools, text='draft', reason='completed') {
+      const sid='fixture-session', turn=1;
+      h.trackTurnEvent(sid,{type:'turn/start',data:{turn}});
+      for (const name of tools) h.trackTurnEvent(sid,{type:'tool/call',data:{turn,name:'mcp__snowluma__qq_'+name}});
+      h.trackTurnEvent(sid,{type:'assistant/message',data:{turn,message:{content:[{type:'text',text}]}}});
+      return h.trackTurnEvent(sid,{type:'turn/end',data:{turn,reason:{kind:reason}}}).draftOnly;
+    }
+    assert.equal(finish(['get_message_images']),true);
+    for (const tool of ['reply','send_message','send_sticker','send_voice','wait_for_messages','mark_read','close_conversation','set_wake_config']) assert.equal(finish([tool]),false,tool);
+    assert.equal(finish([],'[SILENT]'),false);
+    assert.equal(finish([],'','completed'),false);assert.equal(finish([],'draft','cancelled'),false);
+    assert.match(h.buildWakeReminderPromptV2('group:456',true),/QQ 没收到/);
+    assert.doesNotMatch(h.buildWakeReminderPromptV2('group:456'),/QQ 没收到/);
+  } finally {await h.close();}
+});
+
 if (failures) {
   console.error(`\n${failures} 项失败`);
   process.exitCode = 1;

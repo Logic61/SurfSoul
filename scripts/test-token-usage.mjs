@@ -290,6 +290,24 @@ assert(daily.other.tokens === 550_000, 'dailyUsage 其他 token 数正确');
 assert(near(daily.total.cost, 2.1), 'dailyUsage 总额 = QQ + 其他');
 assert(daily.samples === 2, 'dailyUsage 不把窗口前的采样算进来');
 
+// ── sessionContextTokens：会话滚动阈值（2026-11-10）用的「当前上下文」──────────
+// 口径：最近一条 assistant usage 的 input 桶之和（cacheMiss+cacheHit+cacheWrite），
+// 不是会话累计计费量；同一轮多步/重试要取最新的一条。
+ledger = freshLedger();
+const ctxEmit = (sid, seq, turn, step, u) => ledger.ingestEvent({
+  sessionId: sid,
+  event: { seq, time: at, type: 'assistant/message', data: { turn, step, usage: u } },
+});
+ctxEmit('ctx-s', 1, 1, 1, usage(1000, 200, 30000)); // input = 1000 未命中 + 30000 命中
+assert(ledger.sessionContextTokens('ctx-s') === 31000,
+  `最近一轮上下文 = input 桶之和（实得 ${ledger.sessionContextTokens('ctx-s')}）`);
+ctxEmit('ctx-s', 2, 2, 1, usage(500, 100, 60000)); // 下一轮上下文变成 60500
+assert(ledger.sessionContextTokens('ctx-s') === 60500, '取最新一轮的上下文，不是把两轮累计相加');
+ctxEmit('ctx-s', 3, 2, 1, usage(900, 100, 61000)); // 同轮同步骤重试：后到（seq 更大）覆盖
+assert(ledger.sessionContextTokens('ctx-s') === 61900, '同 (turn, step) 的后到采样覆盖先到');
+assert(ledger.sessionContextTokens('other-s') === 0, '没有采样的会话返回 0（调用方据此不触发换会话）');
+assert(ledger.sessionContextTokens('') === 0, '空 sessionId 返回 0');
+
 // ── reset ───────────────────────────────────────────────────────────────
 ledger.reset();
 assert(ledger.summary().conversations.length === 0, 'reset 清空内存态');

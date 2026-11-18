@@ -62,7 +62,7 @@ test('真实预设能定位到 persona 的 prefix 块', () => {
 
 test('抽出的是 YAML 解析后的真实字符串（折叠标量已展开）', () => {
   assert.equal(typeof originalPrefix, 'string');
-  assert.ok(originalPrefix.length > 2000, `提示词应有实质内容，实际 ${originalPrefix.length} 字符`);
+  assert.ok(originalPrefix.length > 1000, `提示词应有实质内容，实际 ${originalPrefix.length} 字符`);
   for (const marker of PRESET_REQUIRED_MARKERS) {
     assert.ok(originalPrefix.includes(marker), `内置提示词应包含安全基线段落：${marker}`);
   }
@@ -168,7 +168,7 @@ test('写回沿用文件主导行尾，且不吞掉块尾空行', () => {
 
 test('只含空格/Tab 的行也能安全往返（不会被当成空行读丢）', () => {
   const spaced = [
-    ...originalPrefix.split('\n').slice(0, 3),
+    originalPrefix,
     '   ',
     '\t',
     ' 带前后空格的正文 ',

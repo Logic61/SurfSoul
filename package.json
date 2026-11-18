@@ -14,6 +14,7 @@
     "./locale/*.json": "./plugins/surfcore/locale/*.json",
     "./icon": "./plugins/surfcore/icon.svg",
     "./qq-tool-restrict.mjs": "./plugins/surfcore/qq-tool-restrict.mjs",
+    "./qq-model-route": "./plugins/surfcore/lib/qq-model-route.js",
     "./qq-owner-approval.mjs": "./plugins/surfcore/qq-owner-approval.mjs",
     "./package.json": "./package.json"
   },
@@ -132,6 +133,8 @@
     "version:bump": "node scripts/version.mjs bump",
     "version:tag": "node scripts/version.mjs tag",
     "test:version": "node scripts/test-version.mjs",
+    "life": "node scripts/life-settings.mjs",
+    "test:life": "node scripts/test-life-settings.mjs && node scripts/test-life-mcp.mjs && node scripts/test-life-qq-runtime.mjs && node scripts/test-life-bridge-auth.mjs && node scripts/test-life-bili-wiring.mjs && node scripts/test-life-review.mjs",
     "build:plugin-package": "node scripts/build-plugin-package.mjs",
     "setup:plugin": "node scripts/setup-plugin.mjs",
     "test:plugin-package": "node scripts/test-plugin-package.mjs"

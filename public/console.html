@@ -2064,9 +2064,7 @@ button:active:not(:disabled) {
       <span class="meta">群聊里只有被允许的人说话，才可能触发语音</span>
     </div>
     <div class="row" style="flex-wrap:wrap;gap:8px;align-items:center;margin-top:6px">
-      <label style="flex:0 0 120px">频率上限</label>
-      <input id="voiceMaxPerMinute" type="number" min="1" max="60" style="width:70px"> 条/分钟
-      <input id="voiceMaxPerHour" type="number" min="1" max="600" style="width:70px"> 条/小时
+      <span class="meta">语音共用普通消息间隔，距本会话自己上一条发送成功的消息须超过本段时长。</span>
       <label style="flex:0 0 auto"><input id="voiceAiEnabled" type="checkbox" style="width:auto"> 允许 AI 主动发语音</label>
     </div>
     <div class="meta" style="margin-top:6px">
@@ -2154,7 +2152,7 @@ button:active:not(:disabled) {
       </div>
       <div id="voiceList" class="meta" style="margin-top:8px">点「刷新语音库」加载…</div>
       <div class="meta" style="margin-top:6px">
-        上限：时长 <code>maxSeconds</code>、体积 <code>maxBytes</code>、频率 <code>maxPerMinute</code>/<code>maxPerHour</code>（见下方配置区）。
+        上限：时长 <code>maxSeconds</code>、体积 <code>maxBytes</code>。发送间隔与普通消息共用，语音还按实测时长排队。
         命令行等价工具：<code>node scripts/send-voice.mjs list-voice</code>（经桥接）或 <code>node voice-cli.mjs</code>（独立工具，在上级 <code>voice-tool/</code> 里直连 SnowLuma）。
       </div>
 
@@ -2602,11 +2600,14 @@ button:active:not(:disabled) {
     </section>
 <section id="section-dsh" data-page="overview" class="card span-all">
       <h2 data-note="下一条消息生效">DSH 模型与思考强度</h2>
+      <div class="row"><label>QQ 对话引擎 <select id="qqEngine"><option value="deepseek">DeepSeek</option><option value="codex">Codex CLI</option></select></label>
+        <label>Codex 模型 <select id="qqCodexModel"><option>gpt-6.1-sol</option><option>gpt-6-astra</option></select></label>
+        <button id="qqEngineSave">保存引擎</button><span class="meta" id="qqEngineMsg"></span></div>
       <div class="meta">模型：<span id="dshModelText">-</span> ｜ 提供方：<span id="dshProviderText">-</span></div>
       <div class="row" style="margin-top:10px">
-        <label style="flex:0 0 auto">思考强度</label>
+        <label for="dshEffortSelect" id="dshEffortLabel" style="flex:0 0 auto">思考强度</label>
         <select id="dshEffortSelect" style="flex:0 1 220px"></select>
-        <button id="dshEffortSave">保存</button>
+        <button id="dshEffortSave" disabled>保存</button>
         <span class="meta" id="dshEffortMsg"></span>
       </div>
       <div class="meta" id="dshEffortNote"></div>
@@ -3102,6 +3103,11 @@ async function refreshDshModel() {
     document.getElementById('dshModelText').textContent = r.model || '-';
     document.getElementById('dshProviderText').textContent = r.provider || '-';
     const select = document.getElementById('dshEffortSelect');
+    document.getElementById('qqEngine').value = r.qqEngine;
+    document.getElementById('qqCodexModel').value = r.qqCodexModel;
+    select.dataset.engine = r.effortEngine || 'deepseek';
+    document.getElementById('dshEffortLabel').textContent = (select.dataset.engine === 'codex' ? 'Codex' : 'DeepSeek') + ' 思考强度';
+    document.getElementById('dshEffortSave').disabled = false;
     const labels = r.labels || {};
     select.replaceChildren();
     for (const option of (r.options || [])) {
@@ -3109,7 +3115,8 @@ async function refreshDshModel() {
       el.value = option;
       const info = labels[option] || {};
       const isDefault = option === (r.providerDefault || r.default);
-      el.textContent = `${option}${isDefault ? '（默认）' : ''}`;
+      const name = select.dataset.engine === 'codex' && info.name ? info.name + ' · ' + option : option;
+      el.textContent = `${name}${isDefault ? '（默认）' : ''}`;
       if (info.description) el.title = info.description;
       select.appendChild(el);
     }
@@ -3121,7 +3128,6 @@ async function refreshDshModel() {
     document.getElementById('dshEffortSideEffect').textContent = r.globalSideEffect
       ? '注意：切换会同时写入 DSH 的全局默认（~/.dsh/settings.yaml 的 agent-default-model），也就是 Web GUI 里新建会话的默认强度也会跟着变。'
       : '';
-    document.getElementById('dshEffortMsg').textContent = '';
   } catch (error) {
     document.getElementById('dshEffortMsg').textContent = '读取失败：' + (error?.message ?? error);
   }
@@ -3291,15 +3297,29 @@ document.getElementById('roleInjectMaxSave').addEventListener('click', async () 
 });
 
 // ── DSH 思考强度 ────────────────────────────────────────────────────────────
+document.getElementById('qqEngineSave').addEventListener('click', async () => {
+  const engine = document.getElementById('qqEngine').value, codexModel = document.getElementById('qqCodexModel').value;
+  const result = await api('/api/dsh/engine','POST',{engine,codexModel});
+  document.getElementById('qqEngineMsg').textContent = result.ok ? '已保存，下次生成时生效' : (result.error || '保存失败');
+  if (result.ok) {
+    document.getElementById('dshEffortMsg').textContent = '';
+    await refreshDshModel();
+  }
+});
 document.getElementById('dshEffortSave').addEventListener('click', async () => {
-  const effort = document.getElementById('dshEffortSelect').value;
+  const select = document.getElementById('dshEffortSelect');
   const msg = document.getElementById('dshEffortMsg');
   msg.textContent = '保存中…';
   msg.className = 'meta';
-  const r = await api('/api/dsh/effort', 'POST', { reasoningEffort: effort });
-  msg.textContent = r.ok ? `✅ 已设为 ${r.reasoningEffort}，下一条消息生效` : ('❌ ' + (r.error || '保存失败'));
-  msg.className = r.ok ? 'meta ok' : 'meta err';
-  if (r.ok) refreshDshModel();
+  try {
+    const r = await api('/api/dsh/effort', 'POST', { engine: select.dataset.engine, reasoningEffort: select.value });
+    await refreshDshModel();
+    msg.textContent = r.ok ? `✅ 已设为 ${r.reasoningEffort}，下一条消息生效` : ('❌ ' + (r.error || '保存失败'));
+    msg.className = r.ok ? 'meta ok' : 'meta err';
+  } catch (error) {
+    msg.textContent = '保存失败：' + error.message;
+    msg.className = 'meta err';
+  }
 });
 document.getElementById('silentOn').addEventListener('click', async () => { await api('/api/role-mode', 'POST', { mode: 'silent' }); refresh(); });
 document.getElementById('silentOff').addEventListener('click', async () => { await api('/api/role-mode', 'POST', { mode: 'active' }); refresh(); });
@@ -3365,7 +3385,7 @@ async function loadVoiceLibrary(force) {
     }
     const limits = r.limits || {};
     box.innerHTML = '共 ' + voiceEntries.length + ' 个（上限：' + (limits.maxSeconds || '?') + ' 秒 / '
-      + Math.round((limits.maxBytes || 0) / 1024 / 1024) + ' MiB / ' + (limits.maxPerMinute || '?') + ' 每分钟）：<br>'
+      + Math.round((limits.maxBytes || 0) / 1024 / 1024) + ' MiB）：<br>'
       + voiceEntries.map((v, i) => {
         const bad = v.ok === false;
         // v.name / v.error / v.detail 来自语音库的文件名与探测结果，属于**外部数据**：
@@ -5573,8 +5593,6 @@ async function vpSaveRules() {
   const msg = document.getElementById('voiceRulesMsg');
   const body = {
     triggerWho: document.getElementById('voiceTriggerWho').value,
-    maxPerMinute: Number(document.getElementById('voiceMaxPerMinute').value) || 2,
-    maxPerHour: Number(document.getElementById('voiceMaxPerHour').value) || 10,
     aiEnabled: document.getElementById('voiceAiEnabled').checked,
   };
   const r = await api('/api/voice/rules', 'POST', body).catch((e) => ({ ok: false, error: e.message }));

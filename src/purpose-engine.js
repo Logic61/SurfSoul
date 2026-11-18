@@ -1606,7 +1606,7 @@ export function goalToCandidate(goal) {
     source: 'goal',
     sourceId: goal.id,
     at: goal.lastSeenAt,
-    evidence: goal.evidence?.[0]?.text || '',
+    evidence: goal.evidence?.find(item => item?.source !== 'persona' && item?.id !== 'persona' && item?.text)?.text || '',
     nextStep: goal.nextStep,
     weight: 1,
     fromPending: false,
@@ -2005,6 +2005,8 @@ export function buildPurposePrompt({
   ownerUin = '',
   ownerName = '主人',
   token = '',
+  canSendSticker = false,
+  canLookAtScreen = false,
   contextBlocks = [],
   materials = [],
   candidates = [],
@@ -2118,7 +2120,9 @@ export function buildPurposePrompt({
   lines.push('   - 不要每句都提问；不要复述素材原文；不要提群友 QQ 号 / 群号；群友的私事只说事不说人。');
   lines.push('3) 像突然想起来一样自然。不要写「定时 / 机制 / 任务 / 我刚醒 / 系统提示」，也不要说「我刚看到你的消息」（根本没有消息）。');
   if (String(mode) === 'reserved2') {
-    lines.push(`4) 发送方式：必须真的用工具发出去 —— 调用 qq_send_private_message，参数 userId 填 ${uin || '<主人QQ>'}、${token ? `token 填 ${token}、` : 'token 必填、'}message 填你要说的话；也可以用 qq_send_message，key 填 private:${uin || '<主人QQ>'}。只输出文字不会发到 QQ。`);
+    if (canLookAtScreen) lines.push('如果是在好奇他眼前的事，可以自己用 qq_look_at_screen 看一眼，再决定想不想说什么。');
+    if (canSendSticker) lines.push('一张收藏表情也可以是你主动找他的全部，用 qq_send_sticker 发到同一私聊。');
+    lines.push(`4) 想发文字时，必须真的用工具发出去 —— 调用 qq_send_private_message，参数 userId 填 ${uin || '<主人QQ>'}、${token ? `token 填 ${token}、` : 'token 必填、'}message 填你要说的话；也可以用 qq_send_message，key 填 private:${uin || '<主人QQ>'}。只输出文字不会发到 QQ。`);
   } else {
     lines.push('4) 直接输出你要发的话（当前模式会自动转发），不要解释、不要加引号。');
   }

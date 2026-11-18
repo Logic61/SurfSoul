@@ -83,7 +83,7 @@ const RESTRICTED_LOCAL_TOOLS = [
   'subagent_claude_code',
   'spawn_teammate', 'team_task_create', 'team_task_get', 'team_task_list', 'team_task_update',
   'plugin_manager',
-  'schedule_create', 'schedule_list', 'schedule_update', 'schedule_delete',
+  'schedule_create', 'schedule_list', 'schedule_view', 'schedule_edit', 'schedule_update', 'schedule_delete',
   // DSH 0.2.1 新增（2026-11-03 从运行中的 app.asar 对账扫出来的）：
   // 终端控制 = 另一条 shell；插件市场 = 装插件（任意代码执行）；会话检索 = 跨会话读日志。
   'terminal_open', 'terminal_close', 'terminal_list', 'terminal_read', 'terminal_send', 'terminal_signal',

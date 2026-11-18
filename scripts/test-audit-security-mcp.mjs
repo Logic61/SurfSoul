@@ -236,3 +236,18 @@ test('denied legacy group reads never reveal the group allowlist', async () => {
     assert.equal(calls.length, 2, 'only the two authorization checks should reach the bridge');
   }
 });
+
+test('own group card has no member or cross-group target; screen follows its configuration', async () => {
+  const requests = [];
+  const fakeFetch = async (url, init) => {
+    requests.push({ url: String(url), body: JSON.parse(init.body) });
+    return { ok: true, json: async () => ({ ok: true }) };
+  };
+  const call = loadSnowlumaTools(fakeFetch, { purpose: { screen: { enabled: true } } });
+  await call('qq_set_my_group_card', { key: 'group:456', token: 'test', card: '今天是猫', userId: '123', groupId: '789' });
+  assert.deepEqual(requests[0].body, { key: 'group:456', card: '今天是猫' });
+  await assert.rejects(call('qq_set_my_group_card', { key: 'private:7', token: 'test', card: '猫' }));
+  await call('qq_look_at_screen', { key: 'private:7', token: 'test' });
+  assert.match(requests[1].url, /look-at-screen$/);
+  await assert.rejects(loadSnowlumaTools(fakeFetch, {})('qq_look_at_screen'), /should be registered/);
+});
