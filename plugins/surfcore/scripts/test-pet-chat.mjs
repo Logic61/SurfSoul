@@ -412,6 +412,34 @@ try {
     }, null, 2)}\n`, 'utf8');
   }
 
+  {
+    const { factory, calls } = captureStreamFactory({ reply: '看到了。' });
+    const fresh = () => createPetChatService({ ctx: mockCtx(factory), stateDir });
+    const service = fresh(), role = service.roleInfo();
+    const before = service.history(200).messages.length;
+    const ask = service.recordStudyMessage(role, 'trial', 'user', '伴学测试题目', 'voice');
+    service.recordStudyMessage(role, 'trial', 'user', '伴学测试题目', 'voice');
+    service.recordStudyMessage(role, 'trial', 'assistant', '伴学测试回答', 'text');
+    service.recordStudyMessage({id:'other'}, 'other-trial', 'assistant', '另一角色的记录', 'text');
+    service.recordStudyMessage(role, 'quiet', 'assistant', '', 'text');
+    const history = fresh().history(200).messages;
+    assert.equal(history.length, before + 2);
+    assert.deepEqual(history.filter(m => m.source === 'study').map(m => m.text), ['伴学测试题目','伴学测试回答']);
+    assert.equal(history.find(m => m.id === ask.id).modality, 'voice');
+    const next = await service.chat({text:'你好'});
+    assert.equal(next.ok, true);
+    assert.doesNotMatch(calls[0].messages[0].content[0].text, /伴学测试题目|伴学测试回答/);
+  }
+  {
+    const { factory } = captureStreamFactory({ reply:'你好。' });
+    const fresh = () => createPetChatService({ ctx:mockCtx(factory), stateDir });
+    const service = fresh();
+    for (const voiceId of ['tide','stella']) {
+      const turn = await service.chat({text:'问候', modality:'voice', voiceProvider:'deepseek', voiceId});
+      assert.equal(turn.ok,true);
+      assert.equal(fresh().cloudVoiceMessage(turn.reply.id).voiceId,voiceId);
+    }
+  }
   console.log('pet-chat tests OK');
 } finally {
   fs.rmSync(tmp, { recursive: true, force: true });

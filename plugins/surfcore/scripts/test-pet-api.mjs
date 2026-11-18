@@ -233,6 +233,20 @@ console.log('## 7. 看屏幕闸门端点（2026-11-07）：QQ 载体通过 pet-a
   const apiWithScreen = createPetApiService({
     chat, purpose, petService, screen, stateDir, currentDshUrl: () => BASE, pluginLog: () => {}, version: 't',
   });
+  let lookCount = 0;
+  screen.enabled = () => true;
+  let privacy = 'sensitive';
+  screen.look = async () => {
+    lookCount++;
+    return { ok: true, at: 123, verdict: { ok: true, privacy, summary: 'fixture observation' } };
+  };
+  const look = () => callWith(apiWithScreen, { method: 'POST', pathname: '/purpose/screen/look', headers: jsonPost(), body: '{}' });
+  ok((await look()).data.observation === '画面细节未展示', '隐私画面不返回摘要');
+  for (const value of [undefined, 'unknown', 'other']) { privacy = value; ok((await look()).data.observation === '画面细节未展示', '未知画面不回传'); }
+  privacy = 'none';
+  ok((await look()).data.observation === 'fixture observation', '普通画面透传简短观察');
+  screen.enabled = () => false;
+  ok((await look()).res.statusCode === 403 && lookCount === 5, '开关关闭时不截图');
   const decided = await callWith(apiWithScreen, {
     method: 'POST', pathname: '/purpose/screen/decide', headers: jsonPost(),
     body: '{"reason":"bridge-gate","ownerName":"主人"}',

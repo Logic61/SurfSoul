@@ -24,7 +24,7 @@ import { resolvePersonaFile } from './persona.js';
 import { memoryCardPromptBlock } from './memory-card.js';
 import { activeMemoryPaths, readCurrentCharacter } from '../../../src/character-persona.js';
 import { adminFromSources } from '../../../src/admin-identity.js';
-import { appendMemoryInboxEvent } from '../../../src/memory-card.js?rev=memfix-d913f4f63b';
+import { appendMemoryInboxEvent } from '../../../src/memory-card.js?rev=memfix-60b63add51';
 import { synthesizeToFile, wavDurationMs } from '../../../src/voice-tts.js';
 import { buildChatScreenBlock, wantsScreenLook } from './screen-watch-core.js';
 
@@ -370,10 +370,34 @@ export function createPetChatService({ ctx, stateDir, pluginLog = () => {}, toke
   }
 
   // ── 历史 ────────────────────────────────────────────────────────────────
-  function historyFile() {
-    const role = roleInfo();
+  function historyFile(prefix = 'history', role = roleInfo()) {
     const id = role.id || 'default';
-    return path.join(chatDir, `history-${id.replace(/[^a-zA-Z0-9_-]/g, '') || 'default'}.json`);
+    return path.join(chatDir, `${prefix}-${id.replace(/[^a-zA-Z0-9_-]/g, '') || 'default'}.json`);
+  }
+
+  function studyMessages(role) {
+    const file = historyFile('study', role);
+    try {
+      const data = JSON.parse(fs.readFileSync(file, 'utf8'));
+      if (!Array.isArray(data.messages)) throw new Error('伴学记录格式异常');
+      return data.messages;
+    } catch (error) {
+      if (error.code === 'ENOENT') return [];
+      throw error;
+    }
+  }
+
+  function recordStudyMessage(role, turnId, sender, text, modality) {
+    if (!text) return null;
+    const messages = studyMessages(role);
+    const id = 'study-' + turnId + '-' + sender;
+    const existing = messages.find(message => message.id === id);
+    if (existing) return existing;
+    const message = { id, role: sender, source: 'study', text, modality, at: Date.now() };
+    messages.push(message);
+    ensureDirs();
+    writeJsonAtomic(historyFile('study', role), { messages: messages.slice(-MAX_HISTORY_MESSAGES) });
+    return message;
   }
 
   function readHistory() {
@@ -422,6 +446,9 @@ export function createPetChatService({ ctx, stateDir, pluginLog = () => {}, toke
       at: message.at,
     };
     if (message.proactive) out.proactive = true;
+    if (message.voiceProvider === 'deepseek') {
+      out.audio = { url: '/dsh-surfcore/pet-api/chat/audio/' + encodeURIComponent(message.id) + '?token=' + encodeURIComponent(token()) };
+    }
     if (message.audioKey) {
       const file = path.join(voiceDir, `${message.audioKey}.wav`);
       try {
@@ -654,7 +681,7 @@ export function createPetChatService({ ctx, stateDir, pluginLog = () => {}, toke
    * 到点 abort 流并抛 code='timeout'；定时器一定在 finally 里清掉。超时错误同样走
    * 「一个字都没吐出来才换档重试」的既有规则，所以最坏是两次尝试各等一个超时。
    */
-  async function complete({ system, user, maxTokens = 800, temperature = 1, signal = null } = {}) {
+  async function complete({ system, user, maxTokens = 800, temperature = 1, signal = null, reasoningEffort } = {}) {
     const llm = ctx.get('llm');
     if (!llm?.stream) throw new Error('DSH 的 llm 服务不可用（无法发起模型调用）');
     const target = resolveModel();
@@ -669,8 +696,9 @@ export function createPetChatService({ ctx, stateDir, pluginLog = () => {}, toke
       maxTokens: clampInt(maxTokens, 800, 128, 4000),
       temperature: Math.min(2, Math.max(0, Number(temperature) || 1)),
     };
-    const attempts = s.chat.reasoningEffort && s.chat.reasoningEffort !== 'off'
-      ? [s.chat.reasoningEffort, undefined]
+    const requestedEffort = reasoningEffort ?? s.chat.reasoningEffort;
+    const attempts = requestedEffort && requestedEffort !== 'off'
+      ? [requestedEffort, undefined]
       : [undefined];
     let lastFailure = null;
     for (const effort of attempts) {
@@ -792,13 +820,13 @@ export function createPetChatService({ ctx, stateDir, pluginLog = () => {}, toke
   }
 
   // ── 对外：聊天 ──────────────────────────────────────────────────────────
-  async function chat({ text = '', modality = 'text' } = {}) {
+  async function chat({ text = '', modality = 'text', inputModality = modality, allowScreenLook = true, voiceProvider, voiceId, voiceComplete } = {}) {
     const s = settings();
     if (!s.chat.enabled) return { ok: false, error: '桌宠对话已关闭（设置 → 桌宠 → 对话）' };
     const say = String(text ?? '').trim().slice(0, MAX_INPUT_CHARS);
     if (!say) return { ok: false, error: '说点什么吧' };
     const mode = modality === 'voice' ? 'voice' : 'text';
-    if (!llmReady()) return { ok: false, error: 'DSH 模型服务还没就绪，稍后再试' };
+    if (!voiceComplete && !llmReady()) return { ok: false, error: 'DSH 模型服务还没就绪，稍后再试' };
     if (tokenBudget?.block) {
       try {
         const gate = await tokenBudget.block('other');
@@ -814,7 +842,7 @@ export function createPetChatService({ ctx, stateDir, pluginLog = () => {}, toke
     // 对话里问到屏幕（"能看得到我屏幕吗 / 看看我桌面"）才现截一张：
     // 截图/视觉失败也要明确告诉她"没看清"，让她如实回答，不许编。
     let screenBlock = '';
-    if (screen?.enabled?.() && wantsScreenLook(say)) {
+    if (allowScreenLook && screen?.enabled?.() && wantsScreenLook(say)) {
       try {
         const look = await screen.look({ force: true, ownerName: owner.name, reason: 'chat' });
         screenBlock = buildChatScreenBlock(look?.verdict || null);
@@ -834,10 +862,11 @@ export function createPetChatService({ ctx, stateDir, pluginLog = () => {}, toke
     const user = userParts.filter(Boolean).join('\n');
 
     try {
-      const result = await complete({
+      const result = await (voiceComplete || complete)({
         system,
         user,
         maxTokens: mode === 'voice' ? 400 : 700,
+        reasoningEffort: mode === 'voice' ? 'low' : undefined,
         temperature: s.chat.temperature,
       });
       recordUsage(result.usage, result.model);
@@ -847,9 +876,12 @@ export function createPetChatService({ ctx, stateDir, pluginLog = () => {}, toke
       else reply = clip(reply, s.chat.maxReplyChars);
 
       const now = Date.now();
-      const userMessage = { id: `u-${now}-${tokenHash(say).slice(0, 6)}`, role: 'user', text: say, modality: mode, at: now };
+      const userMessage = { id: `u-${now}-${tokenHash(say).slice(0, 6)}`, role: 'user', text: say, modality: inputModality === 'voice' ? 'voice' : 'text', at: now };
       const aiMessage = { id: `a-${now}-${tokenHash(reply).slice(0, 6)}`, role: 'assistant', text: reply, modality: mode, at: now };
-      if (mode === 'voice') {
+      if (mode === 'voice' && voiceProvider === 'deepseek') {
+        aiMessage.voiceProvider = 'deepseek';
+        aiMessage.voiceId = voiceId;
+      } else if (mode === 'voice' && voiceProvider !== 'off') {
         const tts = await synthesize(reply);
         if (tts.ok) {
           aiMessage.audioKey = tts.key;
@@ -882,7 +914,7 @@ export function createPetChatService({ ctx, stateDir, pluginLog = () => {}, toke
         userMessage,
         latencyMs: Date.now() - startedAt,
         remembered,
-        voice: aiMessage.audioKey ? { ok: true, key: aiMessage.audioKey } : (mode === 'voice' ? { ok: false, error: lastError || '语音合成失败，已用文字回复' } : null),
+        voice: aiMessage.voiceProvider ? { ok: true, provider: aiMessage.voiceProvider } : aiMessage.audioKey ? { ok: true, key: aiMessage.audioKey } : (mode === 'voice' && voiceProvider !== 'off' ? { ok: false, error: lastError || '语音合成失败，已用文字回复' } : null),
       };
     } catch (error) {
       lastError = String(error?.message ?? error).slice(0, 200);
@@ -945,10 +977,16 @@ export function createPetChatService({ ctx, stateDir, pluginLog = () => {}, toke
   function historyPayload(limit = 60) {
     const history = readHistory();
     const role = roleInfo();
+    let study = [], warning;
+    try { study = studyMessages(role); }
+    catch { warning = '伴学记录暂时无法读取'; }
     return {
       ok: true,
+      warning,
       role: { id: role.id, name: role.name },
-      messages: history.messages.slice(-clampInt(limit, 60, 1, MAX_HISTORY_MESSAGES)).map(publicMessage),
+      messages: [...history.messages, ...study].sort((a, b) => a.at - b.at)
+        .slice(-clampInt(limit, 60, 1, MAX_HISTORY_MESSAGES))
+        .map(m => m.source === 'study' ? m : publicMessage(m)),
       lastUserAt: history.lastUserAt,
       lastProactiveAt: history.lastProactiveAt,
     };
@@ -1008,10 +1046,12 @@ export function createPetChatService({ ctx, stateDir, pluginLog = () => {}, toke
     chat,
     proactive,
     history: historyPayload,
+    recordStudyMessage,
     poll,
     notePresence,
     online,
     readAudio,
+    cloudVoiceMessage: id => readHistory().messages.find(m => m.id === id && m.role === 'assistant' && m.voiceProvider === 'deepseek'),
     emit,
     purposeStateFile,
     roleInfo,

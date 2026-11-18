@@ -26,6 +26,7 @@ import {
   normalizeScreenConfig,
   parseScreenVerdict,
   retryMs,
+  screenPerLookRates,
 } from './screen-watch-core.js';
 
 const ONE_MINUTE = 60_000;
@@ -393,6 +394,20 @@ export function createScreenWatchService({
     return evaluateScreenGate(last?.verdict, config());
   }
 
+  /**
+   * perLook 触发模式下，定时器要不要兜底。
+   * perLook 的本意是「每张截图抽签」而不是定时出发；只有截图管道长时间不可用时
+   * （没看过 / 最近一次失败 / 超过 30 分钟没有新判定），才让旧排程临时接管，避免彻底失语。
+   */
+  function scheduledFallback() {
+    const cfg = config();
+    if (cfg.interruptTrigger !== 'perLook') return true;
+    if (!last) return true;
+    if (last.ok !== true) return true;
+    if (Date.now() - (Number(last.at) || 0) > 30 * ONE_MINUTE) return true;
+    return false;
+  }
+
   function status() {
     const cfg = config();
     const st = loadPolicyState();
@@ -414,6 +429,18 @@ export function createScreenWatchService({
         leakCooldownMin: cfg.leakCooldownMin,
         lotterySnoozeMin: cfg.lotterySnoozeMin,
       },
+      // 触发方式（2026-11-08）：perLook = 每张截图抽签、抽中即尝试搭话。
+      trigger: (() => {
+        const rates = screenPerLookRates(cfg);
+        return {
+          interruptTrigger: cfg.interruptTrigger,
+          targetPerDay: cfg.targetPerDay,
+          triggerMinGapMin: cfg.triggerMinGapMin,
+          looksPerDay: rates.looksPerDay,
+          pAbove: rates.pAbove,
+          pBelow: rates.pBelow,
+        };
+      })(),
       leak: { day: st.day, count: st.leakCount, lastAt: st.lastLeakAt || 0 },
       lastDraw: st.lastDraw
         ? {
@@ -448,12 +475,15 @@ export function createScreenWatchService({
 
   return {
     config,
+    resolveApiKey,
     enabled,
     look,
     decide,
     latest,
     gate,
     status,
+    scheduledFallback,
+    triggerMode: () => config().interruptTrigger,
     intervalMs: () => intervalMs(config()),
     retryMs: () => retryMs(config()),
     formatVerdict: (verdict) => formatScreenVerdict(verdict),

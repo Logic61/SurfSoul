@@ -81,6 +81,9 @@ export function createPetPurposeService({ chat, tokenBudget = null, pluginLog = 
   let fallbackAt = 0;
   let lastFallback = null;
   let lastFocusLogAt = 0;
+  // 2026-11-08 perLook 触发：上一次「截图抽中→尝试搭话」的时间（只在内存里；
+  // 重启后清零没关系，minGap 只是防连发，不是精确账本）。
+  let lastScreenTriggerAt = 0;
 
   function focusNow() {
     try { return chat.focusEnabled?.() === true; } catch { return false; }
@@ -422,8 +425,12 @@ export function createPetPurposeService({ chat, tokenBudget = null, pluginLog = 
     };
   }
 
-  /** 跑一轮桌宠主动搭话。force=true 时跳过排程/安静时段/空闲判断（设置页「试一次」）。 */
-  async function runOnce({ force = false, previewOnly = false } = {}) {
+  /**
+   * 跑一轮桌宠主动搭话。force=true 时跳过排程/安静时段/空闲判断（设置页「试一次」）。
+   * screenTriggered=true 表示这一轮由「每张截图抽中」触发（perLook）：只越过 nextFireAt 排程，
+   * 其他硬闸（安静时段/每日上限/主人刚聊过/预算/专注）仍然照拦。
+   */
+  async function runOnce({ force = false, previewOnly = false, screenTriggered = false, screenVerdict: triggeredVerdict = null } = {}) {
     if (running) return { ok: false, reason: 'busy' };
     const p = purposeConfig();
     if (!p.chatEnabled) return { ok: false, reason: 'chat-disabled', error: '桌宠对话已关闭' };
@@ -466,20 +473,29 @@ export function createPetPurposeService({ chat, tokenBudget = null, pluginLog = 
           },
         });
         if (decision.action !== 'run') {
-          if (decision.reason !== 'waiting') {
-            markPurposeSkip(state, { now, reason: decision.reason, nextFireAt: decision.nextFireAt });
-            saveState(state);
-            pluginLog(`[pet-purpose] 暂不出发：${decision.reason}`);
+          // perLook：截图抽中触发的那一轮可以越过 nextFireAt（perLook 下它本来就不会走到点），
+          // 但安静时段/每日上限/主人刚聊过/预算这些硬闸仍然照拦。
+          const bypassWaiting = screenTriggered === true && decision.reason === 'waiting';
+          if (!bypassWaiting) {
+            if (decision.reason !== 'waiting') {
+              markPurposeSkip(state, { now, reason: decision.reason, nextFireAt: decision.nextFireAt });
+              saveState(state);
+              pluginLog(`[pet-purpose] 暂不出发：${decision.reason}`);
+            }
+            return { ok: false, reason: decision.reason, nextFireAt: decision.nextFireAt };
           }
-          return { ok: false, reason: decision.reason, nextFireAt: decision.nextFireAt };
         }
       }
 
-      // 看屏幕（2026-11-01；2026-11-07 起由 gate() 换成 decide()）：
-      // 自动轮次在真正要出发前先看一眼屏幕，由 screen.decide() 一次完成「截图（带节流）/ 视觉判定 /
-      // 硬闸 / 概率抽签 / 泄漏预算」。硬闸（隐私、游戏/会议）不参与抽签；视觉失败按 fail-open 继续。
-      let screenVerdict = null;
-      if (!previewOnly && force !== true && screen?.enabled?.()) {
+      // 看屏幕（2026-11-01；2026-11-07 gate→decide；2026-11-08 perLook：抽签在每张截图后做）：
+      // · departure：出发前看一眼，decide() 做「截图/视觉/硬闸/抽签/泄漏预算」；
+      // · perLook   ：抽签已经在截图循环里做完，这一轮直接用触发时的那份判定，不再重抽；
+      //               只有截图管道不可用、由定时器兜底时才直接 fail-open 继续。
+      let screenVerdict = triggeredVerdict?.ok === true ? triggeredVerdict : null;
+      const screenMode = (() => {
+        try { return screen?.config?.()?.interruptTrigger === 'perLook' ? 'perLook' : 'departure'; } catch { return 'departure'; }
+      })();
+      if (!previewOnly && force !== true && !screenTriggered && screen?.enabled?.() && screenMode !== 'perLook') {
         try {
           const decision = typeof screen.decide === 'function'
             ? await screen.decide({ ownerName: chat.ownerInfo().name, reason: 'purpose-gate' })
@@ -646,12 +662,74 @@ export function createPetPurposeService({ chat, tokenBudget = null, pluginLog = 
     }
   }
 
+  /** 屏幕服务的当前配置（拿不到就按 departure 处理，行为退回旧版）。 */
+  function screenConfigNow() {
+    try {
+      const cfg = typeof screen?.config === 'function' ? screen.config() : null;
+      return cfg && typeof cfg === 'object' ? cfg : null;
+    } catch { return null; }
+  }
+
+  /**
+   * perLook 模式下，此刻能不能把「这张截图抽中」落成一次真的搭话。
+   * 目的是别白抽：每日上限到了 / 刚说过话 / 主人刚聊过 / 载体不在线时，连抽签都不做。
+   */
+  function canScreenTrigger(p, now = Date.now()) {
+    if (running) return { ok: false, reason: 'busy' };
+    if (p.config.enabled === false) return { ok: false, reason: 'disabled' };
+    const state = loadState();
+    ensurePurposeDay(state, now);
+    if (p.config.dailyMax > 0 && state.countToday >= p.config.dailyMax) return { ok: false, reason: 'daily-max' };
+    const screenCfg = screenConfigNow() || {};
+    const minGap = Math.max(1, Number(screenCfg.triggerMinGapMin) || 20) * MINUTE;
+    const lastAt = Math.max(
+      lastScreenTriggerAt,
+      Number(state.lastSentAt) || 0,
+      Number(state.lastRunAt) || 0,
+    );
+    if (lastAt > 0 && now - lastAt < minGap) return { ok: false, reason: 'trigger-gap', remainMs: minGap - (now - lastAt) };
+    const idle = ownerIdleMs(now);
+    if (Number.isFinite(idle) && idle >= 0 && idle < p.config.idleThresholdMs) return { ok: false, reason: 'owner-active' };
+    if (p.carrier === 'pet' && !chat.online().online) return { ok: false, reason: 'pet-offline' };
+    return { ok: true };
+  }
+
+  /** 截图抽中 → 交给对应载体真正出发（桌宠直接跑，QQ 载体让桥接跑）。 */
+  async function triggerFromScreen(p, decision) {
+    const verdict = decision?.verdict?.ok === true ? decision.verdict : null;
+    try {
+      if (p.carrier === 'pet') {
+        const result = await runOnce({ screenTriggered: true, screenVerdict: verdict });
+        pluginLog(`[pet-purpose] 截图触发结果：${result.ok ? '已出发' : result.reason}`);
+        return result;
+      }
+      if (!callBridge) {
+        pluginLog('[pet-purpose] 截图触发失败：没有 bridge 通道');
+        return null;
+      }
+      const result = await callBridge('/api/purpose/run', {
+        method: 'POST',
+        body: { screenTriggered: true, force: false },
+        timeoutMs: 60_000,
+      });
+      const data = result?.data ?? null;
+      pluginLog(`[pet-purpose] 截图触发（QQ 载体）结果：${data?.ok ? '已出发' : (data?.reason || result?.error || `HTTP ${result?.status ?? '?'}`)}`);
+      return data;
+    } catch (error) {
+      pluginLog('[pet-purpose] 截图触发异常：', String(error?.message ?? error).slice(0, 160));
+      return null;
+    }
+  }
+
   /**
    * 看屏幕（2026-11-01）：「每隔一段时间截一张」由这里驱动，服务内部按 intervalMin 节流；
    * 安静时段不看（夜里屏幕通常锁着，没必要浪费视觉调用）。
    * 2026-11-03：从 tick() 里拆出来自成一拍 —— 以前它排在载体/每日上限的早退之后，
    * 载体配成 QQ、或目的撞了 dailyMax 时整段被跳过，看屏幕一次都轮不到。
    * 看屏幕只受自己的闸门管（开关 / 专注 / token 预算 / 安静时段），与「要不要主动搭话」解耦。
+   *
+   * 2026-11-08（用户要求「每次截图完就打扰抽签」）：interruptTrigger=perLook 时，
+   * 每张截图判完之后就抽签；抽中即尝试一次主动搭话（截图本身成为触发源）。
    */
   async function lookScreen(p) {
     if (!screen?.enabled?.()) return { ok: false, reason: 'screen-disabled' };
@@ -663,7 +741,28 @@ export function createPetPurposeService({ chat, tokenBudget = null, pluginLog = 
     if (budgetBlocked) return { ok: false, reason: 'screen-budget' };
     if (inQuietHours(Date.now(), p.config)) return { ok: false, reason: 'screen-quiet' };
     try {
-      return await screen.look({ ownerName: chat.ownerInfo().name, reason: 'tick' });
+      const mode = screenConfigNow()?.interruptTrigger === 'perLook' ? 'perLook' : 'departure';
+      if (mode !== 'perLook') {
+        return await screen.look({ ownerName: chat.ownerInfo().name, reason: 'tick' });
+      }
+      // 1) 先看（保持聊天里「问屏幕」可用的上下文 + 让下面的抽签用同一张判定）
+      const look = await screen.look({ ownerName: chat.ownerInfo().name, reason: 'tick' });
+      if (look?.ok !== true || look?.verdict?.ok !== true) {
+        // 看不清就不抽：交给 scheduledFallback() 让定时器兜底，别按 fail-open 每张都触发。
+        return { ok: true, reason: 'screen-trigger-look-failed', look };
+      }
+      // 2) 现在不适合触发（额度/间隔/主人刚聊过）时，连抽签都不做，免得白烧泄漏额度。
+      const can = canScreenTrigger(p);
+      if (!can.ok) return { ok: true, reason: `screen-trigger-${can.reason}`, look, skipped: can.reason };
+      // 3) 每张截图抽一次签；抽中 → 尝试主动搭话
+      const decision = await screen.decide({ ownerName: chat.ownerInfo().name, reason: 'tick' });
+      if (decision?.allow !== true || (decision.kind !== 'ok' && decision.kind !== 'leak')) {
+        return { ok: true, reason: decision?.reason || 'screen-deny', decision, look };
+      }
+      lastScreenTriggerAt = Date.now();
+      pluginLog(`[pet-purpose] 截图抽中（${decision.reason}）→ 尝试主动搭话（${p.carrier === 'pet' ? '桌宠' : 'QQ'} 载体）`);
+      void triggerFromScreen(p, decision).catch(() => {});
+      return { ok: true, triggered: true, decision, look };
     } catch (error) {
       pluginLog('[pet-purpose] 定时看屏幕异常：', String(error?.message ?? error).slice(0, 160));
       return { ok: false, reason: 'screen-error' };
@@ -688,6 +787,9 @@ export function createPetPurposeService({ chat, tokenBudget = null, pluginLog = 
       await fallbackToQQ();
       return;
     }
+    // perLook：定时器让位给「每张截图抽签」；只有截图管道长时间不可用才退回定时出发。
+    const perLook = screenConfigNow()?.interruptTrigger === 'perLook' && screen?.enabled?.();
+    if (perLook && screen?.scheduledFallback?.() !== true) return;
     const state = loadState();
     ensurePurposeDay(state, lastTickAt);
     if (state.nextFireAt && lastTickAt < state.nextFireAt) return;

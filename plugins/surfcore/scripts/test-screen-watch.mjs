@@ -17,6 +17,8 @@ import {
   normalizeScreenConfig,
   parseScreenVerdict,
   screenInterruptProbability,
+  screenLooksPerDay,
+  screenPerLookRates,
   screenPromptLines,
   wantsScreenLook,
 } from '../lib/screen-watch-core.js';
@@ -56,6 +58,12 @@ console.log('## 1. 配置归一（坏值回落默认，不抛）');
   ok(def.ignoreBusy === false, '默认不忽略 busy（保持旧行为）');
   ok(normalizeScreenConfig({ ignoreBusy: true }).ignoreBusy === true, 'ignoreBusy 可显式打开');
   ok(normalizeScreenConfig({ ignoreBusy: 'yes' }).ignoreBusy === false, '非 true 的 ignoreBusy 视为关');
+  ok(def.interruptTrigger === 'departure', '默认抽签时机 = 出发时（保持旧行为）');
+  ok(normalizeScreenConfig({ interruptTrigger: 'perLook' }).interruptTrigger === 'perLook', 'perLook（每张截图抽）可显式打开');
+  ok(normalizeScreenConfig({ interruptTrigger: 'nonsense' }).interruptTrigger === 'departure', '非法 trigger 回落 departure');
+  ok(def.targetPerDay === 6 && def.triggerMinGapMin === 20, 'perLook 默认目标 6 次/天、最小间隔 20 分钟');
+  const clampTrigger = normalizeScreenConfig({ targetPerDay: 99, triggerMinGapMin: 0 });
+  ok(clampTrigger.targetPerDay <= 24 && clampTrigger.triggerMinGapMin >= 1, 'perLook 参数被 clamp');
 }
 
 console.log('## 2. 视觉提示词只要求 JSON、不许复述隐私');
@@ -89,7 +97,7 @@ console.log('## 3. 解析模型输出（围栏 / 前后废话 / 垃圾）');
 
   const badEnum = parseScreenVerdict({ summary: 'x', activity: 'coding', busy: 'true', interruptible: '0.7', privacy: 'weird' });
   ok(badEnum.activity === 'unknown', '未知活动名归一为 unknown');
-  ok(badEnum.busy === true && badEnum.privacy === 'none', '字符串 true / 未知隐私档归一');
+  ok(badEnum.busy === true && badEnum.privacy === 'unknown', '字符串 true / 未知隐私档归一');
 
   ok(extractJsonObject('not json') === null, 'extractJsonObject 对垃圾返回 null');
 }
@@ -99,7 +107,7 @@ console.log('## 3b. 截断 / 推理输出兜底（2026-11-01 真机踩到）');
   // 推理模型：max_tokens 打满时 content 里的 JSON 会被截断，整段 JSON.parse 必失败。
   const truncated = parseScreenVerdict('{"summary":"在看PPT","activity":"study","busy":false,"interruptible":0.6,"privacy":"none","sensitive":"');
   ok(truncated.ok === true && truncated.repaired === true, '被截断的 JSON 用逐字段兜底救回（不再整轮作废）');
-  ok(truncated.summary === '在看PPT' && truncated.activity === 'study' && truncated.interruptible === 0.6, '兜底救回的字段正确');
+  ok(truncated.summary === '' && truncated.activity === 'study' && truncated.interruptible === 0.6, '兜底救回的字段正确');
 
   const reasoning = parseScreenVerdict('屏幕上是课件。判断如下：{"summary":"在看课件","activity":"study","busy":false,"interruptible":0.55,"privacy":"none"}');
   ok(reasoning.ok === true && reasoning.summary === '在看课件', '推理文字里夹着 JSON 也能抠出来');
@@ -262,7 +270,7 @@ console.log('## 7. 宿主服务：节流 / 同画面缓存 / 用量 / fail-open'
   const noKey = createScreenWatchService({
     ctx: { get: () => ({ resolve: async () => undefined }) },
     stateDir,
-    getConfig: () => screenConfig,
+    getConfig: () => ({ ...screenConfig, apiKeyRef: 'SURFCORE_FIXTURE_NO_SCREEN_KEY' }),
     capture: async () => ({ ok: true, buffer: other, mediaType: 'image/jpeg', width: 10, height: 10, bytes: 10, ms: 1 }),
     fetchImpl: async () => { throw new Error('should not fetch without key'); },
   });
@@ -378,6 +386,33 @@ console.log('## 8. leaky 概率闸门（2026-11-07）：分布函数 / 双侧抽
   ok(aboveBudget.allow === true, '预算只约束低于阈值那侧（≥阈值照常抽签）');
 }
 
+console.log('## 8b. perLook（每张截图抽签，2026-11-08）：概率按每天目标次数换算');
+{
+  const v = (patch = {}) => ({ ok: true, summary: 'x', activity: 'working', busy: false, interruptible: 0.8, privacy: 'none', sensitive: '', ...patch });
+  const perLook = normalizeScreenConfig({
+    enabled: true, interruptPolicy: 'leaky', interruptTrigger: 'perLook', minInterruptible: 0.3,
+    intervalMin: 1, targetPerDay: 6, maxLeakPerDay: 1,
+  });
+  ok(screenLooksPerDay(perLook) === 450, 'intervalMin=1 → 每天约 450 张截图（清醒 15h ÷ 2 分钟）');
+  const rates = screenPerLookRates(perLook);
+  ok(Math.abs(rates.pAbove - 6 / 450) < 1e-9, '≥阈值概率 = 6/450 ≈ 1.33%');
+  ok(Math.abs(rates.pBelow - 1 / 450) < 1e-9, '泄漏概率 = 1/450 ≈ 0.22%');
+  const slower = normalizeScreenConfig({ ...perLook, intervalMin: 10 });
+  ok(screenLooksPerDay(slower) === 82, 'intervalMin=10 → 每天约 82 张（概率自动换算，不用手调）');
+  ok(Math.abs(screenInterruptProbability(0.8, perLook) - 6 / 450) < 1e-9, 'screenInterruptProbability 在 perLook 下用换算概率');
+
+  const aboveByU = (u) => evaluateScreenPolicy(v({ interruptible: 0.8 }), perLook, { random: () => u });
+  ok(aboveByU(0.005).allow === true && aboveByU(0.005).reason === 'screen-ok', 'perLook ≥阈值 u<p → 放行');
+  ok(aboveByU(0.02).allow === false && aboveByU(0.02).reason === 'screen-lottery', 'perLook ≥阈值 u≥p → 拦下');
+  const belowByU = (u) => evaluateScreenPolicy(v({ interruptible: 0.25 }), perLook, { random: () => u });
+  ok(belowByU(0.001).allow === true && belowByU(0.001).kind === 'leak', 'perLook <阈值 u<p → 记泄漏放行');
+  ok(belowByU(0.01).allow === false, 'perLook <阈值 u≥p → 拦下');
+  ok(evaluateScreenPolicy(v({ privacy: 'sensitive' }), perLook, { random: () => 0 }).allow === false, 'perLook 下硬闸仍不抽签');
+
+  const more = normalizeScreenConfig({ ...perLook, targetPerDay: 12 });
+  ok(Math.abs(screenPerLookRates(more).pAbove - 12 / 450) < 1e-9, 'targetPerDay=12 → 每张 2.67%');
+}
+
 console.log('## 9. 服务层 decide()：抽签状态落盘 / 同图不重抽 / 预算跨重启保留');
 {
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'surfcore-screen-decide-'));
@@ -430,7 +465,26 @@ console.log('## 9. 服务层 decide()：抽签状态落盘 / 同图不重抽 / �
   const d5 = await s4.decide({ random: () => 0 });
   ok(d5.allow === false && d5.reason === 'screen-low', 'threshold 策略下 decide 仍是硬阈值（兼容旧行为）');
 
+  const perLookCfg = normalizeScreenConfig({
+    enabled: true, intervalMin: 1, interruptPolicy: 'leaky', interruptTrigger: 'perLook',
+    minInterruptible: 0.3, targetPerDay: 6, maxLeakPerDay: 1, leakCooldownMin: 90,
+  });
+  const s5 = makeService(0.8, perLookCfg);
+  const d6 = await s5.decide({ random: () => 0.005 });
+  ok(d6.allow === true && d6.reason === 'screen-ok', 'perLook：u=0.5% < 1.33% → 放行');
+  ok(Math.abs(d6.p - 6 / 450) < 1e-9, 'perLook p = targetPerDay / 每天截图次数');
+
   fs.rmSync(stateDir, { recursive: true, force: true });
+}
+
+for (const privacy of [undefined, null, 'unknown', 'other', 'sensitive', 'none']) {
+  const sample = parseScreenVerdict({ summary: '模拟画面', privacy });
+  const visible = privacy === 'none';
+  ok(sample.summary.includes('模拟画面') === visible, '解析器只保留明确可展示的摘要');
+  for (const render of [buildChatScreenBlock, v => screenPromptLines(v).join(' '), formatScreenVerdict]) {
+    ok(render(sample).includes('模拟画面') === visible, '各个画面出口使用相同的隐私判断');
+    ok(!render({ ...sample, degraded: true, summary: '模拟画面' }).includes('模拟画面'), '降级摘要不展示');
+  }
 }
 
 console.log(failures === 0 ? '\n✅ screen-watch 通过' : `\n❌ ${failures} 项失败`);

@@ -13,6 +13,10 @@
  * 插件会重写这个文件（每 2 分钟一次），桌宠重连时会重新读。
  */
 import fs from 'node:fs';
+import { studyReply, cloudSpeech, deepSeekVoiceId } from './study-model.js';
+import { createStudyAudio } from './study-audio.js';
+import { transcribe, fastVoiceReply } from './voice-input.js';
+import { screenDetailVisible } from './screen-watch-core.js';
 import path from 'node:path';
 import { isLoopbackReq, json, readBody, sameOrigin, safeEqual } from './http-guard.js';
 
@@ -34,6 +38,10 @@ export function createPetApiService({ chat, purpose, petService, screen = null, 
   const root = path.join(stateDir, 'pet');
   const hostFile = path.join(root, 'host.json');
   let lastHostWrite = 0;
+  let studyRequest = null;
+  const speechPrefix = '/study/audio/';
+  const studyAudio = createStudyAudio({ chat, keyFor: ref => screen.resolveApiKey(ref),
+    audioUrlFor, prefix: API_PREFIX + speechPrefix, token });
 
   function token() {
     return chat.token();
@@ -151,6 +159,21 @@ export function createPetApiService({ chat, purpose, petService, screen = null, 
       json(res, 200, { ok: true, screen: screen?.status ? screen.status() : null });
       return;
     }
+    if (req.method === 'POST' && suffix === '/purpose/screen/look') {
+      if (!screen?.enabled()) { json(res, 403, { ok: false, error: '看屏幕未开启' }); return; }
+      try {
+        const result = await screen.look({ reason: 'qq-private' });
+        const verdict = result?.verdict;
+        if (!result?.ok || !verdict?.ok || !screen.enabled()) {
+          json(res, 503, { ok: false, error: '这次没看清' }); return;
+        }
+        const visible = screenDetailVisible(verdict);
+        json(res, 200, { ok: true, at: result.at, observation: visible ? verdict.summary : '画面细节未展示' });
+      } catch {
+        json(res, 503, { ok: false, error: '这次没看清' });
+      }
+      return;
+    }
     if (req.method === 'POST' && suffix === '/purpose/screen/decide') {
       if (typeof screen?.decide !== 'function') {
         json(res, 503, { ok: false, error: 'screen 服务不可用（插件版本太旧？）' });
@@ -193,10 +216,80 @@ export function createPetApiService({ chat, purpose, petService, screen = null, 
       json(res, result.ok ? 200 : 409, result);
       return;
     }
+    if (req.method === 'GET' && suffix.startsWith(speechPrefix)) {
+      await studyAudio.serve(suffix.slice(speechPrefix.length), res);
+      return;
+    }
+    if (req.method === 'GET' && suffix.startsWith('/chat/audio/')) {
+      const id = suffix.slice('/chat/audio/'.length);
+      const message = chat.cloudVoiceMessage(id);
+      if (!message) { res.writeHead(404); res.end(); return; }
+      await studyAudio.serveChat(id, message, res);
+      return;
+    }
+    if (req.method === 'POST' && suffix === '/voice/transcribe') {
+      const controller = new AbortController();
+      const cancel = () => controller.abort();
+      res.once('close', cancel);
+      try {
+        const body = JSON.parse(await readBody(req, 1400100));
+        const text = await transcribe(body.audio, screen.resolveApiKey, AbortSignal.any([controller.signal, AbortSignal.timeout(20000)]));
+        if (!res.destroyed) json(res, 200, { ok: true, text });
+      } catch (error) {
+        if (!res.destroyed) json(res, 400, { ok: false, error: String(error.message).slice(0, 160) });
+      } finally { res.off('close', cancel); }
+      return;
+    }
+    if (req.method === 'POST' && suffix === '/study/frame') {
+      const controller = new AbortController();
+      const cancel = () => controller.abort();
+      res.once('close', cancel);
+      try {
+        const body = JSON.parse(await readBody(req, 1024 * 1024));
+        if (studyRequest) {
+          if (body.question && !studyRequest.question) studyRequest.controller.abort();
+          else { json(res, 409, { ok: false, error: '上一帧还在处理' }); return; }
+        }
+        studyRequest = { controller, question: Boolean(body.question) };
+        const role = chat.roleInfo();
+        // Legacy callers and diagnostic probes may request a verdict without opening a chat.
+        const keep = typeof body.turnId === 'string' && /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(body.turnId);
+        const userMessage = keep && body.question ? chat.recordStudyMessage(role, body.turnId, 'user',
+          String(body.question).slice(0, 2000), body.inputModality === 'voice' ? 'voice' : 'text') : null;
+        const result = await studyReply(body, { role, keyFor: screen.resolveApiKey,
+          signal: AbortSignal.any([controller.signal, AbortSignal.timeout(body.provider === 'deepseek' ? 95000 : 200000)]) });
+        chat.recordUsage(result.usage, result.model);
+        controller.signal.throwIfAborted();
+        let audio, voiceError;
+        if (result.text && body.progressiveAudio === true && ['pet','deepseek'].includes(body.voice)) {
+          audio = studyAudio.issue(result.text, body.voice, body.voiceId);
+        } else if (result.text && body.voice === 'deepseek') {
+          try { audio = await cloudSpeech(result.text, screen.resolveApiKey, AbortSignal.any([controller.signal, AbortSignal.timeout(60000)]), body.voiceId); }
+          catch (error) { voiceError = String(error.message); }
+        } else if (result.text && body.voice === 'pet') {
+          const spoken = await chat.synthesize(result.text);
+          if (spoken.ok) audio = { url: audioUrlFor(spoken.key), durationMs: spoken.durationMs };
+          else voiceError = spoken.error;
+        }
+        controller.signal.throwIfAborted();
+        const reply = keep && result.text ? chat.recordStudyMessage(role, body.turnId, 'assistant',
+          result.text, audio ? 'voice' : 'text') : null;
+        json(res, 200, { ok: true, text: result.text, audio, voiceError, userMessage, reply });
+      } catch (error) {
+        if (!res.destroyed) json(res, controller.signal.aborted ? 409 : 400, { ok: false, error: controller.signal.aborted ? '已切换到新问题' : String(error.message).slice(0, 200) });
+      } finally {
+        res.off('close', cancel);
+        if (studyRequest?.controller === controller) studyRequest = null;
+      }
+      return;
+    }
     if (req.method === 'POST' && suffix === '/chat') {
       let body = {};
       try { body = JSON.parse((await readBody(req, PET_BODY_LIMIT)) || '{}'); } catch { json(res, 400, { ok: false, error: '请求体不是合法 JSON' }); return; }
-      const result = await chat.chat({ text: body.text, modality: body.modality });
+      const fast = body.voiceModel === 'deepseek';
+      const result = await chat.chat({ text: body.text, modality: body.modality, inputModality: body.inputModality, allowScreenLook: body.allowScreenLook !== false, voiceProvider: body.voiceProvider,
+        voiceId: deepSeekVoiceId(body.voiceId),
+        voiceComplete: fast ? args => fastVoiceReply(args, screen.resolveApiKey, AbortSignal.timeout(35000)) : undefined });
       json(res, result.ok ? 200 : 400, result);
       return;
     }
