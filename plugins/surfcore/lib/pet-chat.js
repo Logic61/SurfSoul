@@ -24,7 +24,7 @@ import { resolvePersonaFile } from './persona.js';
 import { memoryCardPromptBlock } from './memory-card.js';
 import { activeMemoryPaths, readCurrentCharacter } from '../../../src/character-persona.js';
 import { adminFromSources } from '../../../src/admin-identity.js';
-import { appendMemoryInboxEvent } from '../../../src/memory-card.js?rev=memfix-60b63add51';
+import { appendMemoryInboxEvent } from '../../../src/memory-card.js?rev=memfix-26a980c2b3';
 import { synthesizeToFile, wavDurationMs } from '../../../src/voice-tts.js';
 import { buildChatScreenBlock, wantsScreenLook } from './screen-watch-core.js';
 

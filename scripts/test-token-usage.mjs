@@ -319,6 +319,25 @@ assert(usageFromStream([{ usage: { inputTokens: 7 } }, { text: 'x' }])?.inputTok
 assert(usageOfEvent({ type: 'tool/call', data: {} }) === undefined, '非 assistant 事件不产生 usage');
 
 // ── 收尾 ────────────────────────────────────────────────────────────────
+{
+  const sid = 'review-session', key = 'group:321';
+  const args = {file:path.join(tmpDir,'review.jsonl'),resolveKey:()=>key};
+  const book = createTokenLedger(args);
+  const model = 'gpt-fixture';
+  for (const [index, provider] of ['surfcore-codex-cli','surfcore-openai-api'].entries()) {
+    book.ingestEvent({sessionId:sid, model, provider, event:evMsg(index+1,5,index,usage(12,3))});
+  }
+  const aux = {id:'one',sessionId:sid,key,turn:5,step:1,retry:0,at,model:'deepseek-flash',usage:{input_tokens:8,cache_read_input_tokens:7,output_tokens:4}};
+  assert(book.recordReview(aux) && !book.recordReview(aux), '辅助调用独立去重');
+  book.ingestBaseline({sessionId:sid,model,provider:'surfcore-openai-api',projection:{asOfSeq:2,values:{tokenUsage:usage(24,6)}}});
+  const restored = createTokenLedger(args);
+  const totals = restored.summary().totals;
+  assert(totals.billing.subscription===15 && totals.billing.unpriced===15 && totals.billing.metered===19, '重载和基线保留订阅、缺价及评审的归属');
+  assert(totals.totalTokens===49 && restored.dailyUsage({reviewsOnly:true}).total.tokens===19, '辅助评审只计入一次');
+  assert(restored.conversation(key).turns[0].reviewSteps===1, '实际回合关联评审次数');
+  const priced = resolvePriceTable({models:{['surfcore-openai-api/'+model]:{off:{cacheMiss:5,cacheHit:1,output:8}}}});
+  assert(ratesAt(model,mon('10:00'),priced,'surfcore-openai-api').cacheMiss===5, 'API 自定义价格不套用 DeepSeek 峰时倍率');
+}
 try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
 
 if (failed) {

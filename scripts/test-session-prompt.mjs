@@ -2,7 +2,117 @@ import fs from 'node:fs';
 import path from 'node:path';
 import assert from 'node:assert/strict';
 import {test} from 'node:test';
+import {setTimeout as delay} from 'node:timers/promises';
+import {createRejectFallback, normalizePresendReviewConfig} from '../src/presend-review.js';
+import {readQqSessionContext} from '../src/qq-session-context.js';
+import {planQqModelInput} from '../plugins/surfcore/lib/qq-input-plan.js';
 import {bridgeHarness} from './audit-bridge-harness.mjs';
+
+test('a delayed QQ wake identifies the real poke among earlier and later unread messages', async () => {
+  const key = 'group:456';
+  const h = await bridgeHarness({ config: { ownerQQ: 7, allow: { groups: ['456'] } } });
+  try {
+    h.setMode('reserved2');
+    const st = h.getSocialV2State(key);
+    st.bootstrapSent = true;
+    st.wakeConfig = { ...st.wakeConfig, batchWindowMs: 1000, triggers: { ...st.wakeConfig.triggers, poke: true } };
+    h.appendSocialV2Message(key, '群友甲', '依旧罪己诏', '依旧罪己诏', true, false, '11', [], '8');
+    await h.handlePokeNotice({ sub_type: 'poke', group_id: 456, user_id: 7, target_id: 999, self_id: 999 });
+    const poke = st.unread.at(-1);
+    assert.equal(poke.kind, 'poke');
+    h.appendSocialV2Message(key, '群友乙', '我下楼买个梨', '我下楼买个梨', false, false, '13', [], '9');
+    h.scheduleWakeV2(key, 'probability', st.unread.at(-1).seq);
+    for (let i = 0; i < 40 && !h.calls.prompts.length; i++) await delay(100);
+    const prompt = h.calls.prompts.at(-1)?.content[0].text;
+    assert.ok(prompt, 'scheduled wake should deliver a prompt');
+    assert.match(prompt, new RegExp(`【本次唤醒】[^\\n]*（主人账号）戳了你（seq=${poke.seq}，`));
+    assert.match(prompt, /依旧罪己诏/);
+    assert.match(prompt, /我下楼买个梨/);
+    await h.deliverPrompt(key, '', { wakeReason: 'recovery', silent: true });
+    assert.doesNotMatch(h.calls.prompts.at(-1).content[0].text, /^【本次唤醒】/m);
+  } finally { await h.close(); }
+});
+
+test('a slow draft waits for fresh chat only when a live unread arrival intervenes', async () => {
+  const key = 'group:456';
+  let now = Date.now();
+  class Clock extends Date { static now() { return now; } }
+  const h = await bridgeHarness({ config: { allow: { groups: ['456'] } }, globals: { Date: Clock } });
+  let server;
+  try {
+    h.setMode('reserved2');
+    const append = (id, text) => h.appendSocialV2Message(key, '群友', text, text, false, false, id, [], '8');
+    append('1', '头一个话题');
+    await h.deliverPrompt(key, '', { wakeReason: 'question', wakeSeq: h.getSocialV2State(key).lastUnreadSeq, silent: true });
+    h.alignTurnTriggerStart(h.state.sessions[key], key);
+    const st = h.getSocialV2State(key);
+    server = h.startConsoleServer();
+    if (!server.listening) await new Promise(resolve => server.once('listening', resolve));
+    const origin = 'http://127.0.0.1:' + server.address().port;
+    const headers = { 'content-type': 'application/json', 'x-console-token': 'fixture-console-token', 'x-agent-token': st.agentToken };
+    const send = text => fetch(origin + '/api/socialV2/send-message', {
+      method: 'POST', headers, body: JSON.stringify({ key, messages: [text] }),
+    });
+    const sends = () => h.calls.http.filter(call => call.url.endsWith('/send_group_msg')).length;
+    now += 21000;
+    const stillCurrent = await send('没人打岔，旧草稿还接得上');
+    assert.equal(stillCurrent.status, 200, await stillCurrent.text());
+    now += 1000;
+    append('2', '现在换话题了');
+    const stale = await send('接着说头一个话题');
+    assert.equal(stale.status, 409);
+    assert.match((await stale.json()).error, /qq_get_unread_messages/);
+    assert.equal(sends(), 1);
+    assert.equal(st.sendTimes.length, 1, 'a withheld draft does not consume a message slot');
+    const unread = await fetch(origin + '/api/socialV2/unread?key=group:456', { headers });
+    assert.equal(unread.status, 200);
+    assert.match(JSON.stringify(await unread.json()), /现在换话题了/);
+    const refreshed = await send('现在说哪个？');
+    assert.equal(refreshed.status, 200, await refreshed.text());
+    assert.equal(sends(), 2);
+  } finally {
+    if (server) await new Promise(resolve => server.close(resolve));
+    await h.close();
+  }
+});
+
+test('discard cancels an existing text fallback and never schedules a replacement', async () => {
+  let fallback;
+  let verdict = { allow: false, score: 60, threshold: 75, reason: '回错了人', error: '换一句', attempt: 1 };
+  const h = await bridgeHarness({
+    config: { socialV2: { review: { enabled: true } } },
+    globals: {
+      normalizePresendReviewConfig,
+      createPresendReviewer: () => ({ review: async () => verdict }),
+      createRejectFallback: options => (fallback = createRejectFallback(options)),
+    },
+  });
+  let server;
+  try {
+    h.setMode('reserved2');
+    const key = 'group:456';
+    const st = h.getSocialV2State(key);
+    server = h.startConsoleServer();
+    if (!server.listening) await new Promise(resolve => server.once('listening', resolve));
+    const send = text => fetch('http://127.0.0.1:' + server.address().port + '/api/socialV2/send-message', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-console-token': 'fixture-console-token', 'x-agent-token': st.agentToken },
+      body: JSON.stringify({ key, messages: [text] }),
+    });
+    assert.equal((await send('第一次试着接')).status, 422);
+    assert.equal(fallback.size(), 1);
+    verdict = { ...verdict, action: 'discard', reason: '已经没人等了', error: '直接收尾' };
+    const result = await send('打算再补一句');
+    assert.equal(result.status, 422);
+    assert.equal((await result.json()).review.action, 'discard');
+    assert.equal(fallback.size(), 0);
+    assert.equal(st.sendTimes.length, 0);
+  } finally {
+    fallback?.dispose();
+    if (server) await new Promise(resolve => server.close(resolve));
+    await h.close();
+  }
+});
 
 test('master prompt is committed after acceptance, once per actual DSH session',async()=>{
  const key='private:7';
@@ -169,5 +279,47 @@ test('voice tie-breaker appears on fresh eligible batches and yields after a rec
     h.getSocialV2State(key).recentMessages.push({isSelf:true, kind:'voice', text:'[语音] 早', time:Date.now()});
     h.appendSocialV2Message(key, '普通群友', '接着聊', '接着聊', false, false, '8', [], '789', []);
     assert.doesNotMatch(await wake(), /这回稍微偏向语音/);
+  } finally { await h.close(); }
+});
+
+test('real QQ wake builds indexed session settings and drops superseded or opening-only notes', async () => {
+  const key = 'group:456';
+  const h = await bridgeHarness({config:{dsh:{qqEngine:'openai-api'}, allow:{groups:['456']}}});
+  try {
+    h.setMode('reserved2');
+    const history = [];
+    async function wake(reason) {
+      h.appendSocialV2Message(key,'群友','现在呢','现在呢',false,false,String(history.length+1),[],'8',[]);
+      await h.deliverPrompt(key,'',{wakeReason:reason, silent:true});
+      const prompt = h.calls.prompts.at(-1);
+      history.push({role:'user',content:prompt.content});
+      return prompt.content[0].text;
+    }
+    h.setInitialPrompt(key,'开场用的蓝色记号','opening');
+    const first = await wake('anyMessage');
+    assert(first.includes('开场用的蓝色记号'));
+    assert.equal(readQqSessionContext(first)?.full, true);
+    h.setInitialPrompt(key,'持续的绿色记号','session');
+    const revision = await wake('atMention');
+    assert.match(readQqSessionContext(revision).values.setting,/持续的绿色记号/);
+    await wake('keyword:测试');
+    const projected = planQqModelInput({messages:history,tools:[]});
+    assert(projected.projected, projected.reason);
+    const visible = projected.messages.map(m=>m.content[0].text).join('\n');
+    assert(visible.includes('持续的绿色记号'));
+    assert(!visible.includes('开场用的蓝色记号'));
+    h.setInitialPrompt(key,'改成紫色','session');
+    await wake('speaker:老李');
+    const amended = planQqModelInput({messages:history,tools:[]}).messages.map(m=>m.content[0].text).join('\n');
+    assert(amended.includes('改成紫色'));
+    assert(!amended.includes('持续的绿色记号'));
+    const {resolveQqWake}=await import('../src/qq-wake-checkpoint.js');
+    const stateDir=path.join(h.temp,'state');
+    const withoutOpening=planQqModelInput({messages:history.slice(-1),tools:[],sessionId:h.state.sessions[key]},
+      {resolveCheckpoint:(...args)=>resolveQqWake(stateDir,...args)});
+    assert.equal(withoutOpening.reason,'checkpoint');
+    const resumed=withoutOpening.messages.map(m=>m.content[0].text).join('\n');
+    assert.match(resumed,/改成紫色/);
+    assert.doesNotMatch(resumed,/开场用的蓝色记号/);
   } finally { await h.close(); }
 });

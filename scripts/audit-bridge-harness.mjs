@@ -14,13 +14,16 @@ import * as wait from '../src/v2-wait.js';
 import * as safeFetch from '../src/safe-fetch.js';
 import { readQqMessageFiles } from '../src/qq-message-files.js';
 import * as forward from '../src/forward.js';
+import * as cardLinks from '../src/qq-card-links.js';
 import * as selfIdentity from '../src/self-identity.js';
 import * as slang from '../src/slang-learner.js';
 import {qqActionKey} from '../plugins/surfcore/lib/qq-action-key.js';
-import { readReactionScene } from '../src/qq-reaction.js';
+import { formatWakeFocus, readReactionScene } from '../src/qq-reaction.js';
 import * as stickerSemantics from '../src/sticker-semantics.js';
 import * as sticker from '../src/sticker-lib.js';
 import * as modelPrices from '../src/model-prices.js';
+import * as openAiQqApi from '../plugins/surfcore/lib/qq-openai-api.js';
+import { MODELSNEXUS_ENGINE, MODELSNEXUS_PROVIDER, requireModelsNexusModel } from '../plugins/surfcore/lib/qq-modelsnexus.js';
 import * as tokenLedger from '../src/token-ledger.js';
 import * as voiceLib from '../src/send-voice-lib.js';
 import { synthesizeToFile, wavDurationMs } from '../src/voice-tts.js';
@@ -63,7 +66,7 @@ import { applyManagedSettings } from '../src/life-settings/runtime.js';
 import { createQqLifeRuntime } from '../src/life-settings/qq-runtime.js';
 // 每日生活参数心跳（2026-11-08）：bridge 里 import 的纯函数要在 VM context 里有同名绑定。
 import * as lifeReview from '../src/life-review.js';
-import * as codexEffort from '../plugins/surfcore/lib/qq-codex-effort.js';
+import * as codexCatalog from '../plugins/surfcore/lib/qq-codex-catalog.js';
 // 早安排程纯函数同样要在 VM 里可调用（心跳复用 parseGreetingTime / localDateKey 等）。
 import * as greetingSchedule from '../src/greeting-schedule.js';
 import { fetchVideoInfo } from '../src/bili-api.js';
@@ -71,6 +74,9 @@ import * as stateAcl from '../src/state-acl.mjs';
 import { createBiliMemory } from '../src/bili-memory.js';
 import { isLoopbackBaseUrl } from '../src/dsh-port.js';
 import { unwrap, createTurnCollector, inboxItemsOfProjections } from '../src/dsh-client.js';
+
+import { sealQqWake } from '../src/qq-wake-checkpoint.js';
+import * as qqSessionContext from '../src/qq-session-context.js';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 
@@ -267,13 +273,13 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     getSocialV2State, appendSocialV2Message, recordSentMessagesV2,
     fishChatWindows, evaluateConversationFishGuard, fishGuardSendBlock, recordFishWindow,
     tokenGuardWakeBlock, tokenGuardSendBlock, bridgeDailyUsage, learnerBudgetBlock,
-    buildWakePromptV2, buildWakeSnapshotV2, wakeFoldedNoticeV2, sendWakePromptV2, socialV2,
+    buildWakePromptV2, buildWakeSnapshotV2, wakeFoldedNoticeV2, sendWakePromptV2, scheduleWakeV2, socialV2,
     currentRoleHint, currentRoleHintV2, adminPromptLine, ownerMessageTag,
     memoryCardPromptBlock, recordMemoryInboxEvent, recordSelfMemoryEvent,
     formatMemoryV2, formatSharedMemoryV2, appendMemoryV2, styleNotesBlock, groupNameForSceneV2,
     refreshMode, modeAllowed, modePreset, trackTurnEvent, replayPendingWakeReasonsV2,
     // 人的黑名单（deny.users）：入站按发送者拦截，见 test-blacklist.mjs
-    senderBlocked, handlePokeNotice,
+    senderBlocked, handlePokeNotice, handleIncoming, historyCandidateFromRaw,
     collectors, setupSleepTimerV2,
     getInitialPrompt, setInitialPrompt, loadInitialPrompts, formatInitialPromptV2,
     initialPrompts, initialPromptMaxChars,
@@ -351,7 +357,7 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     isLoopbackBaseUrl,
     probeDshBaseUrl: async () => true,
     discoverDshBaseUrl: async () => null,
-    ...markdown, ...sensitive, ...wait, ...safeFetch, ...forward, ...selfIdentity, ...slang, ...sticker, ...stickerSemantics, readReactionScene,
+    ...markdown, ...sensitive, ...wait, ...safeFetch, ...forward, ...cardLinks, ...selfIdentity, ...slang, ...sticker, ...stickerSemantics, formatWakeFocus, readReactionScene,
     ...modelPrices, ...tokenLedger, ...voiceLib, ...stateAcl, ...presetPrompt, ...imagegen, ...identityGuard, ...fishGuard, ...tokenGuard,
     synthesizeToFile, wavDurationMs, readQqMessageFiles,
     ...tokenBudget,
@@ -359,7 +365,7 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     ...purposeEngine,
     ...conversationClosure,
     // 场合作用域（规矩 scope / style-notes 作用域 / 场合档位 / 记忆卡 audience 过滤）
-    ...sceneScope,
+    ...sceneScope, ...qqSessionContext, sealQqWake,
     // 文档记忆（2026-11-02）：语感本/两本日记的压缩与检索（桥接唤醒提示/qq_recall 用）
     ...memoryDocs, createEventRecall, formatRecallHits, ...episodeRecall, ...conversationMemory,
     // selfNote 自我认知层（2026-11-02）：按角色共享、只在 bootstrap 注入一次
@@ -378,7 +384,11 @@ export async function bridgeHarness({ config = {}, savedState, files = {}, globa
     createLifeApi, applyManagedSettings, createQqLifeRuntime,
     // 每日生活参数心跳的纯函数（配置归一/排程/提示词/与早安合并判定）。
     ...lifeReview,
-    ...codexEffort,
+    ...codexCatalog,
+    ...openAiQqApi,
+    MODELSNEXUS_ENGINE, MODELSNEXUS_PROVIDER, requireModelsNexusModel,
+    discoverModelsNexusModels: async () => ({models:[],families:[]}),
+    refreshCodexCatalog: async () => false,
     ...greetingSchedule,
     // 角色系统在 fixture 里等价于「没有角色」：当前角色 null，记忆卡指向 temp/dsh/surfcore/memory。
     // 不能直接用真实 character-store 的 DSH_HOME（它在主进程 import 时已固定）。

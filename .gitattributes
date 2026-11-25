@@ -1,0 +1,7 @@
+# The memory engine revision hashes the checked-out source bytes.
+src/memory-card.js text eol=crlf
+src/memcard-narrative.js text eol=crlf
+
+# These generated files are compared byte for byte with the generator output.
+plugins/surfcore/presets/*.patch.yml text eol=lf
+docs/guides/CURRENT-NUMBERS.md text eol=lf

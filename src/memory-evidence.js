@@ -1,14 +1,20 @@
 import fs from 'node:fs';
 import { loadNarrative, sceneOfRecord } from './memcard-narrative.js';
-import { readAllFullRecords } from './memory-card.js';
+import { scanFullRecords } from './memory-card.js';
 
 // Evidence is local to one character directory. Each reference must resolve independently.
 export function readEpisodeEvidence(paths) {
   const card = JSON.parse(fs.readFileSync(paths.json, 'utf8'));
-  const records = new Map();
-  for (const record of [...(readAllFullRecords(paths) || []), ...card.records]) records.set(record.id, record);
+  const episodes = loadNarrative(paths.dir).episodes;
+  const records = new Map(card.records.map(record => [record.id, record]));
+  const missing = new Set(episodes.flatMap(ep => ep.covers).filter(id => !records.has(id)));
+  if (missing.size) {
+    scanFullRecords(paths, record => {
+      if (missing.has(record.id)) records.set(record.id, record);
+    }, { maxScanBytes: Infinity });
+  }
   const rows = [];
-  for (const ep of loadNarrative(paths.dir).episodes) {
+  for (const ep of episodes) {
     if (!ep.covers.length) continue;
     const sources = ep.covers.map(id => records.get(id));
     const key = sceneOfRecord(sources[0]);

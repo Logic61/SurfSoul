@@ -307,6 +307,26 @@ const sceneArgs = {
   statusLines: ['近10分钟群友发言 6 条'], recent: sampleRecent(),
 };
 
+test('reviewer can drop an outdated draft even when its wording scores well', async () => {
+  const { reviewer, calls } = reviewerHarness({ verdicts: ['{"score":93,"action":"discard","reason":"只剩主人戳了你，先前的玩笑已经过去"}'] });
+  const recent = [{ sender: '鱼A', plain: '依旧罪己诏', time: Date.now() - 15 * 60000 }];
+  const result = await reviewer.review({ ...sceneArgs, recent, focus: '小鱼（主人账号）戳了你（seq=17，2 秒前）' });
+  assert.equal(result.allow, false);
+  assert.equal(result.action, 'discard');
+  assert.equal(result.attempt, 0);
+  assert.match(result.error, /放下这份草稿/);
+  assert.match(calls[0].user, /【本次唤醒】小鱼（主人账号）戳了你/);
+  assert.match(calls[0].user, /15 分钟前 鱼A：依旧罪己诏/);
+});
+
+test('reviewer can request a concrete revision when a draft mixes two threads', async () => {
+  const { reviewer } = reviewerHarness({ verdicts: ['{"score":83,"action":"revise","reason":"还有一句追答旧梗","fix":"只留对拍一拍的回应"}'] });
+  const result = await reviewer.review(sceneArgs);
+  assert.equal(result.allow, false);
+  assert.equal(result.attempt, 1);
+  assert.match(result.error, /只留对拍一拍的回应/);
+});
+
 test('reviewer：停用时直接放行，不调模型', async () => {
   const { reviewer, calls } = reviewerHarness({ verdicts: ['{"score": 10, "reason": "x"}'], cfgOverrides: { enabled: false } });
   const result = await reviewer.review(sceneArgs);
@@ -458,14 +478,15 @@ test('reviewer：评审回复不是 JSON 时先重试一次，拿到合法 JSON 
 });
 
 test('reviewer：仅输出预算耗尽扩大预算，遵守重试次数和失败策略', async () => {
-  const exhausted = Object.assign(new Error('no body'), {code:'EMPTY', stopReason:'max_tokens'});
+  const exhausted = Object.assign(new Error('no body'), {code:'EMPTY', stopReason:'max_tokens',usage:{output_tokens:400},model:'review'});
   const timeout = Object.assign(new Error('timeout'), {code:'TIMEOUT'});
   const empty = Object.assign(new Error('empty'), {code:'EMPTY', stopReason:'end_turn'});
-  const good = {text:'{"score":67,"reason":"未核对就声称签字"}'};
+  const good = {text:'{"score":67,"reason":"未核对就声称签字"}',usage:{output_tokens:35},model:'review'};
   const malformed = {text:'没写成 JSON'};
   async function run(replies, cfg = {}) {
-    const budgets = [];
+    const budgets = [], measured = [];
     const reviewer = createPresendReviewer({
+      onUsage:(usage, meta) => {if (usage) measured.push([meta.accounting.turn, meta.attempt, usage.output_tokens]);},
       getConfig: () => ({enabled:true, maxTokens:400, parseRetries:2, ...cfg}),
       completeText: async ({maxTokens}) => {
         const next = replies[budgets.length];
@@ -474,10 +495,11 @@ test('reviewer：仅输出预算耗尽扩大预算，遵守重试次数和失败
         return next;
       },
     });
-    return {result:await reviewer.review(sceneArgs), budgets};
+    return {result:await reviewer.review({...sceneArgs,accounting:{turn:19}}), budgets, measured};
   }
   const recovered = await run([exhausted, good]);
   assert.deepEqual(recovered.budgets, [400,1200]);
+  assert.deepEqual(recovered.measured, [[19,0,400],[19,1,35]]);
   assert.equal(recovered.result.score, 67);
   assert.equal(recovered.result.allow, false);
   const capped = await run([exhausted, exhausted, exhausted], {maxTokens:900, failOpen:false});

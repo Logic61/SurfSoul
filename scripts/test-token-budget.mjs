@@ -15,7 +15,7 @@ import {
   describeHit, evaluateBudget, formatLimit, formatMoney, formatTokens, formatUsed,
   localDayKey, localDayStart, normalizeLimitPair, normalizeLimits, normalizeUsage,
   parseCnyText, parseTokenText, ratioOf, readAlert, readBudget, readDailyUsage,
-  takeAlert, totalsOf, writeBudget, writeDailyUsage,
+  takeAlert, totalsOf, writeBudget, writeDailyUsage, writeReviewDaily, withReviewUsage,
 } from '../src/token-budget.js';
 
 let failed = 0;
@@ -165,6 +165,14 @@ try {
   fs.rmSync(path.join(dir, 'token-alert.json'), { force: true });
   const low = takeAlert(dir, normalizeUsage({ qq: { cost: 1 } }), normalizeLimits({ qq: { cny: 8 } }), now);
   check(low.alert === null && !fs.existsSync(path.join(dir, 'token-alert.json')), '没到 80% 不写提醒文件');
+
+  const day = localDayKey(now);
+  writeDailyUsage(dir, {qq:{tokens:20},bili:{tokens:7}}, {day});
+  writeReviewDaily(dir, day, {qq:{tokens:3,cost:0.1},other:{tokens:2,cost:0.05}});
+  assert.equal(readDailyUsage(dir,day).total.tokens,32);
+  assert.equal(readDailyUsage(dir,day).total.tokens,32);
+  assert.equal(withReviewUsage(dir, {qq:{tokens:20}}, day).qq.tokens,23);
+  assert.equal(readDailyUsage(dir,'1990-01-01').total.tokens,0);
 
   // totalsOf / normalizeUsage 的幂等性
   check(totalsOf(usage).tokens === usage.total.tokens, 'totalsOf 与 normalizeUsage 一致');

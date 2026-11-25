@@ -261,6 +261,23 @@ export function writeBudget(dir, limits, now = Date.now()) {
   return normalized;
 }
 
+// The bridge is the only writer of auxiliary usage; the plugin owns the DSH snapshot.
+export function writeReviewDaily(dir, day, usage) {
+  writeJsonAtomic(path.join(dir, 'token-review-daily.json'), {day, ...normalizeUsage(usage)});
+}
+
+export function withReviewUsage(dir, usage, day = localDayKey()) {
+  const merged = normalizeUsage(usage);
+  const reviews = readJsonFile(path.join(dir, 'token-review-daily.json'), null);
+  if (reviews?.day !== day) return merged;
+  for (const scope of CATEGORY_SCOPES) {
+    const extra = normalizeUsagePair(reviews[scope]);
+    merged[scope].cost += extra.cost;
+    merged[scope].tokens += extra.tokens;
+  }
+  return normalizeUsage(merged);
+}
+
 /** 读当天用量快照；不是今天的就返回 0（旧文件不能被当成今天继续算）。 */
 export function readDailyUsage(dir, day = localDayKey()) {
   const parsed = readJsonFile(dailyFileOf(dir), null);
@@ -268,7 +285,7 @@ export function readDailyUsage(dir, day = localDayKey()) {
     return { day, at: 0, ...normalizeUsage(null), source: null, stale: true };
   }
   const sameDay = parsed.day === day;
-  const usage = sameDay ? normalizeUsage(parsed) : normalizeUsage(null);
+  const usage = withReviewUsage(dir, sameDay ? parsed : null, day);
   return {
     ...usage,
     day,

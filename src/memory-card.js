@@ -29,10 +29,11 @@
  */
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import { StringDecoder } from 'node:string_decoder';
 import path from 'node:path';
 // `?rev=` 和插件 lib 的引用保持同一取值：插件热重载时，只有 specifier 变了才会
 // 重新求值；本模块 import 的叙事层也必须挂同一个 rev，否则「引擎新、叙事旧」。
-import { coveredRecordIds, formatEpisodeLine, formatEpisodeTitleLine, loadNarrative, splitEpisodesForPrompt, resolveNarrativePath, saveNarrative, memoryNarrativeSummary } from './memcard-narrative.js?rev=memfix-60b63add51';
+import { coveredRecordIds, formatEpisodeLine, formatEpisodeTitleLine, loadNarrative, splitEpisodesForPrompt, resolveNarrativePath, saveNarrative, memoryNarrativeSummary } from './memcard-narrative.js?rev=memfix-26a980c2b3';
 // 场合作用域的标记字面量只维护一份（src/scene-scope.js）。渲染侧把标记写进行首，
 // 桥接注入时按当前场合整行过滤；这里用常量而不是再抄一遍字符串，避免两边漂移。
 import { AUDIENCE_GROUP_ONLY_TAG, AUDIENCE_PRIVATE_ONLY_TAG } from './scene-scope.js';
@@ -1094,6 +1095,7 @@ export function scanFullRecords(paths, visitor, { maxScanBytes = 200 * 1024 * 10
     fd = fs.openSync(paths.fullJsonl, 'r');
     const size = fs.fstatSync(fd).size;
     const start = Math.max(0, size - Math.max(chunkBytes, Number(maxScanBytes) || 0));
+    const decoder = new StringDecoder('utf8');
     let position = start;
     let carry = '';
     let scanned = 0;
@@ -1102,7 +1104,7 @@ export function scanFullRecords(paths, visitor, { maxScanBytes = 200 * 1024 * 10
       const read = fs.readSync(fd, buffer, 0, buffer.length, position);
       if (read <= 0) break;
       position += read;
-      const text = carry + buffer.toString('utf8', 0, read);
+      const text = carry + decoder.write(buffer.subarray(0, read));
       const lines = text.split('\n');
       carry = lines.pop() ?? '';
       for (const line of lines) {
@@ -1114,6 +1116,7 @@ export function scanFullRecords(paths, visitor, { maxScanBytes = 200 * 1024 * 10
         } catch {}
       }
     }
+    carry += decoder.end();
     if (carry.trim()) {
       scanned += 1;
       try {

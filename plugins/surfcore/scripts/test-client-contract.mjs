@@ -13,7 +13,7 @@ import { CODEX_EFFORTS } from '../lib/qq-codex-effort.js';
 
 const idle = () => {};
 const React = {
-  createElement: () => null,
+  createElement: (type, props, ...children) => ({ type, props, children }),
   useCallback: (fn) => fn,
   useEffect: idle,
   useMemo: (fn) => fn(),
@@ -100,10 +100,12 @@ assert.ok(source.includes('把管理员移出黑名单'), '缺少「管理员在
 // 卡片必须把「仅拦私聊」说清楚，并给一键迁移到「拉黑的人」。
 assert.ok(source.includes('仅拦私聊'), '私聊黑名单没有标明「只在私聊里生效」');
 assert.ok(source.includes('加到「拉黑的人」'), '缺少「只填在私聊黑名单」的一键迁移按钮');
-const qqPaths = client.QQ_FIELDS.flatMap((group) => group.fields.map((field) => field.path.join('.')));
-const codexEffort = client.QQ_FIELDS.flatMap(group => group.fields).find(f => f.path.join('.') === 'dsh.qqCodexEffort');
-assert.equal(codexEffort?.kind, 'select');
-assert.deepEqual(codexEffort.options, CODEX_EFFORTS.map(({id,name}) => [id, name + ' · ' + id]));
+const qqPaths = [...client.QQ_FIELDS.flatMap(group=>group.fields),...client.MODEL_FIELDS].map(field=>field.path.join('.'));
+const model = {id:'codex-future',name:'Future',reasoning:{efforts:[{id:'high',name:'高'}],defaultEffort:'high'}};
+const dynamic = client.modelTabFields({dsh:{qqEngine:'codex',qqCodexModel:model.id,qqCodexEffort:'ultra'}},{models:[model]});
+assert.deepEqual(dynamic.group.fields.find(f => f.path.join('.') === 'dsh.qqCodexModel').options, [[model.id,'Future']]);
+assert.deepEqual(dynamic.group.fields.find(f => f.path.join('.') === 'dsh.qqCodexEffort').options, [['high','高 · high']]);
+assert.equal(dynamic.effort,'high');
 for (const dup of ['deny.private', 'deny.groups', 'deny.users']) {
   assert.ok(!qqPaths.includes(dup), `黑名单应只在卡片里编辑（${dup} 不能被高级参数重复一份）`);
 }
@@ -416,4 +418,33 @@ assert.ok(/const cardStyle =[\s\S]{0,360}?var\(--dsw-alias-border-l2\)/.test(sou
 assert.ok(source.includes('const seg = (options, value, onChange) => h("div", { style: { display: "inline-flex", gap: "4px", padding: "2px", borderRadius: "999px", background: "rgba(127,127,127,.06)", border: "1px solid var(--dsw-alias-border-l2)" } }'),
   '目的页分段选择器仍写死浅色底/边框');
 
+{
+  const cfg={dsh:{qqEngine:'openai-api',qqOpenAiModel:'gpt-4o'}};
+  const visible={status:'ready',models:[{id:'gpt-4o',name:'GPT-4o',supportsReasoning:false},
+    {id:'gpt-6.2-sol',name:'GPT-6.2 Sol',supportsReasoning:true}],unverified:['not-for-qq']};
+  const stale=client.mergeOpenAiCatalog(visible,{status:'unavailable',reason:'proxy'});
+  assert.equal(stale.status,'stale');
+  const fields=client.modelTabFields(cfg,null,stale).group.fields;
+  const picker=fields.find(f=>f.path.at(-1)==='qqOpenAiModel');
+  assert.equal(picker.readOnly,false);
+  assert.deepEqual(picker.options.map(([id])=>id),['gpt-4o','gpt-6.2-sol']);
+  assert.equal(fields.find(f=>f.path.at(-1)==='qqOpenAiEffort').readOnly,true);
+  assert.equal(client.modelTabFields({dsh:{...cfg.dsh,qqOpenAiModel:'gpt-6.2-sol'}},null,visible).group.fields.at(-1).readOnly,false);
+  const missing=client.mergeOpenAiCatalog(visible,{status:'unconfigured',models:[]});
+  const retained=client.modelTabFields(cfg,null,missing);
+  assert.equal(retained.values.qqOpenAiModel,'gpt-4o');
+  assert.equal(retained.group.fields.find(f=>f.path.at(-1)==='qqOpenAiModel').readOnly,true);
+  assert.ok(source.includes('["models", "模型"]'));
+}
+{
+  const cfg={dsh:{qqEngine:'modelsnexus',qqModelsNexusModel:'claude-sonnet-5'}};
+  const visible={models:[{id:'gemini-4-carbon',name:'gemini-4-carbon'}]};
+  const {group,values}=client.modelTabFields(cfg,null,null,visible);
+  assert.equal(values.qqModelsNexusModel,'claude-sonnet-5');
+  assert.deepEqual(group.fields.map(f=>f.path.at(-1)),['qqEngine','qqModelsNexusModel']);
+  assert.deepEqual(group.fields[1].options.map(([id])=>id),['claude-sonnet-5','gemini-4-carbon']);
+  assert.equal(group.fields[1].readOnly,false);
+  assert.equal(client.modelTabFields(cfg,null,null,{models:[]}).group.fields[1].readOnly,true);
+  assert.equal(client.modelTabFields({dsh:{qqEngine:'modelsnexus'}},null,null,visible).values.qqModelsNexusModel,'');
+}
 console.log('client contract tests OK');

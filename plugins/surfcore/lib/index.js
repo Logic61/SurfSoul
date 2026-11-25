@@ -41,8 +41,14 @@ import { automationSnapshot } from './automation.js';
 import {
   backupFile, listBackups, pathSummary,
   readAll, readBiliConfig, readJson, readQqConfig, readUnified,
-  saveBiliConfig, saveQqConfig, saveUnified, writeJsonAtomic, writeTextAtomic,
+  saveBiliConfig, saveQqConfig, saveQqModelSettings, saveUnified, writeJsonAtomic, writeTextAtomic,
 } from './store.js';
+import { readCodexCatalog } from './qq-codex-catalog.js';
+import { refreshCodexCatalog } from './qq-codex-cli.js';
+import { discoverOpenAiQqModels } from './qq-openai-api.js';
+import { discoverModelsNexusModels } from './qq-modelsnexus.js';
+import { qqJevStatus } from './qq-jev.js';
+import { qqWorkerStatus } from './qq-source-worker.js';
 import {
   PRIVACY_POLICY_VERSION, explainText, scanText,
 } from './privacy.js';
@@ -172,6 +178,8 @@ export const inject = ['webServer', 'connection', 'sessionController'];
 
 export function apply(ctx) {
   ensureDirs();
+  pluginLog('[QQ Jev]',qqJevStatus());
+  pluginLog('[QQ source worker]',{...qqWorkerStatus(),cacheFormat:process.env.SURFCORE_QQ_CACHE_FORMAT!=='off'});
 
   // 上次的"退出后应用"可能没跑起来（Electron 宿主没带 ELECTRON_RUN_AS_NODE）：
   // 这里重新排队，用户下次退出 DSH 就会应用（2026-10-28 反馈：点几次都还是旧版本）。
@@ -2773,6 +2781,32 @@ if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output 
     const pathname = url.pathname;
     if (pathname === `${API_PREFIX}/overview`) { json(res, 200, await overview()); return; }
     if (pathname === `${API_PREFIX}/config`) { await handleConfig(req, res); return; }
+    if (req.method === 'GET' && pathname === `${API_PREFIX}/qq-jev-status`) {
+      json(res,200,qqJevStatus());
+      return;
+    }
+    if (req.method === 'POST' && pathname === `${API_PREFIX}/qq-model-settings`) {
+      try {
+        const body=JSON.parse(await readBody(req) || '{}');
+        json(res,200,{ok:true,modelSettings:saveQqModelSettings(body.changes,body.expected)});
+      } catch (error) {
+        json(res,400,{ok:false,error:String(error?.message || '无法保存模型设置')});
+      }
+      return;
+    }
+    if (req.method === 'GET' && pathname === `${API_PREFIX}/qq-openai-models`) {
+      json(res, 200, await discoverOpenAiQqModels({force:url.searchParams.get('refresh') === '1'}));
+      return;
+    }
+    if (req.method === 'GET' && pathname === `${API_PREFIX}/qq-modelsnexus-models`) {
+      json(res, 200, await discoverModelsNexusModels({force:url.searchParams.get('refresh') === '1'}));
+      return;
+    }
+    if (req.method === 'GET' && pathname === `${API_PREFIX}/qq-codex-models`) {
+      await refreshCodexCatalog();
+      json(res, 200, readCodexCatalog());
+      return;
+    }
     if (pathname === `${API_PREFIX}/characters`) { await handleCharacters(req, res, url); return; }
     if (pathname === `${API_PREFIX}/persona`) { await handlePersona(req, res); return; }
     if (pathname === `${API_PREFIX}/memory`) { await handleMemory(req, res, url); return; }

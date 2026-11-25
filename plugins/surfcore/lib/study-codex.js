@@ -9,9 +9,10 @@ const run = promisify(execFile);
 let proxyCheck;
 let proxyCheckedAt = 0;
 
-async function windowsLoopbackProxy() {
+export async function windowsLoopbackProxy({ openAiApi = false } = {}) {
   const shell = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32/WindowsPowerShell/v1.0/powershell.exe');
-  const script = "$u=[uri]'https://chatgpt.com/backend-api/codex/responses'; $p=[Net.WebRequest]::GetSystemWebProxy(); if (!$p.IsBypassed($u)) { $p.GetProxy($u).AbsoluteUri }";
+  const endpoint = openAiApi ? 'https://api.openai.com/v1/responses' : 'https://chatgpt.com/backend-api/codex/responses';
+  const script = "$u=[uri]'" + endpoint + "'; $p=[Net.WebRequest]::GetSystemWebProxy(); if (!$p.IsBypassed($u)) { $p.GetProxy($u).AbsoluteUri }";
   try {
     const { stdout } = await run(shell, ['-NoProfile', '-NonInteractive', '-Command', script], {
       windowsHide: true, timeout: 2500, maxBuffer: 4096,

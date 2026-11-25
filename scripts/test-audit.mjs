@@ -5,8 +5,8 @@ import { spawnSync } from 'node:child_process';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 const tests = [
-  'test-qq-codex.mjs',
-  'test-session-prompt.mjs', 'test-recall-calibration.mjs', 'test-episode-recall.mjs', 'test-conversation-memory.mjs',
+  'test-qq-codex.mjs', 'test-qq-card-links.mjs', 'test-qq-openai-api.mjs', 'test-qq-context-4o.mjs',
+  'test-qq-input-plan.mjs', 'test-qq-jev-preload.mjs', 'test-qq-source-worker.mjs', 'test-session-prompt.mjs', 'test-recall-calibration.mjs', 'test-episode-recall.mjs', 'test-conversation-memory.mjs',
   'test-audit-bridge.mjs', 'test-audit-protocol.mjs', 'test-audit-protocol-helpers.mjs',
   'test-audit-security.mjs', 'test-audit-security-mcp.mjs',
   'test-audit-setup.mjs', 'test-audit-setup-guards.mjs',
@@ -71,6 +71,7 @@ const tests = [
   // B站 会话权限：workspace-write 在 C:\Users\Mieksido 起不了命令 → 自动切 danger-full-access。
   'test-scheduler-permission.mjs',
   'test-token-economy.mjs', 'test-qq-model-view.mjs', 'test-qq-preset-contract.mjs',
+  'test-qq-modelsnexus.mjs', 'test-qq-model-settings.mjs',
   'test-reply-wait.mjs', 'test-preset-prompt.mjs', 'test-role-card.mjs',
   // 管理员身份（QQ ⇄ B站 同一个人）+「对管理员温柔 / 绝不回嘴」提示词：
   // 号码规范化、旧字段推导、保存冲突、QQ/B站 两份提示词（B站 不得带 QQ 号）；

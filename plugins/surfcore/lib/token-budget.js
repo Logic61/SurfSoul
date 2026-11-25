@@ -52,7 +52,7 @@ import {
   localDayKey,
   localDayStart,
   normalizeLimits,
-  normalizeUsage,
+  withReviewUsage,
   parseCnyText,
   parseTokenText,
   readAlert,
@@ -346,6 +346,7 @@ export function createTokenBudgetService({
           ?? values.modelSelection?.next?.model
           ?? defaultModel();
         const entry = ensureSessionState(id);
+        entry.provider = values.modelSelection?.lastUsed?.provider ?? values.modelSelection?.next?.provider ?? entry.provider;
         entry.category = category;
         entry.lastSeenAt = Math.max(entry.lastSeenAt || 0, num(item?.updatedAt, now()));
         // 只有「之前真的采过这个会话」才能走同一天增量。空的 state（例如插件在
@@ -367,10 +368,10 @@ export function createTokenBudgetService({
           if (totalTokensOf(entry.seen) <= totalTokensOf(cumulative)) {
             const delta = subBuckets(cumulative, entry.seen);
             if (totalTokensOf(delta) > 0) {
-              const p = priceUsage(delta, { model: entry.model ?? model, at: now(), table: priceTable() });
-              addUsage(category, totalTokensOf(delta), p.cost.total);
+              const p = priceUsage(delta, { model, provider:entry.provider, at: now(), table: priceTable() });
+              addUsage(category, totalTokensOf(delta), p.budgetCost);
               entry.dayTokens = Math.round(clamp0(entry.dayTokens + totalTokensOf(delta)));
-              entry.dayCost = clamp0(entry.dayCost + p.cost.total);
+              entry.dayCost = clamp0(entry.dayCost + p.budgetCost);
             }
             entry.seen = { ...cumulative };
             continue;
@@ -401,6 +402,7 @@ export function createTokenBudgetService({
           const summed = sumUsageEvents(events, {
             dayStart,
             fallbackModel: entry.model ?? model,
+            fallbackProvider: entry.provider,
             priceTable,
             defaultModel,
           });
@@ -413,6 +415,7 @@ export function createTokenBudgetService({
           entry.seen = { ...cumulative };
           entry.lastSeq = Math.max(entry.lastSeq, summed.maxSeq);
           lastSeq.set(id, entry.lastSeq);
+          if (summed.provider) entry.provider = summed.provider;
           if (summed.model) {
             entry.model = summed.model;
             sessionModel.set(id, summed.model);
@@ -464,6 +467,16 @@ export function createTokenBudgetService({
     if (state.day && eventDay < state.day) return false; // 昨天的迟到事件不计进今天
     ensureDay(at);
 
+    if (event.type === 'request/header' || event.type === 'model/selection') {
+      const route = event.data?.header?.config ?? event.data?.lastUsed ?? event.data?.next ?? event.data;
+      if (route?.model) {
+        sessionModel.set(id, route.model);
+        const entry = ensureSessionState(id);
+        entry.model = route.model;
+        entry.provider = route.provider;
+      }
+      return false;
+    }
     if (event.type === 'llm/retry-started') {
       const turn = Number(event.data?.turn);
       const step = Number(event.data?.step);
@@ -501,7 +514,8 @@ export function createTokenBudgetService({
     if (totalTokensOf(buckets) === 0) return false;
     const model = event.data?.message?.source?.model ?? sessionModel.get(id) ?? defaultModel();
     sessionModel.set(id, model);
-    const p = priceUsage(buckets, { model, at, table: priceTable() });
+    const provider = event.data?.message?.source?.provider ?? ensureSessionState(id).provider;
+    const p = priceUsage(buckets, { model, provider, at, table: priceTable() });
     const tokens = totalTokensOf(buckets);
 
     // 同一 (turn,step,retry) 后到覆盖先到：先扣掉上一笔，再记这笔。
@@ -519,16 +533,16 @@ export function createTokenBudgetService({
       const entry = ensureSessionState(id);
       entry.seen = normalizeBuckets(addBuckets(entry.seen, buckets));
     }
-    sessionSamples.set(key, { tokens, cost: p.cost.total, buckets, category });
+    sessionSamples.set(key, { tokens, cost: p.budgetCost, buckets, category });
     samples.set(id, sessionSamples);
-    addUsage(category, tokens, p.cost.total);
+    addUsage(category, tokens, p.budgetCost);
     const entry = ensureSessionState(id);
     entry.category = category;
     entry.lastSeenAt = at;
     if (!entry.createdAt) entry.createdAt = num(header.createdAt);
     if (!entry.preset && header.agentPreset) entry.preset = String(header.agentPreset);
     entry.dayTokens = Math.round(clamp0(entry.dayTokens + tokens));
-    entry.dayCost = clamp0(entry.dayCost + p.cost.total);
+    entry.dayCost = clamp0(entry.dayCost + p.budgetCost);
     if (Number.isFinite(seq)) entry.lastSeq = Math.max(entry.lastSeq, seq);
     entry.model = model;
     schedulePersist();
@@ -548,6 +562,7 @@ export function createTokenBudgetService({
         dayCost: entry.dayCost,
         lastSeq: entry.lastSeq,
         model: entry.model,
+        provider: entry.provider,
         preset: entry.preset,
         title: entry.title,
       };
@@ -604,7 +619,7 @@ export function createTokenBudgetService({
   }
 
   function usageSnapshot() {
-    return normalizeUsage(state.categories);
+    return withReviewUsage(dir, state.categories, state.day);
   }
 
   function blockedByScope() {
@@ -694,13 +709,13 @@ export function createTokenBudgetService({
     const resolvedModel = String(model || defaultModel());
     const p = priceUsage(buckets, { model: resolvedModel, at: when, table: priceTable() });
     const tokens = totalTokensOf(buckets);
-    addUsage(cat, tokens, p.cost.total);
+    addUsage(cat, tokens, p.budgetCost);
     const entry = ensureSessionState(id);
     entry.category = cat;
     entry.lastSeenAt = when;
     if (!entry.createdAt) entry.createdAt = when;
     entry.dayTokens = Math.round(clamp0(entry.dayTokens + tokens));
-    entry.dayCost = clamp0(entry.dayCost + p.cost.total);
+    entry.dayCost = clamp0(entry.dayCost + p.budgetCost);
     entry.seen = normalizeBuckets(addBuckets(entry.seen, buckets));
     entry.model = resolvedModel;
     if (label) entry.title = String(label);

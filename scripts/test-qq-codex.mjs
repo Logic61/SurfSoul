@@ -1,15 +1,35 @@
-import {test} from 'node:test';
+import {after,test} from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
+import os from 'node:os';
 import {bridgeHarness} from './audit-bridge-harness.mjs';
-import {createAdapter,models,provider} from '../plugins/surfcore/lib/qq-codex-provider.js';
+import {createAdapter,provider} from '../plugins/surfcore/lib/qq-codex-provider.js';
 import {readReactionScene} from '../src/qq-reaction.js';
 import {readQqMessageFiles} from '../src/qq-message-files.js';
 import {createConversationMemory} from '../src/conversation-memory.js';
 import {createBiliMemory} from '../src/bili-memory.js';
 import {createBiliShareScheduler} from '../src/bili-share-scheduler.js';
 import {stickerCandidates} from '../src/sticker-lib.js';
+
+const oldCodexHome = process.env.CODEX_HOME;
+const codexHome = fs.mkdtempSync(path.join(os.tmpdir(),'surfcore-catalog-test-'));
+process.env.CODEX_HOME = codexHome;
+const models = ['gpt-6.1-sol','gpt-6-astra'];
+const levels = ['low','medium','high','xhigh','max','ultra'];
+const cacheModel = (slug, efforts = levels, modalities = ['text','image'], visibility = 'list') => ({
+  slug, display_name:slug, visibility, input_modalities:modalities, context_window:120000,
+  default_reasoning_level:efforts[0], supported_reasoning_levels:efforts.map(effort => ({effort})),
+});
+const saveCatalog = entries => fs.writeFileSync(path.join(codexHome,'models_cache.json'),
+  JSON.stringify({models:[...models.map(id => cacheModel(id)), ...entries]}));
+saveCatalog([]);
+after(() => {
+  if (oldCodexHome === undefined) delete process.env.CODEX_HOME;
+  else process.env.CODEX_HOME = oldCodexHome;
+  fs.unlinkSync(path.join(codexHome,'models_cache.json'));
+  fs.rmdirSync(codexHome);
+});
 
 test('a DSH note stays visible locally and never becomes a QQ draft or forwarded text',async()=>{
   const adapter=createAdapter({},async ({schema})=>{
@@ -282,7 +302,6 @@ test('operator switches the next QQ turn between both CLI models and DeepSeek; o
     const headers = {'content-type':'application/json','x-console-token':'fixture-console-token'};
     const saveEffort = (engine,reasoningEffort) => fetch(endpoint+'effort',{method:'POST',headers,body:JSON.stringify({engine,reasoningEffort})});
     const settings = async () => (await fetch(endpoint+'model',{headers})).json();
-    const levels = ['low','medium','high','xhigh','max','ultra'];
     for (const id of models) {
       const model = await createAdapter({}).resolveModel(provider,id);
       assert.deepEqual(model.reasoning.efforts.map(e=>e.id),levels);
@@ -314,6 +333,28 @@ test('operator switches the next QQ turn between both CLI models and DeepSeek; o
         assert.equal(held.reasoningEffort,'max');
       }
     }
+    const newcomer = 'gpt-future-fixture';
+    const adapter = createAdapter({}, async ({effort,input}) => {
+      assert.equal(effort,'high');
+      assert.equal(input.length,1,'text-only model must not receive bytes from history');
+      return {output:{action:'end',text:'fixture'}};
+    });
+    assert.equal((await post('codex',newcomer)).status,400);
+    saveCatalog([cacheModel(newcomer,['high'],['text']),cacheModel('reserved-fixture',levels,['text'],'hide')]);
+    assert.equal((await post('codex',newcomer)).status,200);
+    assert.equal((await post('codex','reserved-fixture')).status,400);
+    claimed({agent});
+    assert.equal(held.model,newcomer);
+    assert.equal(held.reasoningEffort,'high');
+    assert.equal((await saveEffort('codex','ultra')).status,400);
+    const latest = await settings();
+    assert.deepEqual(latest.qqCodexModels.map(item=>item.id),[...models,newcomer]);
+    assert.deepEqual(latest.options,['high']);
+    assert.equal(latest.reasoningEffort,'high');
+    assert.ok((await adapter.listModels()).some(item=>item.id===newcomer));
+    assert.equal((await adapter.resolveModel(provider,newcomer)).context.contextWindow,120000);
+    await Array.fromAsync(adapter.stream({provider,model:newcomer,reasoningEffort:held.reasoningEffort,
+      messages:[{role:'user',content:[{type:'image',attachment:{attachmentId:'fixture'}}]}]}));
   } finally {
     if(old===undefined) delete process.env.SURFCORE_ROOT; else process.env.SURFCORE_ROOT=old;
     if(server) await new Promise(resolve=>server.close(resolve));

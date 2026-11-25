@@ -111,12 +111,15 @@ export function normalizePresendReviewConfig(raw = {}) {
 // ── 情景 ─────────────────────────────────────────────────────────────────────
 
 /** 一条对话消息压成一行（不发原文里的换行，避免把 prompt 顶乱）。 */
-function formatDialogueLine(message, personaName, maxChars) {
+function formatDialogueLine(message, personaName, maxChars, now) {
   const m = message && typeof message === 'object' ? message : {};
-  const speaker = m.isSelf ? `${personaName || '她'}（我）` : String(m.sender || '群友').trim() || '群友';
+  const display = String(m.sender || '群友').trim() || '群友';
+  const speaker = m.isSelf ? `${personaName || '她'}（我）` : display + (m.isOwner ? '（主人账号）' : '');
+  const minutes = Math.floor((now - m.time) / 60000);
+  const prefix = Number.isFinite(minutes) && minutes >= 2 ? `- ${minutes} 分钟前 ` : '- ';
   if (m.kind === 'poke' && m.poke) {
     const target = m.poke.targetIsSelf ? personaName || '本账号' : m.poke.targetName || m.poke.targetId || '未知对象';
-    return '- ' + truncateChars(`[拍一拍] ${speaker} → ${target}`, maxChars);
+    return prefix + truncateChars(`[拍一拍] ${speaker} → ${target}`, maxChars);
   }
   const plain = String(m.plain ?? '').replace(/\s+/gu, ' ').trim();
   const text = String(m.text ?? '').replace(/\s+/gu, ' ').trim();
@@ -129,7 +132,7 @@ function formatDialogueLine(message, personaName, maxChars) {
   else if (m.quoteTargetIsSelf && !raw.includes('[引用 ')) target = `[回${personaName || '她'}] `;
   if (m.mentionedIds?.length && !m.atSelf) target = '[群内@] ' + target;
   if (m.atSelf === true) target = `[@${personaName || '本账号'}] ` + target;
-  return `- ${speaker}：${truncateChars(target + raw, maxChars)}`;
+  return `${prefix}${speaker}：${truncateChars(target + raw, maxChars)}`;
 }
 
 // Only combine short, unaddressed speech. Quoted replies, media, and actions
@@ -158,7 +161,7 @@ function joinableSpeech(message) {
  */
 export function buildReviewScene({
   key = '', kind = '', groupName = '', personaName = '', statusLines = [],
-  recent = [], now = Date.now(), maxChars = DEFAULT_PRESEND_REVIEW_CONFIG.sceneMaxChars,
+  recent = [], focus = '', now = Date.now(), maxChars = DEFAULT_PRESEND_REVIEW_CONFIG.sceneMaxChars,
 } = {}) {
   const budget = Math.max(80, Number(maxChars) || DEFAULT_PRESEND_REVIEW_CONFIG.sceneMaxChars);
   const where = kind === 'private'
@@ -166,13 +169,18 @@ export function buildReviewScene({
     : `QQ 群聊${groupName ? `「${truncateChars(groupName, 24)}」` : ''}`;
   const clock = new Date(Number(now) || Date.now());
   const hhmm = `${String(clock.getHours()).padStart(2, '0')}:${String(clock.getMinutes()).padStart(2, '0')}`;
-  const header = `【场合】${where}（${key}）· 角色：${personaName || '她'} · ${hhmm}`;
+  const whereLine = `【场合】${where}（${key}）· 角色：${personaName || '她'} · ${hhmm}`;
+  const focusLabel = '\n【本次唤醒】';
+  const focusBudget = Math.min(105, budget - whereLine.length - focusLabel.length);
+  const header = focus && focusBudget > 0 ? whereLine + focusLabel + truncateChars(focus, focusBudget) : whereLine;
 
   const pickedStatus = [];
   for (const line of Array.isArray(statusLines) ? statusLines : []) {
     const text = String(line ?? '').replace(/\s+/gu, ' ').trim();
     if (!text) continue;
-    pickedStatus.push(truncateChars(text, SCENE_STATUS_LINE_CHARS));
+    const available = budget - header.length - pickedStatus.join('；').length - (pickedStatus.length ? 2 : 1);
+    if (available <= 0) break;
+    pickedStatus.push(truncateChars(text, Math.min(available, SCENE_STATUS_LINE_CHARS)));
     if (pickedStatus.length >= SCENE_STATUS_MAX_LINES) break;
   }
 
@@ -190,16 +198,19 @@ export function buildReviewScene({
       !message.isSelf && !next.isSelf && message.userId && message.userId === next.userId && message.sender === next.sender);
     const gap = next?.time - message?.time;
     const together = words + ' / ' + newestWords;
-    if (words && newestWords && sameSpeaker && gap >= 0 && gap <= 20000
-      && [...together].length <= SCENE_DIALOGUE_LINE_CHARS && used + words.length + 3 <= budget) {
-      chosen[0] = formatDialogueLine({ ...message, plain: together, text: together }, personaName, SCENE_DIALOGUE_LINE_CHARS);
-      earliest = i;
-      newestWords = together;
-      used += words.length + 3;
-      continue;
+    if (words && newestWords && sameSpeaker && gap >= 0 && gap <= 20000 && [...together].length <= SCENE_DIALOGUE_LINE_CHARS) {
+      const line = formatDialogueLine({ ...message, plain: together, text: together }, personaName, SCENE_DIALOGUE_LINE_CHARS, now);
+      const extra = line.length - chosen[0].length;
+      if (used + extra <= budget) {
+        chosen[0] = line;
+        earliest = i;
+        newestWords = together;
+        used += extra;
+        continue;
+      }
     }
     newestWords = '';
-    const line = formatDialogueLine(message, personaName, SCENE_DIALOGUE_LINE_CHARS);
+    const line = formatDialogueLine(message, personaName, SCENE_DIALOGUE_LINE_CHARS, now);
     if (!line) continue;
     if (chosen.length === SCENE_DIALOGUE_MAX_LINES) break;
     const extra = line.length + 1 + (chosen.length ? 0 : dialogueHeader.length + 1);
@@ -224,7 +235,7 @@ export function buildReviewScene({
         last.time >= item.time && last.time - item.time <= 10 * 60000 &&
         [...fragments].some(fragment => joinableSpeech(item).includes(fragment)));
       if (anchor) {
-        const line = '（前文）' + formatDialogueLine(anchor, personaName, SCENE_DIALOGUE_LINE_CHARS);
+        const line = '（前文）' + formatDialogueLine(anchor, personaName, SCENE_DIALOGUE_LINE_CHARS, now);
         const replace = chosen.length === SCENE_DIALOGUE_MAX_LINES;
         const available = budget - used + (replace ? chosen[0].length + 1 : 0);
         if (line.length + 1 <= available) {
@@ -250,13 +261,14 @@ export function buildReviewSystemPrompt({ personaName = '她', threshold = 80 } 
   return [
     `你是一个独立的中文对话评审员。你在评审 QQ 人格号「${name}」准备发出的一条（或几条）消息。`,
     '你只能看到有限上下文：场合/状态、最近几条对话、她的抽象记忆卡、她的说话习惯；记忆卡是高度压缩的摘要，不要求逐条对应。',
-    '判断标准：这条消息是否接住了对方的话（答到点上）、是否符合她的人设与说话习惯、是否符合这个场合（私聊/群聊/群规矩）、有没有重复啰嗦或自相矛盾、有没有说出不该在群里说的隐私或敏感暗示。',
+    '先判断她要回谁、对方眼下是否还在等、候选值得现在发吗。未读不等于待答。多条连发也要看有没有挨个补旧账。当前有人引用或重新提起旧话，仍可以自然接。群名片和称呼可能变，同一个“主人账号”还是同一个人。回合有没有特权不用于判断聊天对象。',
+    '如果整份草稿都在追答已经过去的闲话、抢答别人、或对象本身已经不对且无须答，给 action=discard 并点明为什么可以放下；还有值得答的当前话头，给低于阈值的分数和 action=revise，建议只留那一句。也要判断语气是否贴合、有没有重复或自相矛盾、是否违反群规或泄露隐私。',
     '区分发言人、被叫到的人和谈论的对象。动作看谁对谁做了什么。有人用普通求助的句式装进荒唐愿望，单句也能成梗。看上下文：转托别人时，来帮忙的人可以换，原先要修的东西仍是同一个。明显在玩却只纠正称呼，或把往外给说成等着收，判低于阈值。真在核对身份或托办实事，按实际问题评。真托办时，原图没发、事情没做，却报已办妥或让对方验收、报账，要退回。双方故意换位、改口或抬价也可能是笑点。没写主语时可保留歧义；把旁人的动作、话或处境硬扣给某个人，结合前文评判。',
     '结合前文和引用对象判断这句要拿来做什么。熟人丢梗图、给你递戏，你可以顺势反串，有个自己的看法也行。明确在逗你时，候选只报画面元素、道歉自证、索要证据，整个没接上梗，退回说明漏接了什么。对方真问图中文字或依据，就照实答。对方接下来要据此办事、记档或取证时，优先核对候选给出的实际结论。记录明说空白、未核实或不能辨认，候选却让人按已签、已办或能辨认去做，分数必须低于阈值；这类矛盾已经有证据，哪怕候选同时在开玩笑。',
     `评分 1-100（阈值 ${threshold}）：90-100 很合适；80-89 可用、小瑕疵；60-79 有明确问题（答非所问/重复/语气不对/说了不该说的）；1-59 不该发（失礼、泄密、破坏人设或群规、明显暴露模型身份）。`,
     '如果上下文不足以判断，给 80-85 的从宽分，不要因为「没看到完整证据」就压低分；只有能明确指出问题时才低于阈值。',
     '只输出一个 JSON 对象，不要 Markdown 代码块，不要解释：',
-    '{"score": 1-100 的整数, "reason": "不超过 60 字的中文理由（指出具体问题）", "fix": "低于阈值时给一句具体改写建议；否则空字符串"}',
+    '{"score": 1-100 的整数, "reason": "不超过 60 字的中文理由（指出具体问题）", "action": "发出用 send，值得答但需改用 revise，整份草稿该放下用 discard", "fix": "仅 revise 给具体建议；其他填空字符串"}',
   ].join('\n');
 }
 
@@ -327,7 +339,10 @@ export function parseReviewVerdict(raw) {
   const reason = typeof parsed.reason === 'string' ? parsed.reason.replace(/\s+/gu, ' ').trim() : '';
   if (!reason) return null;
   const fix = typeof parsed.fix === 'string' ? parsed.fix.replace(/\s+/gu, ' ').trim() : '';
-  return { score, reason: truncateChars(reason, VERDICT_REASON_MAX), fix: truncateChars(fix, VERDICT_REASON_MAX) };
+  return {
+    score, reason: truncateChars(reason, VERDICT_REASON_MAX), fix: truncateChars(fix, VERDICT_REASON_MAX),
+    ...(['discard', 'revise'].includes(parsed.action) ? { action: parsed.action } : {}),
+  };
 }
 
 /** 退回给模型的工具错误文案：说清「没发出去」+ 理由 + 改写要求，不要解释评审机制。 */
@@ -335,11 +350,11 @@ export function formatReviewRejection({ verdict, threshold, personaName = '她' 
   const score = Number(verdict?.score) || 0;
   const reason = String(verdict?.reason ?? '').trim() || '内容不符合当前场合';
   const fix = String(verdict?.fix ?? '').trim();
+  const decision = score < threshold ? `低于 ${threshold} 分门槛` : '建议改写';
   return [
-    `消息未发送：发送前独立评审 ${score}/100，低于 ${threshold} 分门槛（${personaName} 的这条回复不够合适）。`,
+    `消息未发送：发送前独立评审 ${score}/100，${decision}（${personaName} 的这条回复不够合适）。`,
     `理由：${reason}`,
-    fix ? `建议：${fix}` : '',
-    '可以改写这条；若只想给个反应，也可以用手边可用的表情单独回复。',
+    fix ? `改写建议：${fix}。若已经没什么要接，也可以直接收尾。` : '可以改写这条，给一张合适的表情，或直接收尾。',
   ].filter(Boolean).join('\n');
 }
 
@@ -397,6 +412,9 @@ export function createReviewThrottle({ now = Date.now } = {}) {
       const st = get(key);
       st.reviews.push(at);
       st.rejects.push(at);
+    },
+    recordDiscard(key, { at = now() } = {}) {
+      get(key).reviews.push(at);
     },
     rejectCount(key, { at = now(), windowMs = DEFAULT_PRESEND_REVIEW_CONFIG.reviewWindowMs } = {}) {
       const st = get(key);
@@ -628,7 +646,7 @@ export function createPresendReviewer({
      * @returns {Promise<{allow:true, skipped?:string, score?:number, context?:object}
      *   | {allow:false, score:number, threshold:number, reason:string, fix:string, attempt:number, error:string, context:object}>}
      */
-    async review({ key = '', kind = '', messages = [], groupName = '', personaName = '', statusLines = [], recent = [] } = {}) {
+    async review({ accounting, key = '', kind = '', messages = [], groupName = '', personaName = '', statusLines = [], recent = [], focus = '' } = {}) {
       const cfg = normalizePresendReviewConfig(getConfig?.() ?? {});
       if (!cfg.enabled) return { allow: true, skipped: 'disabled' };
       const list = (Array.isArray(messages) ? messages : [])
@@ -647,7 +665,7 @@ export function createPresendReviewer({
       let style = '';
       try { style = String(styleFor?.(key) ?? ''); } catch { /* 说话习惯拿不到就不带 */ }
       const scene = buildReviewScene({
-        key, kind, groupName, personaName, statusLines, recent, now: at, maxChars: cfg.sceneMaxChars,
+        key, kind, groupName, personaName, statusLines, recent, focus, now: at, maxChars: cfg.sceneMaxChars,
       });
       const prompt = buildReviewPrompt({
         scene: scene.text, memory: memoryText, style, messages: list,
@@ -670,8 +688,9 @@ export function createPresendReviewer({
             maxTokens,
             timeoutMs: cfg.timeoutMs,
           });
-          onUsage?.(reply?.usage ?? null);
+          onUsage?.(reply?.usage ?? null, {key,accounting,model:reply?.model,attempt:attemptNo});
         } catch (error) {
+          if (error?.usage) onUsage?.(error.usage, {key,accounting,model:error.model,attempt:attemptNo});
           if (error?.code === 'EMPTY' && error.stopReason === 'max_tokens' && attemptNo + 1 < maxAttempts) {
             // Thinking consumed the output budget. Use the reviewer's configured upper bound on retry.
             maxTokens = 1200;
@@ -705,7 +724,16 @@ export function createPresendReviewer({
           error: '消息未发送：发送前评审返回异常，请稍后重试。',
         };
       }
-      if (verdict.score >= cfg.threshold) {
+      if (verdict.action === 'discard') {
+        throttle.recordDiscard(key, { at });
+        log(`[预发送评审] ${key} 放下草稿：${verdict.reason}`);
+        return {
+          allow: false, action: 'discard', score: verdict.score, threshold: cfg.threshold,
+          reason: verdict.reason, fix: '', attempt: 0, context: prompt.stats,
+          error: `消息未发送：${verdict.reason}。放下这份草稿，先看有没有新的话头，没有就直接收尾。`,
+        };
+      }
+      if (verdict.action !== 'revise' && verdict.score >= cfg.threshold) {
         throttle.recordPass(key, { at, directTurn });
         log(`[预发送评审] ${key} 通过 ${verdict.score}/${cfg.threshold}（场景${prompt.stats.sceneChars}+记忆${prompt.stats.memoryChars}+习惯${prompt.stats.styleChars}字）`);
         return { allow: true, score: verdict.score, threshold: cfg.threshold, reason: verdict.reason, context: prompt.stats };

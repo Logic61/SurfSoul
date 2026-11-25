@@ -75,6 +75,13 @@ test('模型结合上下文选择短等和自然收尾，计时细节在等待�
   assert.match(mcp,/preSleepWaitRemainingMs 只用于潜水/);
 });
 
+test('有证据的口头禅反馈会在收尾前写入 selfNote', () => {
+  assert.match(prefix, /原话、口头禅或截图做梗[^。]*先看在模仿你哪种说法/);
+  assert.match(prefix, /确实反复说过的句式[^。]*这轮收尾前用 qq_memory_append\(category="selfNote", content="一句"\)[^。]*QQ 开口/);
+  assert.match(prefix, /证据不足或已经记过就略过/);
+  assert.match(prefix, /DSH 小记[^。]*实际调记忆工具/);
+});
+
 const mcp = fs.readFileSync(new URL('../src/mcp-snowluma-safe.js', import.meta.url), 'utf8');
 test('voice leads the preset and action contracts live with the exposed tools', () => {
   assert.ok(prefix.indexOf('【开口的语感】') < 120);

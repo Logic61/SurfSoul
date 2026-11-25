@@ -110,8 +110,14 @@ export function shouldRotateSessionAfterClosure(closureCount, config = {}) {
  * @param {object} [config] - socialV2.closure 配置
  * @returns {boolean}
  */
-export function shouldRotateSessionByContext(contextTokens, config = {}) {
-  const threshold = normalizeClosureConfig(config).rotateAfterContextTokens;
+export function effectiveContextRotationThreshold(config={},contextWindow,outputReserve=4096) {
+  const manual=normalizeClosureConfig(config).rotateAfterContextTokens;
+  if (!manual || !Number.isSafeInteger(contextWindow) || contextWindow<=0) return manual;
+  const safeOutput=Number.isSafeInteger(outputReserve)&&outputReserve>=0?outputReserve:4096;
+  return Math.min(manual,Math.max(1,Math.floor((contextWindow-safeOutput)*0.8)));
+}
+export function shouldRotateSessionByContext(contextTokens, config = {}, contextWindow) {
+  const threshold = effectiveContextRotationThreshold(config,contextWindow);
   if (!threshold) return false;
   return Math.max(0, Math.round(Number(contextTokens) || 0)) >= threshold;
 }

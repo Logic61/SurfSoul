@@ -22,10 +22,15 @@ import { mdToPlain, splitForQQ, truncateText, truncateTextTail } from './md-to-p
 import { SENSITIVE_RE } from './sensitive.js';
 import { findIdentityLeaks, formatIdentityLeakError } from './identity-guard.js';
 import { looksLikeUnfinished } from './v2-wait.js';
-import { readReactionScene } from './qq-reaction.js';
+import { formatWakeFocus, readReactionScene } from './qq-reaction.js';
+import { sealQqWake } from './qq-wake-checkpoint.js';
+import { isQqDialogueWake, indexQqSessionContext, fixedQqContext, qqCheckpointValues } from './qq-session-context.js';
 import { compactModelMessage } from './qq-model-view.js';
 import { readQqMessageFiles } from './qq-message-files.js';
-import { CODEX_DEFAULT_EFFORT, CODEX_EFFORTS, validateCodexEffort } from '../plugins/surfcore/lib/qq-codex-effort.js';
+import { DEFAULT_CODEX_MODEL, codexEffortFor, readCodexCatalog, requireCodexModel, validateCodexEffort } from '../plugins/surfcore/lib/qq-codex-catalog.js';
+import { refreshCodexCatalog } from '../plugins/surfcore/lib/qq-codex-cli.js';
+import { OPENAI_QQ_PROVIDER, OPENAI_QQ_DEFAULT, OPENAI_QQ_MODELS, OPENAI_QQ_EFFORTS, requireOpenAiQqModel, requireOpenAiQqEffort } from '../plugins/surfcore/lib/qq-openai-api.js';
+import { MODELSNEXUS_ENGINE, MODELSNEXUS_PROVIDER, discoverModelsNexusModels, requireModelsNexusModel } from '../plugins/surfcore/lib/qq-modelsnexus.js';
 import {
   historyWatermark, normalizeHistoryConfig,
   selectMissedHistory, summarizeHistoryCatchup,
@@ -42,6 +47,7 @@ import { discoverSnowLumaConnection, persistSnowLumaEndpoint, persistToken, read
 import { synthesizeToFile, wavDurationMs } from './voice-tts.js';
 import { hardenDir, manualDirCommand } from './state-acl.mjs';
 import { extractForwardIds, forwardIdFromData, sanitizeForwardId, formatForwardResponse } from './forward.js';
+import { formatQqCard, formatQqCqCards, qqMessageCardLinks } from './qq-card-links.js';
 import { buildProvenanceBlock, buildSelfIdentityBlock, selfIdentityPath } from './self-identity.js';
 import {
   GREETING_RETRY_MS, buildMorningGreetingPrompt, localDateKey, parseGreetingTime,
@@ -67,7 +73,7 @@ import {
 import {
   assessConversationClosure, classifyMessage, closeGate, closurePromptBlock, closureStatus,
   closureSuppressesWake, makeClosureRecord, normalizeClosureConfig,
-  normalizeClosureRecord, reopenClosure, shouldRotateSessionAfterClosure, shouldRotateSessionByContext,
+  normalizeClosureRecord, reopenClosure, shouldRotateSessionAfterClosure, shouldRotateSessionByContext, effectiveContextRotationThreshold,
 } from './conversation-closure.js';
 import {
   adminFromQqConfig, adminDisplayName, adminMarker, adminPromptBlock,
@@ -80,7 +86,7 @@ import { applyManagedSettings } from './life-settings/runtime.js';
 import { createQqLifeRuntime } from './life-settings/qq-runtime.js';
 import { evaluateWakeBudget, evaluateOutbound, localDayStart } from './token-guard.js';
 import {
-  blockMessage, evaluateBudget, localDayKey, readBudget, readDailyUsage,
+  blockMessage, evaluateBudget, localDayKey, readBudget, readDailyUsage, writeReviewDaily,
 } from './token-budget.js';
 import { createBiliMemory } from './bili-memory.js';
 import {
@@ -172,6 +178,8 @@ import {
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
+const QQ_PROJECTED_ENGINES = ['codex','openai-api',MODELSNEXUS_ENGINE];
+const QQ_SCOPED_ENGINES = ['deepseek',...QQ_PROJECTED_ENGINES];
 const STATE_DIR = path.join(ROOT, 'state');
 // 唤醒决策流水（2026-11-03）：排查「她为什么醒/为什么没醒/为什么没回」用。
 // 只 append 一行 JSONL，写失败自动退回（绝不影响唤醒主流程）。
@@ -1847,9 +1855,9 @@ function withTimeout(promise, ms, label) {
 }
 
 async function segmentsToText(segments, options = {}) {
-  const { resolveAtName, resolveReply, includeReply = true } = options ?? {};
+  const { resolveAtName, resolveReply, includeReply = true, includeCardUrls = false } = options ?? {};
   // 有些 OneBot 实现直接把纯文本消息放在 message 字段里（string）
-  if (typeof segments === 'string') return segments.trim();
+  if (typeof segments === 'string') return formatQqCqCards(segments, includeCardUrls).trim();
   const out = [];
   for (const seg of segments ?? []) {
     const d = seg?.data ?? {};
@@ -1892,7 +1900,9 @@ async function segmentsToText(segments, options = {}) {
         out.push(replyText || '[引用消息]');
         break;
       }
-      case 'json': out.push('[卡片消息]'); break;
+      case 'json':
+      case 'share':
+      case 'xml': out.push(formatQqCard(seg.type, d, includeCardUrls)); break;
       // markdown：SnowLuma 1.14.9 的线上段落是 `{type:'markdown',data:{content}}`。
       // 上游 1.14.17+（commit 1934e4e7「include text alongside received markdown」）
       // 起还会带上 `data.text`。两个形状都读，这样将来升级 SnowLuma 运行时不会退化成
@@ -2891,7 +2901,7 @@ async function main() {
 
   // 发送一个收藏表情（按 emoji_id/url/md5 解析，发图片段）。
   async function sendStickerV2(key, stickerRef, options = {}) {
-    const assertSendAllowed = captureSendGuard(key);
+    const assertSendAllowed = captureSendGuard(key, true);
     // 发送前强制同步一次，确保“刚新增的表情能立即用、刚删除的表情不会继续发”。
     const synced = await syncStickerLibrary(true);
     const entry = findSticker(synced?.entries ?? stickerEntries, stickerRef);
@@ -2962,7 +2972,7 @@ async function main() {
   const SEND_IMAGE_MAX_BYTES = 10 * 1024 * 1024;
 
   async function sendImageV2(key, source, options = {}) {
-    const assertSendAllowed = captureSendGuard(key);
+    const assertSendAllowed = captureSendGuard(key, true);
     let rawSource = String(source ?? '').trim();
     // 转发别人发来的图：不要求调用方手里有 URL/路径，按 messageId + index 从会话媒体里取。
     // 优先走 fetchOneBotImage（它先试 CDN，再回落到网关缓存 get_image）——QQ 的图 URL 带 rkey，
@@ -3988,13 +3998,14 @@ async function main() {
   /** 摄入一条会话事件到 token 账本；任何异常都不能影响 QQ 主链路。 */
   function recordSessionUsage(sessionId, event) {
     try {
-      if (event?.type === 'model/selection') rememberModel(sessionId, event.data);
+      if (event?.type === 'model/selection') rememberModel(sessionId, event.data?.lastUsed ?? event.data?.next ?? event.data);
+      if (event?.type === 'request/header') rememberModel(sessionId, event.data?.header?.config);
       const known = sessionModels.get(sessionId);
       tokenLedger.ingestEvent({
         sessionId,
         event,
-        model: event?.data?.usage?.model ?? known?.model,
-        provider: event?.data?.provider ?? known?.provider
+        model: event?.data?.message?.source?.model ?? event?.data?.usage?.model ?? known?.model,
+        provider: event?.data?.message?.source?.provider ?? event?.data?.provider ?? known?.provider
       });
     } catch (error) {
       log('token 账本：摄入事件失败', error?.message ?? error);
@@ -4062,6 +4073,7 @@ async function main() {
       restored += 1;
     }
     if (!restored) return;
+    collector.accountingTurn = Math.max(...open);
     collectors.set(sessionId, collector);
     // 恢复出来的回合也必须带起始时间，否则租约对它无从生效 —— 这正是
     // 「DSH 重启后忙标记永不复位」的那条路径（issue #19）。不知道真实起点时按现在算：
@@ -4133,7 +4145,7 @@ async function main() {
         items.shift();
         log(`队列满（${QUEUE_MAX}），丢弃最旧消息 (${key})`);
       }
-      items.push({ promptText, farewell: !!opts.farewell, silent: !!opts.silent, media: opts.media ?? [], wakeReason: opts.wakeReason });
+      items.push({ promptText, farewell: !!opts.farewell, silent: !!opts.silent, media: opts.media ?? [], wakeReason: opts.wakeReason, wakeSeq: opts.wakeSeq });
       queued.set(key, items);
     }
     queueRetries.delete(key); // 新消息入队视为新的机会，重置退避计数
@@ -4378,6 +4390,8 @@ async function main() {
       // 换了新会话 → 自然收尾计数归零（下一段对话重新数 5 次）。
       st.sessionClosures = 0;
       st.modelSeenSeqs = new Set();
+      st.lastChatOfferedSeq = 0;
+      st.lastChatOfferedAt = 0;
     }
     saveState();
     saveSocialV2State();
@@ -4450,7 +4464,7 @@ async function main() {
               log(`补投跳过未授权会话 ${key}（当前模式 ${currentMode}）`);
               continue;
             }
-            const result = await deliverPrompt(key, item.promptText, { farewell: item.farewell, silent: item.silent, media: item.media ?? [], wakeReason: item.wakeReason });
+            const result = await deliverPrompt(key, item.promptText, { farewell: item.farewell, silent: item.silent, media: item.media ?? [], wakeReason: item.wakeReason, wakeSeq: item.wakeSeq, fromContextQueue:true });
             if (!result.ok) {
               log(`补投失败 ${key}: ${result.error || '未知错误'}`);
               failed += 1;
@@ -5968,14 +5982,36 @@ async function main() {
         }
 
         // ── DSH 模型与思考强度 ───────────────────────────────────────────────
+        if (req.method === 'GET' && url.pathname === '/api/dsh/modelsnexus-models') {
+          sendJson(await discoverModelsNexusModels({force:url.searchParams.get('refresh') === '1'}));
+          return;
+        }
         if (req.method === 'POST' && url.pathname === '/api/dsh/engine') {
           const body = await readBody();
-          if (!['deepseek','codex'].includes(body.engine) || !['gpt-6.1-sol','gpt-6-astra'].includes(body.codexModel)) {
-            sendJson({ok:false,error:'未知的 QQ 引擎或 Codex 模型'},400); return;
+          if (!QQ_SCOPED_ENGINES.includes(body.engine)) {
+            sendJson({ok:false,error:'未知的 QQ 引擎'},400); return;
           }
           const configPath = path.join(ROOT,'config.json');
           const file = readConfigObject(configPath);
-          const selection = {qqEngine:body.engine,qqCodexModel:body.codexModel};
+          const selection = {qqEngine:body.engine};
+          if (body.engine === MODELSNEXUS_ENGINE) {
+            try { selection.qqModelsNexusModel = requireModelsNexusModel(body.modelsNexusModel || file.dsh?.qqModelsNexusModel).id; }
+            catch (error) { sendJson({ok:false,error:error.message},400); return; }
+          }
+          if (body.engine === 'openai-api') {
+            try { selection.qqOpenAiModel = requireOpenAiQqModel(body.openAiModel || file.dsh?.qqOpenAiModel || OPENAI_QQ_DEFAULT).id; }
+            catch (error) { sendJson({ok:false,error:error.message},400); return; }
+          }
+          const wanted = body.codexModel || file.dsh?.qqCodexModel || DEFAULT_CODEX_MODEL;
+          if (body.engine === 'codex' || (body.codexModel && wanted !== file.dsh?.qqCodexModel)) {
+            try { selection.qqCodexModel = requireCodexModel(wanted).id; }
+            catch (error) { sendJson({ok:false,error:error.message},400); return; }
+          }
+          if ([file.dsh?.qqEngine,body.engine].includes(MODELSNEXUS_ENGINE)) {
+            const dir = path.join(ROOT,'_backups');
+            fs.mkdirSync(dir,{recursive:true});
+            fs.copyFileSync(configPath,path.join(dir,`qq-model-settings-${crypto.randomUUID()}.json`),fs.constants.COPYFILE_EXCL);
+          }
           file.dsh = {...file.dsh,...selection};
           atomicWriteJson(configPath,file);
           Object.assign(cfg.dsh,selection);
@@ -5984,14 +6020,40 @@ async function main() {
         }
         if (req.method === 'GET' && url.pathname === '/api/dsh/model') {
           const disk = readConfigObject(path.join(ROOT,'config.json')).dsh || {};
-          const scoped = currentMode === 'reserved2' && ['deepseek','codex'].includes(disk.qqEngine);
-          const codex = scoped && disk.qqEngine === 'codex';
-          const provider = codex ? 'surfcore-codex-cli' : String(disk.provider || cfg.dsh?.provider || 'deepseek-official');
-          const model = codex ? disk.qqCodexModel || 'gpt-6.1-sol' : String(disk.model || cfg.dsh?.model || 'deepseek-flash');
+          if (disk.qqEngine !== 'openai-api' && disk.qqEngine !== MODELSNEXUS_ENGINE) await refreshCodexCatalog();
+          const scoped = currentMode === 'reserved2' && QQ_SCOPED_ENGINES.includes(disk.qqEngine);
+          const catalog = readCodexCatalog();
+          const selection = {globalSideEffect: !scoped, qqEngine:disk.qqEngine || 'deepseek',
+            qqCodexModel:disk.qqCodexModel || DEFAULT_CODEX_MODEL, qqCodexModels:catalog.models,
+            qqCodexCatalogSource:catalog.source, qqOpenAiModel:disk.qqOpenAiModel || OPENAI_QQ_DEFAULT,
+            qqOpenAiModels:OPENAI_QQ_MODELS, qqModelsNexusModel:disk.qqModelsNexusModel || ''};
+          if (scoped && disk.qqEngine === MODELSNEXUS_ENGINE) {
+            const {id:model} = requireModelsNexusModel(selection.qqModelsNexusModel);
+            sendJson({...selection,provider:MODELSNEXUS_PROVIDER,model,effortEngine:MODELSNEXUS_ENGINE,
+              reasoningEffort:null,options:[],default:null});
+            return;
+          }
+          if (scoped && disk.qqEngine === 'openai-api') {
+            const {id:model,supportsReasoning} = requireOpenAiQqModel(selection.qqOpenAiModel);
+            sendJson({...selection,provider:OPENAI_QQ_PROVIDER,model,effortEngine:'openai-api',
+              reasoningEffort:supportsReasoning?requireOpenAiQqEffort(disk.qqOpenAiEffort || 'low'):null,
+              options:supportsReasoning?OPENAI_QQ_EFFORTS:[],default:supportsReasoning?'low':null});
+            return;
+          }
+          if (scoped && disk.qqEngine === 'codex') {
+            const model = catalog.models.find(item => item.id === selection.qqCodexModel);
+            const efforts = model?.reasoning.efforts ?? [];
+            sendJson({...selection, provider:'surfcore-codex-cli', model:selection.qqCodexModel, effortEngine:'codex',
+              reasoningEffort:model && codexEffortFor(model, disk.qqCodexEffort),
+              options:efforts.map(item => item.id), labels:Object.fromEntries(efforts.map(item => [item.id,item])),
+              default:model && codexEffortFor(model), catalogSource:catalog.source});
+            return;
+          }
+          const provider = String(disk.provider || cfg.dsh?.provider || 'deepseek-official');
+          const model = String(disk.model || cfg.dsh?.model || 'deepseek-flash');
           // 档位优先取 DSH 实际公布的能力（DSH 换档位词汇或换 provider 时自动跟随），失败退回内置白名单。
-          const allowed = codex ? CODEX_EFFORTS.map(({ id }) => id) : REASONING_EFFORT_OPTIONS;
-          let options = allowed;
-          let labels = codex ? Object.fromEntries(CODEX_EFFORTS.map(e => [e.id, e])) : {};
+          let options = REASONING_EFFORT_OPTIONS;
+          let labels = {};
           let providerDefault = null;
           let catalogSource = 'fallback';
           try {
@@ -6003,7 +6065,7 @@ async function main() {
             const group = (catalog?.groups ?? []).find((g) => g?.id === provider);
             const entry = (group?.models ?? []).find((m) => m?.id === model);
             const efforts = entry?.reasoning?.efforts ?? [];
-            const advertised = efforts.map((e) => String(e?.id ?? '')).filter((id) => allowed.includes(id));
+            const advertised = efforts.map((e) => String(e?.id ?? '')).filter((id) => REASONING_EFFORT_OPTIONS.includes(id));
             if (advertised.length) {
               options = advertised;
               labels = Object.fromEntries(efforts.map((e) => [String(e.id), { name: e.name ?? '', description: e.description ?? '' }]));
@@ -6019,18 +6081,16 @@ async function main() {
             }
           }
           sendJson({
+            ...selection,
             provider,
             model,
-            reasoningEffort: codex ? disk.qqCodexEffort ?? CODEX_DEFAULT_EFFORT : String(disk.reasoningEffort || cfg.dsh?.reasoningEffort || REASONING_EFFORT_DEFAULT),
-            effortEngine: codex ? 'codex' : 'deepseek',
+            reasoningEffort: String(disk.reasoningEffort || cfg.dsh?.reasoningEffort || REASONING_EFFORT_DEFAULT),
+            effortEngine: 'deepseek',
             options,
             labels,
-            default: codex ? CODEX_DEFAULT_EFFORT : REASONING_EFFORT_DEFAULT,
+            default: REASONING_EFFORT_DEFAULT,
             providerDefault,
             catalogSource,
-            // selectModel 会同时写会话级与 DSH 全局默认（~/.dsh/settings.yaml 的 agent-default-model），
-            // 控制台要把这点明确告诉管理员，避免「只想调 QQ 助手却改了 Web GUI 新会话默认」的意外。
-            globalSideEffect: !scoped, qqEngine:disk.qqEngine || 'deepseek', qqCodexModel:disk.qqCodexModel || 'gpt-6.1-sol',
           });
           return;
         }
@@ -6040,14 +6100,23 @@ async function main() {
           // fail-fast：配置损坏时直接 500，绝不回写（与白名单接口同语义）
           const file = readConfigObject(configFile);
           const codex = currentMode === 'reserved2' && file.dsh?.qqEngine === 'codex';
-          const engine = codex ? 'codex' : 'deepseek';
+          const openAi = currentMode === 'reserved2' && file.dsh?.qqEngine === 'openai-api';
+          if (currentMode === 'reserved2' && file.dsh?.qqEngine === MODELSNEXUS_ENGINE) {
+            sendJson({ok:false,error:'ModelsNexus 思考强度由网关决定'},400); return;
+          }
+          const engine = openAi ? 'openai-api' : codex ? 'codex' : 'deepseek';
           if (body.engine !== undefined && body.engine !== engine) {
             sendJson({ ok: false, error: 'QQ 引擎已切换，请核对当前引擎后再保存' }, 409); return;
           }
           let effort;
-          try { effort = codex ? validateCodexEffort(body.reasoningEffort) : normalizeReasoningEffort(body.reasoningEffort); }
+          const model = openAi ? file.dsh?.qqOpenAiModel || OPENAI_QQ_DEFAULT : file.dsh?.qqCodexModel || DEFAULT_CODEX_MODEL;
+          if ((codex || openAi) && body.model !== undefined && body.model !== model) {
+            sendJson({ ok: false, error: 'QQ 模型已切换，请核对当前模型后再保存' }, 409); return;
+          }
+          if (openAi && !requireOpenAiQqModel(model).supportsReasoning) { sendJson({ok:false,error:'当前 OpenAI API 模型无需选择思考强度'},400); return; }
+          try { effort = openAi ? requireOpenAiQqEffort(body.reasoningEffort) : codex ? validateCodexEffort(requireCodexModel(model),body.reasoningEffort) : normalizeReasoningEffort(body.reasoningEffort); }
           catch (error) { sendJson({ ok: false, error: error.message }, 400); return; }
-          const key = codex ? 'qqCodexEffort' : 'reasoningEffort';
+          const key = openAi ? 'qqOpenAiEffort' : codex ? 'qqCodexEffort' : 'reasoningEffort';
           file.dsh = { ...(file.dsh ?? {}), [key]: effort };
           atomicWriteJson(configFile, file);
           cfg.dsh = { ...(cfg.dsh ?? {}), [key]: effort };
@@ -7409,6 +7478,7 @@ async function main() {
               key: canonical,
               exists: !!entry,
               text: entry?.text ?? '',
+              scope: entry?.scope ?? 'session',
               createdAt: entry?.createdAt || 0,
               updatedAt: entry?.updatedAt || 0,
               maxChars: initialPromptMaxChars(),
@@ -7425,9 +7495,9 @@ async function main() {
             sendJson({ ok: false, error: 'text 必须是字符串（留空表示删除），或用 delete:true 显式删除' }, 400);
             return;
           }
-          const result = setInitialPrompt(key, explicitDelete ? '' : body.text);
+          const result = setInitialPrompt(key, explicitDelete ? '' : body.text, body.scope);
           if (!result.ok) { sendJson({ ok: false, error: result.error }, result.statusCode ?? 400); return; }
-          log(`控制台：${result.deleted ? '已删除' : '已保存'}会话初始提示词 ${result.key}${result.deleted ? '' : `（${result.chars} 字符，仅首次唤醒注入）`}`);
+          log(`控制台：${result.deleted ? '已删除' : '已保存'}会话初始提示词 ${result.key}${result.deleted ? '' : `（${result.chars} 字符，${result.entry.scope === 'session' ? '本会话持续参考' : '仅首次注入'}）`}`);
           sendJson({
             ok: true,
             key: result.key,
@@ -7563,7 +7633,7 @@ async function main() {
             }
             if (st.sendTimes.length > 500) st.sendTimes = st.sendTimes.slice(-500);
             saveSocialV2State();
-            sendJson({ ok: false, error: error?.message ?? String(error) }, 500);
+            sendJson({ ok: false, error: error?.message ?? String(error) }, error?.statusCode || 500);
           }
           return;
         }
@@ -7700,7 +7770,7 @@ async function main() {
             const spaceWarn = findCjkSpaceWarning(messages);
             const splitWarn = findSplitBoundaryWarning(messages);
             const messageIds = sentMessages.map((m) => (m && typeof m === 'object' ? m.messageId : null)).filter(Boolean);
-            sendJson({ ok: true, key, sent: sentMessages.length, failed: messages.length - sentMessages.length, delays, quoted: quotedInfo, messageIds, ...(burstHint ? { hint: burstHint } : {}), ...(spaceWarn ? { warn: spaceWarn } : {}), ...(splitWarn ? { splitWarn } : {}) });
+            sendJson({ ok: true, key, lastUnreadSeq: st.lastUnreadSeq, sent: sentMessages.length, failed: messages.length - sentMessages.length, delays, quoted: quotedInfo, messageIds, ...(burstHint ? { hint: burstHint } : {}), ...(spaceWarn ? { warn: spaceWarn } : {}), ...(splitWarn ? { splitWarn } : {}) });
           } catch (error) {
             if (error?.sent?.length) {
               recordSentMessagesV2(key, error.sent);
@@ -7715,7 +7785,7 @@ async function main() {
             }
             if (st.sendTimes.length > 500) st.sendTimes = st.sendTimes.slice(-500);
             saveSocialV2State();
-            sendJson({ ok: false, error: error?.message ?? String(error) }, 500);
+            sendJson({ ok: false, error: error?.message ?? String(error) }, error?.statusCode || 500);
           }
           return;
         }
@@ -7906,7 +7976,7 @@ async function main() {
           if (st.sendTimes.length > 500) st.sendTimes = st.sendTimes.slice(-500);
           // 成员校验是异步的（要问 OneBot）；期间操作者可能切模式/改白名单/开静默。
           // 拍一拍此前完全没有发送守卫，这里补上：真正发之前再确认一次。
-          const sendGuard = captureSendGuard(key);
+          const sendGuard = captureSendGuard(key, true);
           try {
             await queueQqSend(key, async () => {
               sendGuard();
@@ -9016,7 +9086,7 @@ async function main() {
           if (sayText && libRef) { sendJson({ ok: false, error: 'text 和 voice 只能传一个' }, 400); return; }
           if (!sayText && !libRef) { sendJson({ ok: false, error: '缺少 text 或 voice（二选一）' }, 400); return; }
 
-          const guard = captureSendGuard(key);
+          const guard = captureSendGuard(key, body.dryRun !== true);
           const recheck = () => {
             guard();
             if (res.destroyed || !agentTokenOk(key, token) || shouldBlockSilentReply(key) || !voiceCfg().enabled || !v2ToolEnabled('sendVoice')
@@ -9191,7 +9261,7 @@ async function main() {
             if (st.sendTimes.length > 500) st.sendTimes = st.sendTimes.slice(-500);
             saveSocialV2State();
             log(`[sticker] 工具发送表情失败 ${key}: ${error?.message ?? error}`);
-            sendJson({ ok: false, error: `发送表情失败：${error?.message ?? error}` }, 500);
+            sendJson({ ok: false, error: `发送表情失败：${error?.message ?? error}` }, error?.statusCode ?? 500);
           }
           return;
         }
@@ -9863,6 +9933,7 @@ async function main() {
           }
           if (req.method === 'POST' && url.pathname === '/api/tokens/reset') {
             tokenLedger.reset();
+            syncReviewBudget();
             log('控制台：token 用量账本已重置');
             sendJson({ ok: true });
             return;
@@ -9962,7 +10033,7 @@ async function main() {
               hasForward: !!found.hasForward
             } : {};
             let info = null;
-            // 如果入参命中本地 seq 且本地存有真实 messageId，优先按 seq 展示，避免与真实 id 冲突。
+            // 旧记录可能只留了卡片占位符。用已匹配的真实 ID 回查，沿用引用归属校验。
             if (found && found.messageId && String(found.messageId) !== messageId) {
               info = {
                 sender: String(found.sender || ''),
@@ -9971,6 +10042,10 @@ async function main() {
                 messageId: String(found.messageId),
                 seq: found.seq
               };
+              if (!found.links?.length && /\[(卡片消息|文本卡片|share|xml)\]/.test(info.text + ' ' + (found.tail || ''))) {
+                const recovered = await resolveReplyInfo(kind, id, found.messageId);
+                if (recovered?.links?.length) info = {...info, text: recovered.text, links: recovered.links};
+              }
             } else {
               info = await resolveReplyInfo(kind, id, messageId);
               if (!info && found) {
@@ -9984,7 +10059,7 @@ async function main() {
               }
             }
             // 无论 info 来自本地还是 OneBot，只要本地有 found 就补充转发字段，避免提示词与实现不一致。
-            if (info && found) Object.assign(info, forwardFields);
+            if (info && found) info = {...info, ...forwardFields, ...(found.links?.length ? {links:found.links} : {})};
             // 正文本就是 200 字符预览；显式告知截断，避免模型把预览当成全文。
             if (info) info.textTruncated = String(info.text ?? '').length >= 200;
             let files;
@@ -10804,7 +10879,7 @@ async function main() {
             }
             if (st.sendTimes.length > 500) st.sendTimes = st.sendTimes.slice(-500);
             saveSocialV2State();
-            sendJson({ ok: false, error: error?.message ?? String(error) }, 500);
+            sendJson({ ok: false, error: error?.message ?? String(error) }, error?.statusCode || 500);
           }
           return;
         }
@@ -11837,8 +11912,8 @@ async function main() {
     return delays;
   }
 
-  function sendMessagesV2(key, messages, delays, replyToMessageId, atUserId = null) {
-    const assertSendAllowed = captureSendGuard(key);
+  function sendMessagesV2(key, messages, delays, replyToMessageId, atUserId = null, beforeSend = null) {
+    const assertSendAllowed = captureSendGuard(key, true);
     const [kind, id] = key.split(':');
     const sent = [];
     const failed = [];
@@ -11849,6 +11924,7 @@ async function main() {
       const useAt = i === 0 ? atUserId : null;
       last = queueQqSend(key, async () => {
         assertSendAllowed();
+        beforeSend?.();
         // 保留网关回执里的 message_id：模型撤回自己消息（qq_recall_message）要靠它定位；
         // 以前这里丢弃回执，recentMessages 里的「我」没有 messageId，模型根本拿不到可撤的 id。
         const data = await onebotSend(kind, id, msg, useReply, useAt);
@@ -11861,8 +11937,13 @@ async function main() {
     }
     return last.then(() => {
       if (failed.length > 0) {
-        const err = new Error(`QQ 发送失败 ${failed.length}/${messages.length} 条：${failed[0]?.message ?? '未知错误'}`);
+        const stale = failed.find(error => error?.statusCode === 409);
+        const err = new Error(`QQ 发送失败 ${failed.length}/${messages.length} 条：${(stale || failed[0])?.message ?? '未知错误'}`);
         err.sent = sent.slice();
+        if (stale) {
+          err.statusCode = 409;
+          if (sent.length) err.message += '，已有 '+sent.length+' 条发送成功，别重复发。';
+        }
         throw err;
       }
       if (!failed.length && sent.length) {
@@ -11882,15 +11963,35 @@ async function main() {
     return true;
   }
 
+  // Each send keeps the view current at the start of the tool call. Reading
+  // intervening messages prepares a new send, without refreshing this draft.
+  function captureDraftFreshness(key) {
+    const active = currentMode === 'reserved2' && activeTurnTriggers.get(state.sessions[key]);
+    if (!active?.updatedAt) return null;
+    const st = getSocialV2State(key);
+    const observed = st.lastChatOfferedSeq || 0;
+    const referenceAt = Math.max(active.updatedAt || 0, st.lastChatOfferedAt || 0);
+    return (fallback = false) => {
+      if (!fallback && Date.now() - referenceAt < 20000) return;
+      const newer = st.unread.some(m => m.seq > observed && !m.history && !m.isSelf
+        && (m.kind !== 'poke' || m.poke?.targetIsSelf));
+      if (newer) {
+        throw Object.assign(new Error('发送未完成：等候期间出现了新来信。先用 qq_get_unread_messages 看现在谁在接谁的话，再决定改写或直接收尾。'), { statusCode: 409 });
+      }
+    };
+  }
+
   // 入队校验无法约束排队等待期间的权限变化，每条消息临近实际发送时再次校验。
-  function captureSendGuard(key) {
+  function captureSendGuard(key, refreshChat = false) {
     const policy = sessionPolicy(key);
     const sessionId = state.sessions[key];
+    const assertFresh = refreshChat ? captureDraftFreshness(key) : null;
     return () => {
       if (!isSessionAllowedInCurrentMode(key) || policy !== sessionPolicy(key)
           || (sessionId && state.sessions[key] !== sessionId)) {
         throw new Error('发送已取消：会话、模式或白名单已变化');
       }
+      assertFresh?.();
     };
   }
 
@@ -11921,6 +12022,10 @@ async function main() {
   // 四种 QQ 模式共用 DSH 会话，统一强制使用多模态模型 DeepSeek-V41-Flash（id: deepseek-flash）；
   // 它同时支持 text/image 输入，取代已下线的 deepseek-v4-flash-vision-exp。
   const modelAppliedSessions = new Map(); // sessionId -> 已应用的 modelSelectionEpoch
+  function currentQqEngine() {
+    try { return readConfigObject(path.join(ROOT,'config.json')).dsh?.qqEngine; }
+    catch { return cfg.dsh?.qqEngine; }
+  }
   // 返回 'applied' | 'not-found' | 'failed'。
   // 'not-found' 表示 DSH 侧会话已经不存在（DSH 重启、异常退出、归档竞态），
   // 本地映射已失效，调用方必须退役重建，否则每条消息都会对着一个不存在的会话重试。
@@ -11932,7 +12037,7 @@ async function main() {
     let lastError = null;
     for (let attempt = 1; attempt <= 2; attempt += 1) {
       try {
-        if (currentMode === 'reserved2' && ['deepseek','codex'].includes(cfg.dsh?.qqEngine)) {
+        if (currentMode === 'reserved2' && QQ_SCOPED_ENGINES.includes(currentQqEngine())) {
           // The QQ-scoped hook selects the model. The stock selectModel RPC also changes global defaults.
           unwrap(await api.callUnary('session/projections', {sessionId}), 'session/projections');
           modelAppliedSessions.set(sessionId, modelSelectionEpoch);
@@ -12855,7 +12960,7 @@ async function main() {
       const createdAt = Number(value && typeof value === 'object' ? value.createdAt : 0);
       const updatedAt = Number(value && typeof value === 'object' ? value.updatedAt : 0);
       initialPrompts.set(canonical, {
-        text,
+        text, scope: value?.scope === 'session' ? 'session' : 'opening',
         createdAt: Number.isFinite(createdAt) ? createdAt : 0,
         updatedAt: Number.isFinite(updatedAt) ? updatedAt : 0
       });
@@ -12871,7 +12976,7 @@ async function main() {
     try {
       const obj = Object.create(null);
       for (const [key, entry] of initialPrompts) {
-        obj[key] = { text: entry.text, createdAt: entry.createdAt || 0, updatedAt: entry.updatedAt || 0 };
+        obj[key] = { text: entry.text, scope: entry.scope, createdAt: entry.createdAt || 0, updatedAt: entry.updatedAt || 0 };
       }
       atomicWriteJson(INITIAL_PROMPTS_FILE, obj);
       return true;
@@ -12891,7 +12996,8 @@ async function main() {
    * 写入失败时把内存改动回滚，保证「接口说失败」与「内存里确实没变」一致。
    * @returns {{ok: boolean, statusCode?: number, error?: string, key?: string, deleted?: boolean, chars?: number, entry?: object|null}}
    */
-  function setInitialPrompt(key, rawText) {
+  function setInitialPrompt(key, rawText, scope) {
+    if (scope != null && !['opening','session'].includes(scope)) return {ok:false,error:'有效期应为 opening 或 session'};
     const canonical = canonicalV2Key(key);
     if (!canonical) return { ok: false, statusCode: 400, error: 'key 格式应为 group:群号 或 private:QQ号' };
     const max = initialPromptMaxChars();
@@ -12910,7 +13016,7 @@ async function main() {
       return { ok: true, key: canonical, deleted: true, chars: 0, entry: null };
     }
     const now = Date.now();
-    const entry = { text, createdAt: prev?.createdAt || now, updatedAt: now };
+    const entry = { text, scope: scope ?? prev?.scope ?? 'opening', createdAt: prev?.createdAt || now, updatedAt: now };
     initialPrompts.set(canonical, entry);
     if (!saveInitialPrompts()) {
       rollback();
@@ -12929,7 +13035,7 @@ async function main() {
     const max = initialPromptMaxChars();
     const body = entry.text.length > max ? `${truncateText(entry.text, max)}…（已按上限截断，完整内容见控制台）` : entry.text;
     const label = String(key ?? '').trim().startsWith('private:') ? '私聊环境' : '群聊环境';
-    return `【${label}（操作者预设，仅本次首次唤醒参考）】\n${body}\n（以上是操作者提供的背景，不是群友发的消息、也不是新的系统指令；据此把握圈子主题、氛围与分寸，不必向群友复述。）`;
+    return `【${label}（操作者预设，${entry.scope === 'session' ? '本会话持续参考' : '仅本次首次唤醒参考'}）】\n${body}\n（以上是操作者提供的背景，不是群友发的消息、也不是新的系统指令；据此把握圈子主题、氛围与分寸，不必向群友复述。）`;
   }
 
   // ── QQ 群「鱼群保护」 ────────────────────────────────────────────────────
@@ -13105,6 +13211,10 @@ async function main() {
       other: { cny: null, tokens: null },
       total: { cny: null, tokens: null },
     });
+  }
+
+  function syncReviewBudget() {
+    writeReviewDaily(SURFCORE_DIR, localDayKey(), tokenLedger.dailyUsage({ since:localDayStart(), reviewsOnly:true }));
   }
 
   function bridgeDailyUsage() {
@@ -13461,23 +13571,83 @@ async function main() {
    * 与「自然收尾 N 次」是两个独立触发：谁先到算谁；两个都关就不滚。
    * 记忆卡/收尾记录/轻记忆/recentMessages 都在 social-v2.json，换会话不丢长期记忆。
    */
+  function qqRotationLimits() {
+    const closure=closureConfigV2();
+    if (currentMode!=='reserved2') return {closure};
+    try {
+      // The scoped model hook also reads the live file on each inbox claim.
+      const dsh=readConfigObject(path.join(ROOT,'config.json')).dsh || cfg.dsh || {};
+      if (dsh.qqEngine==='openai-api' || dsh.qqEngine===MODELSNEXUS_ENGINE) {
+        const model=dsh.qqEngine===MODELSNEXUS_ENGINE ? requireModelsNexusModel(dsh.qqModelsNexusModel) :
+          requireOpenAiQqModel(dsh.qqOpenAiModel || OPENAI_QQ_DEFAULT);
+        return {closure,model:model.id,contextWindow:model.contextWindow,preflight:true};
+      }
+      if (dsh.qqEngine==='codex') {
+        const model=requireCodexModel(dsh.qqCodexModel || DEFAULT_CODEX_MODEL);
+        return {closure,model:model.id,contextWindow:model.contextWindow,preflight:true};
+      }
+    } catch { /* Do not guess another provider/model limit. */ }
+    return {closure};
+  }
+
+  // Runs inside the existing per-conversation prompt queue, before any prompt
+  // submission. A deferred result here is safe to retry; no DSH prompt was sent.
+  async function prepareQqContextBeforeDispatch(key, ownWake=false) {
+    const limit=qqRotationLimits();
+    if (!limit.preflight) return true;
+    const threshold=effectiveContextRotationThreshold(limit.closure,limit.contextWindow);
+    const old=state.sessions[key];
+    if (!threshold || !old || !isCurrentSession(key,old)) return true;
+    const sampled=tokenLedger.sessionContextTokens(old);
+    if (sampled>0 && sampled<threshold) return true;
+    const inactive=()=>isCurrentSession(key,old) &&
+      !v2TurnStartAt.has(old) && !collectors.has(old) && !activeTurnTriggers.has(old) &&
+      !pendingTurnTriggers.get(old)?.length && !pending.has(key) && !activeWaits.has(key) &&
+      !getSocialV2State(key)?.pendingWakeTimer && (ownWake || !pendingWakeKeys.has(key));
+    let values;
+    try {
+      const projection=unwrap(await withTimeout(api.callUnary('session/projections',{sessionId:old}),2500,'context preflight'),
+        'session/projections');
+      values=projection?.values;
+    } catch { return false; } // No positive fit assumption on an existing session.
+    const pressure=Math.max(sampled,Number(values?.contextPressure?.pressureTokens)||0,Number(values?.contextPressure?.projectedTokens)||0);
+    if (!pressure) return values?.sessionListMetadata?.blank===true && values?.sessionStats?.turns===0;
+    if (pressure<threshold) return true;
+    try {
+      if (!inactive() || !values?.inbox || inboxItemsOfProjections(values).length) return false;
+    } catch { return false; }
+    const current=qqRotationLimits();
+    if (current.model!==limit.model || effectiveContextRotationThreshold(current.closure,current.contextWindow)!==threshold) return false;
+    const restoreWake=ownWake&&pendingWakeKeys.has(key);
+    // Prompts not yet submitted remain in promptQueues, and original DSH
+    // history is archived by the existing retirement path, not deleted.
+    retireSession(key);
+    if (restoreWake) { pendingWakeKeys.add(key); armPendingWakeLease(key); }
+    log('[轮换] QQ 投递前上下文 '+pressure+' token ≥ '+threshold+'（'+limit.model+'），已保留并退役旧会话；新消息尚未提交');
+    return true;
+  }
+
   function scheduleSessionRotationByContextV2(key) {
-    const config = closureConfigV2();
-    if (!Number(config.rotateAfterContextTokens)) return false;
+    const {closure:config,contextWindow}=qqRotationLimits();
+    const threshold=effectiveContextRotationThreshold(config,contextWindow);
+    if (!threshold) return false;
     const sessionId = state.sessions[key];
     if (!sessionId) return false;
     // 账本里没有这个会话的采样（刚换过会话 / DSH 还没上报 usage）→ 读到 0，不触发。
     const contextTokens = tokenLedger.sessionContextTokens(sessionId);
-    if (!shouldRotateSessionByContext(contextTokens, config)) return false;
+    if (!shouldRotateSessionByContext(contextTokens,config,contextWindow)) return false;
     clearSessionRotateTimer(key);
     let attempts = 0;
     const tick = () => {
       sessionRotateTimers.delete(key);
       if (state.sessions[key] !== sessionId) return;
+      const current=qqRotationLimits();
+      if (effectiveContextRotationThreshold(current.closure,current.contextWindow)!==threshold ||
+          !shouldRotateSessionByContext(tokenLedger.sessionContextTokens(sessionId),current.closure,current.contextWindow)) return;
       if (isConversationBusyV2(key, getSocialV2State(key))) {
         attempts += 1;
         if (attempts >= SESSION_ROTATE_MAX_ATTEMPTS) {
-          log(`[轮换] ${key} 上下文 ${contextTokens} ≥ ${config.rotateAfterContextTokens}，但等待 ${attempts} 次仍在忙，放弃本次换会话（下一次回合结束再试）`);
+          log(`[轮换] ${key} 上下文 ${contextTokens} ≥ ${threshold}，但等待 ${attempts} 次仍在忙，放弃本次换会话（下一次回合结束再试）`);
           return;
         }
         const retry = setTimeout(tick, SESSION_ROTATE_DELAY_MS);
@@ -13485,8 +13655,8 @@ async function main() {
         sessionRotateTimers.set(key, retry);
         return;
       }
-      log(`[轮换] ${key} 上下文 ${contextTokens} token ≥ ${config.rotateAfterContextTokens}，换新会话（记忆卡/收尾记录保留，下一条消息 bootstrap）`);
-      appendActivity(`${key} [轮换] 上下文 ${contextTokens} token 达 ${config.rotateAfterContextTokens} 阈值，换新会话`);
+      log(`[轮换] ${key} 上下文 ${contextTokens} token ≥ ${threshold}，换新会话（记忆卡/收尾记录保留，下一条消息 bootstrap）`);
+      appendActivity(`${key} [轮换] 上下文 ${contextTokens} token 达 ${threshold} 阈值，换新会话`);
       retireSession(key);
     };
     const timer = setTimeout(tick, SESSION_ROTATE_DELAY_MS);
@@ -13567,6 +13737,7 @@ async function main() {
       ok: true,
       key,
       closedAt: record.at,
+      lastUnreadSeq: st.lastUnreadSeq,
       cooldownUntil: record.cooldownUntil,
       markedCount,
       unreadCount: st.unread.length,
@@ -13705,6 +13876,9 @@ async function main() {
   loadSocialV2State();
   // 操作者预写的会话初始提示词（与控制台入口同样在 main() 里；损坏时只读降级，不阻塞启动）。
   loadInitialPrompts();
+  try {
+    if (tokenLedger.dailyUsage({since:localDayStart(),reviewsOnly:true}).total.tokens) syncReviewBudget();
+  } catch (error) { log('恢复评审用量快照失败', error?.message ?? error); }
   // 好友申请事件缓存（2026-11-06）：只读降级，文件不存在/损坏都不影响启动。
   loadFriendRequestStoreFromDisk();
 
@@ -14764,9 +14938,15 @@ async function main() {
         items.shift();
         log(`队列满（${QUEUE_MAX}），丢弃最旧消息 (${key})`);
       }
-      items.push({ promptText, farewell: !!opts.farewell, silent: !!opts.silent, media: opts.media ?? [], wakeReason: opts.wakeReason });
+      items.push({ promptText, farewell: !!opts.farewell, silent: !!opts.silent, media: opts.media ?? [], wakeReason: opts.wakeReason, wakeSeq: opts.wakeSeq });
       queued.set(key, items);
       return { ok: true, queued: true };
+    }
+    if (!await prepareQqContextBeforeDispatch(key,Boolean(opts.wakeReason))) {
+      const error='旧会话达到目标模型上下文预算，正在等待空闲；没有向 DSH 投递';
+      if (opts.fromContextQueue || (queued.get(key)?.length ?? 0)>=QUEUE_MAX) return {ok:false,error};
+      enqueueForRetry(key,promptText,opts);
+      return {ok:true,queued:true,deferredContext:true};
     }
     let sessionId;
     try {
@@ -14794,8 +14974,16 @@ async function main() {
       // 【本回合授权】行也要用同一条记录判定，避免提示词与真实闸门不一致。
       wakeSnapshot = buildWakeSnapshotV2(key);
       turnTriggerRecord = buildTriggerRecordV2(key, wakeSnapshot, opts.wakeReason);
+      const wakeAnchor = wakeState.recentMessages.find(m => m.seq === opts.wakeSeq);
+      if (turnTriggerRecord && wakeAnchor && !wakeAnchor.history && !wakeAnchor.isSelf) {
+        // Chat and review metadata. It never grants owner authorization.
+        turnTriggerRecord.wakeAnchor = wakeAnchor;
+      }
       promptPlan = planSessionPrompt(key, sessionId, opts.wakeReason, turnTriggerRecord, wakeSnapshot);
       promptText = promptPlan.text;
+      const focus = formatWakeFocus(opts.wakeReason, turnTriggerRecord?.wakeAnchor, Date.now(), true);
+      if (focus) promptText += '\n\n【本次唤醒】'+focus+'。跟当前话头；更早的未读有人重新提起或还在等答时再接。';
+      const useRecentWindow = !promptPlan.first && cfg.socialV2?.context?.inlineWakeMessages !== false && promptPlan.receipt?.indexed;
       if (wakeSnapshot) {
         const packet = promptPlan.first ? wakeSnapshot : { ...wakeSnapshot,
           recent: wakeSnapshot.recent.filter(m => !Number.isSafeInteger(m.seq) || m.seq > (state.promptReceipts?.[key]?.throughSeq || 0)) };
@@ -14804,6 +14992,10 @@ async function main() {
           packet.includedUnreadCount = packet.messages.length;
         }
         if (packet.messages.length || packet.recent.length || packet.partial || promptPlan.first) promptText += `\n\n【本次消息快照】\n${JSON.stringify(packet)}\n只确认已处理的 readThroughSeq；partial 时按需补读。`;
+        if (useRecentWindow && isQqDialogueWake(opts.wakeReason)) {
+          const recent = v2ToolEnabled('getRecent') ? buildQqRecentWindowV2(key, wakeState, packet) : [];
+          promptText += '\n\n【近聊窗口（背景）】\n'+JSON.stringify(recent)+'\n近聊只供理解；只处理本次来信，不按近聊推进已读。图片历史用原消息回查。';
+        }
         const boundary = closedSegmentHint(key, wakeState, packet.messages);
         if (boundary) promptText += '\n' + boundary;
         // 2026-10-26：快照只装最近的一窗；更早的未读被折叠了（folded）。必须讲清楚"别回去逐条回"，
@@ -14831,6 +15023,10 @@ async function main() {
     }
     // 媒体解析成功后再标记退场，避免解析异常时残留退场标记。
     if (!isCurrentSession(key, sessionId)) throw new Error('投递前会话已重置或权限已变化');
+    if (promptPlan?.checkpoint && wakeState?.agentToken === wakeToken) {
+      content[0] = {...content[0],text:sealQqWake({dir:STATE_DIR,write:atomicWriteJson,key,sid:sessionId,
+        token:wakeToken,profile:promptPlan.checkpoint,text:content[0].text})};
+    }
     // 归因入队：必须在 api.sessions.prompt 之前写盘 —— DSH 的 turn/start 之后马上就可能
     // tool/call，插件要保证在第一次工具调用前能读到这条记录。写失败只 log（插件 fail-closed）。
     if (turnTriggerRecord) {
@@ -14864,7 +15060,8 @@ async function main() {
       const safeErrText = await reportAgentFailure(key, '消息未被接受', errText, opts);
       return { ok: false, error: safeErrText };
     }
-    if (promptPlan && isCurrentSession(key, sessionId)) {
+    if (promptPlan && isCurrentSession(key, sessionId) && (!wakeState ||
+        (socialV2.conversations.get(canonicalV2Key(key)) === wakeState && wakeState.agentToken === wakeToken))) {
       state.promptReceipts ??= {};
       const last = promptPlan.first ? 0 : state.promptReceipts[key]?.throughSeq || 0;
       state.promptReceipts[key] = {...promptPlan.receipt,throughSeq:Math.max(last,wakeSnapshot?.readThroughSeq || 0)};
@@ -14875,6 +15072,11 @@ async function main() {
         && wakeState.agentToken === wakeToken) {
       // Acceptance grants visibility, never acknowledgement. New arrivals and
       // rejected/stale deliveries must not be cleared by an old cursor.
+      const folded = wakeSnapshot.folded;
+      if (Number.isSafeInteger(folded?.fromSeq) && Number.isSafeInteger(folded.toSeq)) {
+        wakeState.unread = wakeState.unread.filter(m => m.seq < folded.fromSeq || m.seq > folded.toSeq);
+        saveSocialV2State();
+      }
       noteModelMessagesV2(wakeState, [...wakeSnapshot.messages, ...wakeSnapshot.recent]);
     }
     if (accepted.result.value.command?.text && !opts.silent && currentMode !== 'reserved2') {
@@ -15917,10 +16119,12 @@ async function main() {
         includeReply: false
       });
       const senderUserId = raw.sender?.user_id ?? raw.user_id ?? null;
+      const links = qqMessageCardLinks(raw);
       const info = {
         sender: String(sender ?? ''),
         text: String(text ?? '').slice(0, 200),
-        userId: senderUserId != null ? String(senderUserId) : null
+        userId: senderUserId != null ? String(senderUserId) : null,
+        ...(links.length ? {links} : {}),
       };
       replyInfoCache.set(cacheKey, { info, ts: Date.now() });
       return info;
@@ -15971,19 +16175,19 @@ async function main() {
   }
 
   // 判断当前消息是否“引用/回复了机器人自己”：若是，则桥接层也把它当作直接对 AI 说。
-  async function isQuoteTargetSelf(message, kind, id, selfId) {
-    if (!Array.isArray(message) || selfId == null) return false;
+  async function findQuotedSelfMessageId(message, kind, id, selfId) {
+    if (!Array.isArray(message) || selfId == null) return null;
     for (const seg of message) {
       if (seg?.type === 'reply' && seg.data?.id != null) {
         const info = await resolveReplyInfo(kind, id, String(seg.data.id), selfId);
-        if (info?.userId && String(info.userId) === String(selfId)) return true;
+        if (info?.userId && String(info.userId) === String(selfId)) return String(seg.data.id);
       }
     }
-    return false;
+    return null;
   }
 
   // ── 二代仿真模式（reserved2）唤醒调度 ──────────────────────────────────
-  function appendSocialV2Message(key, sender, textContent, plainContent, quoteTargetIsSelf, isOwner, messageId, media = [], userId = null, forwardIds = [], atSelf = false, mentionedIds = []) {
+  function appendSocialV2Message(key, sender, textContent, plainContent, quoteTargetIsSelf, isOwner, messageId, media = [], userId = null, forwardIds = [], atSelf = false, mentionedIds = [], links = [], replyToMessageId = null) {
     const st = getSocialV2State(key);
     const recentLimit = Number(cfg.socialV2?.context?.recentLimit) || 100;
     const unreadLimit = Number(cfg.socialV2?.context?.unreadLimit) || 30;
@@ -16031,6 +16235,8 @@ async function main() {
       quoteTargetIsSelf: !!quoteTargetIsSelf,
       ...(atSelf ? { atSelf: true } : {}),
       ...(mentionedIds.length ? { mentionedIds } : {}),
+      ...(links.length ? { links } : {}),
+      ...(quoteTargetIsSelf && replyToMessageId!=null ? {replyToMessageId:String(replyToMessageId)} : {}),
       isOwner: !!isOwner,
       ownerLabel: isOwner ? `${ownerMessageTag()}管理员（ownerQQ ${cfg.ownerQQ ?? ''}）` : '',
       isSelf: false,
@@ -16325,6 +16531,10 @@ async function main() {
     st.modelSeenSeqs = new Set([...st.modelSeenSeqs || []].filter((seq) => unread.has(seq)));
     for (const msg of messages) {
       if (Number.isSafeInteger(msg?.seq) && msg.seq > 0 && unread.has(msg.seq)) st.modelSeenSeqs.add(msg.seq);
+      if (Number.isSafeInteger(msg?.seq) && msg.seq > (st.lastChatOfferedSeq || 0) && !msg.history && !msg.isSelf) {
+        st.lastChatOfferedSeq = msg.seq;
+        st.lastChatOfferedAt = Date.now();
+      }
     }
     return readThroughSeqV2(st);
   }
@@ -16362,10 +16572,36 @@ async function main() {
     return `\n【更早的未读已折叠】${folded.count} 条更早的未读没有展开（本地 seq ${folded.fromSeq ?? '?'}–${folded.toSeq ?? '?'}）。它们只是背景，默认**不要**回头逐条回复；本次先跟上面快照里的最近消息走。确实需要背景时才用 qq_get_recent_messages 往前翻。`;
   }
 
+  // Supplement current wake with QQ's canonical look-back, without moving the
+  // unread cursor or copying DSH transcript/tool results into the model.
+  function buildQqRecentWindowV2(key, st, packet) {
+    const visible = packet ? [...packet.recent, ...packet.messages] : [];
+    const identity = m => m?.messageId ? 'm:'+m.messageId
+      : Number.isSafeInteger(m?.seq) ? 's:'+m.seq : null;
+    const excluded = new Set(visible.map(identity).filter(Boolean));
+    const waiting = new Set((st.unread || []).map(identity).filter(Boolean));
+    const remaining = Math.max(0, 30-visible.length);
+    const rows = [];
+    let chars = 2;
+    for (const raw of (st.recentMessages || []).slice(-30).reverse()) {
+      if (rows.length >= remaining) break;
+      const id = identity(raw);
+      if (!id || excluded.has(id) || waiting.has(id)) continue;
+      const m = compactModelMessage(groupMessageView(key,raw));
+      const value = JSON.stringify(m);
+      if (chars+value.length+1 > 12000) break;
+      rows.push(m);
+      chars += value.length+1;
+      excluded.add(id);
+    }
+    return rows.reverse();
+  }
+
   function buildWakeSnapshotV2(key) {
     const context = cfg.socialV2?.context ?? {};
     if (context.inlineWakeMessages === false || (!v2ToolEnabled('getUnread') && !v2ToolEnabled('getRecent'))) return null;
-    const st = getSocialV2State(key);
+    // Plan against a local window. Only an accepted delivery can fold the real queue.
+    const st = { ...getSocialV2State(key) };
     const bounded = (name, fallback, min, max) => {
       const value = Number(context[name] ?? fallback);
       return Number.isFinite(value) ? Math.min(max, Math.max(min, Math.round(value))) : fallback;
@@ -16521,20 +16757,37 @@ async function main() {
       '群聊里的人': privateChat ? '' : 'recent 是背景，messages 是本批来信，交错时看时间。sender 是当时的群名片，addressAs 是你平时怎么叫这个人。groupUsage 帮你听懂这句，接话时不用报词义。@ 和引用指向谁。转述属于开口的人，被提到的人可能一句话都没说。省了主语就看看刚才谁做了什么；两种都说得通，可以顺着动作接，不必硬猜。群友补明了就接着聊。原话换个人说，「我」和「你」也跟着换。「豆包帮我……」本来可以是正经求助，群里也把什么愿望都往这个句式里填。口气越平常，求的事越离谱，越有梗。一句就能玩。接龙换个帮手，要帮谁、修什么仍是原来那件事。群友自嘲时，那句「我」还是他自己。轮到你被调侃，给个反应就够。真要办事，缺材料就问，做完才说做完；核对账号就照实答。',
       '群内身份对齐': privateChat ? '' : alignmentBriefBlock(),
       '生活参数版本': String(lifeSettings?.revision || ''),
-      '会话设置': [formatInitialPromptV2(key),conversationMemory.shareTopics(key)?.note].filter(Boolean).join('\n'),
+      '会话设置': [getInitialPrompt(key)?.scope === 'session' && formatInitialPromptV2(key),conversationMemory.shareTopics(key)?.note].filter(Boolean).join('\n'),
       '黑话': cfg.slang?.enabled === false ? '' : buildSlangContext(slangEntries, cfg.slang?.injectMax ?? 8)
     };
     const hashes = {};
     const changes = [];
+    const changedLabels = new Set();
     for (const [label,text] of Object.entries(sections)) {
       hashes[label] = crypto.createHash('sha256').update(text || '').digest('hex');
-      if (!first && hashes[label] !== previous.hashes?.[label]) changes.push(label === '生活参数版本' ? lifeSettings?.stateBlock(reason) : '【' + label + '更新】' + (text || '已清空'));
+      if (!first && hashes[label] !== previous.hashes?.[label]) changedLabels.add(label);
+      if (changedLabels.has(label)) changes.push(label === '生活参数版本' ? lifeSettings?.stateBlock(reason) : '【' + label + '更新】' + (text || '已清空'));
     }
     const receipt = {sessionId,tokenStamp,hashes, voiceTurns: first ? 0 : Number(previous.voiceTurns) || 0};
+    const useIndex = QQ_PROJECTED_ENGINES.includes(currentQqEngine()) && process.env.SURFCORE_QQ_INPUT_MODE !== 'legacy';
+    receipt.indexed = useIndex;
+    const finish = text => {
+      const indexedText = useIndex ? indexQqSessionContext(text, key, sections, first || !previous?.indexed ? null : changedLabels) : text;
+      let checkpoint;
+      if (useIndex) {
+        // Older receipts are upgraded on their next normal wake. Fixed fields follow the opening of this session.
+        receipt.fixedContext = first ? fixedQqContext(text) : previous?.fixedContext;
+        if (isQqDialogueWake(reason)) {
+          receipt.fixedContext ??= fixedQqContext(buildWakePromptV2(key,'bootstrap',trigger,true,''));
+          checkpoint = {fixed:receipt.fixedContext, values:qqCheckpointValues(sections)};
+        }
+      }
+      return {text:indexedText,receipt,first,checkpoint};
+    };
     if (first) {
       const heading = '【本会话总提示】发言通过 QQ 工具发送。后续以本轮授权、消息快照和变更为准。';
       const base = buildWakePromptV2(key, reason || 'system', trigger, true, '');
-      return { text:[heading,role,docs,sections['QQ里的动作'],sections['群聊里的人'],sections['群内身份对齐'],sections['黑话'],base].filter(Boolean).join('\n\n'),receipt,first };
+      return finish([heading,role,docs,sections['QQ里的动作'],sections['群聊里的人'],sections['群内身份对齐'],sections['黑话'],base].filter(Boolean).join('\n\n'));
     }
     const unread = snapshot?.messages || st.unread || [];
     const hasNews = unread.some(m => !m.isSelf && (!Number.isSafeInteger(m.seq) || m.seq > (previous.throughSeq || 0)));
@@ -16576,9 +16829,9 @@ async function main() {
       blocks.push(scene.cue, sticker?.hint);
     }
     if ((reason === 'replyCheck' && hasNews) || reason === 'proactiveCheck') blocks.push(closurePromptLineV2(st));
-    if (reason === 'system') return {text:blocks.filter(Boolean).join('\n'),receipt,first};
+    if (reason === 'system') return finish(blocks.filter(Boolean).join('\n'));
     blocks.push(actions[reason] || '有新消息时按快照处理。');
-    return {text:blocks.filter(Boolean).join('\n'),receipt,first};
+    return finish(blocks.filter(Boolean).join('\n'));
   }
 
   function buildWakePromptV2(key, reason, triggerRecord = null, sessionOpening = reason === 'bootstrap', openingDocs) {
@@ -16814,7 +17067,7 @@ async function main() {
     return `${selfIdentityTextV2()}${tokenLine}【提醒】这段已经说完可用 qq_close_conversation。准备潜水才用 qq_wait_for_messages(timeoutMs=${preSleepMs}) 观察，再按读到的位置设置唤醒。`;
   }
 
-  async function sendWakePromptV2(key, reason) {
+  async function sendWakePromptV2(key, reason, wakeSeq = 0) {
     if (cfg.socialV2?.enabled === false) { noteWakeDecision(key, 'skip', reason, { gate: 'disabled', stage: 'send' }); return; }
     if (currentMode !== 'reserved2' || socialV2.paused) {
       noteWakeDecision(key, 'skip', reason, { gate: socialV2.paused ? 'paused' : 'mode', stage: 'send' });
@@ -16852,7 +17105,7 @@ async function main() {
         st.tokenRetryTimer = setTimeout(() => {
           st.tokenRetryTimer = null;
           if (!isTimerWakeReason(reason) && !(Array.isArray(st.unread) && st.unread.length > 0)) return;
-          void sendWakePromptV2(key, reason).catch((error) => log(`[token-guard] 重试唤醒异常 ${key}:`, error?.message ?? error));
+          void sendWakePromptV2(key, reason, wakeSeq).catch((error) => log(`[token-guard] 重试唤醒异常 ${key}:`, error?.message ?? error));
         }, waitMs);
         st.tokenRetryTimer.unref?.();
       }
@@ -16862,9 +17115,9 @@ async function main() {
     // 或已有排队/在途 prompt，则不再投递新的候选唤醒，避免“思维链进行中又塞入一个 question 唤醒”。
     if (isConversationBusyV2(key, st)) {
       if (!Array.isArray(st.pendingWakeReasons)) st.pendingWakeReasons = [];
-      const seq = st.lastUnreadSeq || 0;
+      const seq = wakeSeq || st.lastUnreadSeq || 0;
       if (!st.pendingWakeReasons.some((r) => r && r.reason === reason && r.seq === seq)) {
-        st.pendingWakeReasons.push({ reason, seq });
+        st.pendingWakeReasons.push({ reason, seq, wakeSeq });
         // 有界队列：最多保留 20 条，防止消息洪峰下无限增长。
         if (st.pendingWakeReasons.length > 20) st.pendingWakeReasons.splice(0, st.pendingWakeReasons.length - 20);
       }
@@ -16907,7 +17160,7 @@ async function main() {
             log(`[reserved2] 限频重试前发现未读已清空，跳过 ${key}（${reason}）`);
             return;
           }
-          void sendWakePromptV2(key, reason).catch((error) => log(`[reserved2] 限频重试唤醒异常 ${key}:`, error?.message ?? error));
+          void sendWakePromptV2(key, reason, wakeSeq).catch((error) => log(`[reserved2] 限频重试唤醒异常 ${key}:`, error?.message ?? error));
         }, waitMs);
         st.rateLimitRetryTimer.unref?.();
       }
@@ -16946,7 +17199,7 @@ async function main() {
     try {
       pendingWakeKeys.add(key);
       armPendingWakeLease(key);
-      const result = await deliverPrompt(key, '', { wakeReason: reason });
+      const result = await deliverPrompt(key, '', { wakeReason: reason, wakeSeq });
       const restoreFiniteSleep = () => {
         if (hadFiniteSleep) {
           st.wakeConfig.sleepUntil = prevSleepUntil;
@@ -17120,7 +17373,7 @@ async function main() {
     return TIMER_WAKE_REASONS.has(String(reason ?? '').split(':')[0]);
   }
 
-  function scheduleWakeV2(key, reason) {
+  function scheduleWakeV2(key, reason, wakeSeq = 0) {
     if (cfg.socialV2?.enabled === false) { noteWakeDecision(key, 'skip', reason, { gate: 'disabled', stage: 'schedule' }); return; }
     if (socialV2.paused) { noteWakeDecision(key, 'skip', reason, { gate: 'paused', stage: 'schedule' }); return; }
     if (!isSessionAllowedInCurrentMode(key)) {
@@ -17134,6 +17387,7 @@ async function main() {
       const cur = st.pendingWakeReason || reason;
       if (wakePriorityV2(reason) > wakePriorityV2(cur)) {
         st.pendingWakeReason = reason;
+        st.pendingWakeSeq = wakeSeq;
         log(`[reserved2] 合并窗口内升级唤醒原因 ${key}: ${cur} -> ${reason}`);
       }
       noteWakeDecision(key, 'deferred', reason, { gate: 'merged', stage: 'schedule', mergedInto: cur });
@@ -17141,9 +17395,9 @@ async function main() {
     }
     if (isConversationBusyV2(key, st)) {
       if (!Array.isArray(st.pendingWakeReasons)) st.pendingWakeReasons = [];
-      const seq = st.lastUnreadSeq || 0;
+      const seq = wakeSeq || st.lastUnreadSeq || 0;
       if (!st.pendingWakeReasons.some((r) => r && r.reason === reason && r.seq === seq)) {
-        st.pendingWakeReasons.push({ reason, seq });
+        st.pendingWakeReasons.push({ reason, seq, wakeSeq });
         // 有界队列：最多保留 20 条，防止消息洪峰下无限增长。
         if (st.pendingWakeReasons.length > 20) st.pendingWakeReasons.splice(0, st.pendingWakeReasons.length - 20);
       }
@@ -17157,12 +17411,15 @@ async function main() {
       st.sleepTimer = null;
     }
     st.pendingWakeReason = reason;
+    st.pendingWakeSeq = wakeSeq;
     const batchMs = Math.max(1000, Number(st.wakeConfig?.batchWindowMs) || 8000);
     st.pendingWakeTimer = setTimeout(() => {
       st.pendingWakeTimer = null;
       const finalReason = st.pendingWakeReason || reason;
+      const finalSeq = st.pendingWakeSeq;
       st.pendingWakeReason = null;
-      void sendWakePromptV2(key, finalReason).catch((error) => log(`[reserved2] 计划唤醒异常 ${key}:`, error?.message ?? error));
+      st.pendingWakeSeq = 0;
+      void sendWakePromptV2(key, finalReason, finalSeq).catch((error) => log(`[reserved2] 计划唤醒异常 ${key}:`, error?.message ?? error));
     }, batchMs);
     // 与其它 per-conversation 定时器保持一致：别让一个待唤醒定时器把进程钉住不退出。
     st.pendingWakeTimer.unref?.();
@@ -17203,7 +17460,8 @@ async function main() {
     const stillRelevant = Array.isArray(st.unread) && st.unread.some((m) => m && Number(m.seq) >= Number(item.seq));
     if (stillRelevant) {
       log(`[reserved2] ${key} 补发繁忙期间积压的唤醒：${item.reason}@seq${item.seq}`);
-      scheduleWakeV2(key, item.reason);
+      const seq = st.unread.some(m => m.seq === item.wakeSeq) ? item.wakeSeq : 0;
+      scheduleWakeV2(key, item.reason, seq);
       return { reason: item.reason, action: 'replayed' };
     }
     log(`[reserved2] ${key} 繁忙期间唤醒 ${item.reason}@seq${item.seq} 已被当前回合处理，跳过补发`);
@@ -17354,6 +17612,7 @@ async function main() {
     if (!messageId || !time) return null;
     const media = extractMediaFromSegments(segments);
     const forwardIds = extractForwardIds(Array.isArray(segments) ? segments : []);
+    const links = qqMessageCardLinks(raw);
     const isOwner = Boolean(cfg.ownerQQ) && senderId === String(cfg.ownerQQ);
     return {
       messageId,
@@ -17369,7 +17628,8 @@ async function main() {
       isOwner,
       fish: !isSelf && !isOwner && isFishName(sender, cfg.fishGuard),
       media,
-      forwardIds
+      forwardIds,
+      ...(links.length ? { links } : {}),
     };
   }
 
@@ -17413,6 +17673,7 @@ async function main() {
         hasMedia: media.length > 0,
         forwardIds,
         hasForward: forwardIds.length > 0,
+        ...(candidate.links?.length ? {links:candidate.links} : {}),
         time: candidate.time
       };
       if (candidate.isSelf) {
@@ -17681,6 +17942,7 @@ async function main() {
       st.pendingWakeTimer = null;
     }
     st.pendingWakeReason = null;
+    st.pendingWakeSeq = 0;
     if (st.sleepTimer) {
       clearTimeout(st.sleepTimer);
       st.sleepTimer = null;
@@ -17815,8 +18077,9 @@ async function main() {
     const resolveReply = (messageId) => resolveReplyInfo(kind, id, messageId, event.self_id);
     // textContent 带引用对象信息，供 DSH 判断“这句话在对谁说”；
     // plainContent 只保留当前消息自己的文字，用于命令/指向性判断，避免被引用原文干扰。
-    const textContent = await segmentsToText(event.message ?? [], { resolveAtName, resolveReply });
-    const plainContent = await segmentsToText(event.message ?? [], { resolveAtName, includeReply: false });
+    const includeCardUrls = currentMode !== 'reserved2';
+    const textContent = await segmentsToText(event.message ?? event.raw_message ?? [], { resolveAtName, resolveReply, includeCardUrls });
+    const plainContent = await segmentsToText(event.message ?? event.raw_message ?? [], { resolveAtName, includeReply: false, includeCardUrls });
     const mediaList = extractMediaFromSegments(event.message ?? []);
     const messageRef = String(event.message_id ?? event.msg_id ?? event.message_seq ?? '');
     const seqRef = event.message_seq != null ? String(event.message_seq) : '';
@@ -17837,7 +18100,8 @@ async function main() {
     }
     // 引用对象是机器人自己时，视为直接对 AI 说（即使当前文字没有 @/关键词）。
     // 因此必须先解析 quoteTargetIsSelf 再做空文本过滤，避免“只引用不附文”被漏掉。
-    const quoteTargetIsSelf = await isQuoteTargetSelf(event.message ?? [], kind, id, event.self_id);
+    const quotedSelfMessageId = await findQuotedSelfMessageId(event.message ?? [], kind, id, event.self_id);
+    const quoteTargetIsSelf = quotedSelfMessageId !== null;
     if (!isSessionAllowedInCurrentMode(key)) return;
     // 任何入站消息（含纯图片/表情/引用）都先记「谁在说话」，且必须在下面的空文本过滤之前：
     // 语音触发判定只认这条记录，漏记就等于给"换个人来喊"留了后门。
@@ -17982,7 +18246,10 @@ async function main() {
         await ensureFishGroupName(id);
       }
       const sender = displayName;
-      appendSocialV2Message(key, sender, textContent, plainContent, quoteTargetIsSelf, isOwner, event.message_id ?? event.msg_id ?? null, mediaList, event.user_id ?? null, extractForwardIds(event.message ?? []), mentionsSelfV2(event), mentionIdsV2(event.message));
+      appendSocialV2Message(key, sender, textContent, plainContent, quoteTargetIsSelf, isOwner,
+        event.message_id ?? event.msg_id ?? null, mediaList, event.user_id ?? null,
+        extractForwardIds(event.message ?? []), mentionsSelfV2(event), mentionIdsV2(event.message), qqMessageCardLinks(event),
+        quotedSelfMessageId);
       // 二代同样收集群聊黑话学习素材（AI 自主提交之外，桥接仍自动提取高频陌生词）
       if (kind === 'group') feedSlangWindow(key, sender, plainContent);
       if (socialV2.paused) {
@@ -18014,7 +18281,7 @@ async function main() {
       if (!st.bootstrapSent) {
         st.bootstrapSent = true;
         saveSocialV2State();
-        scheduleWakeV2(key, 'bootstrap');
+        scheduleWakeV2(key, 'bootstrap', st.lastUnreadSeq);
       } else {
         const reason = evaluateWakeTriggerV2(key, st, event, kind, textContent, plainContent, quoteTargetIsSelf);
         if (reason) {
@@ -18023,7 +18290,7 @@ async function main() {
             appendActivity(`${key} [收尾] 冷却中，跳过 ${reason} 唤醒：${textContent.slice(0, 60)}`);
             log(`[收尾] ${key} 冷却中，跳过 ${reason} 唤醒`);
           } else {
-            scheduleWakeV2(key, reason);
+            scheduleWakeV2(key, reason, st.lastUnreadSeq);
           }
         }
       }
@@ -18429,9 +18696,9 @@ async function main() {
     if (!st.bootstrapSent) {
       st.bootstrapSent = true;
       saveSocialV2State();
-      scheduleWakeV2(key, 'bootstrap');
+      scheduleWakeV2(key, 'bootstrap', msg.seq);
     } else if (st.wakeConfig?.triggers?.poke) {
-      scheduleWakeV2(key, 'poke');
+      scheduleWakeV2(key, 'poke', msg.seq);
     }
   }
 
@@ -18473,6 +18740,8 @@ async function main() {
       collector = createTurnCollector();
       collectors.set(sessionId, collector);
     }
+    if (collector && Number.isSafeInteger(event?.data?.turn)) collector.accountingTurn = event.data.turn;
+    if (collector && Number.isSafeInteger(event?.data?.step)) collector.accountingStep = event.data.step;
     if (collector && event?.type === 'tool/call') {
       const name = String(event.data?.name ?? '');
       if (isSendToolName(name) || /^mcp__snowluma__qq_(?:send_|wait_for_messages$|close_conversation$|mark_read$|set_wake_config$)/.test(name)) {
@@ -19395,6 +19664,14 @@ async function main() {
       completeText: (opts) => completeText({ ...opts, root: ROOT }),
       memory,
       styleFor: (key) => styleNotesBlock(key),
+      onUsage: (usage, {key,accounting,model,attempt}) => {
+        if (!usage) return;
+        try {
+          const wrote = tokenLedger.recordReview({ id:crypto.randomUUID(), ...accounting,
+            sessionId:accounting?.sessionId || 'review-preview', key:accounting?.sessionId ? key : 'internal:发送前评审预览', model, retry:attempt, usage });
+          if (wrote) syncReviewBudget();
+        } catch (error) { log('评审用量记录失败', error?.message ?? error); }
+      },
       log,
     });
   }
@@ -19426,6 +19703,7 @@ async function main() {
     if (!reviewCfg) return; // 评审开关已关：遵守开关，不发兜底
     const list = (Array.isArray(messages) ? messages : []).map((m) => String(m ?? '').trim()).filter(Boolean);
     if (!list.length || !delivery || !reviewDeliveryAllowed(key, delivery)) return;
+    try { delivery.assertFresh?.(true); } catch { return; }
     if (shouldBlockSilentReply(key)) { log(`[预发送评审] ${key} 静默中，跳过兜底补发`); return; }
     const st = getSocialV2State(key);
     const fishBlock = fishGuardSendBlock(key, st);
@@ -19441,7 +19719,7 @@ async function main() {
     if (st.sendTimes.length > 500) st.sendTimes = st.sendTimes.slice(-500);
     try {
       const delays = computeGapsV2(list, 'auto', undefined, undefined, sendCfg);
-      const sent = await sendMessagesV2(key, list, delays, delivery.replyToMessageId, delivery.atUserId);
+      const sent = await sendMessagesV2(key, list, delays, delivery.replyToMessageId, delivery.atUserId, () => delivery.assertFresh?.(true));
       recordSentMessagesV2(key, sent);
       st.lastAiReplyAt = now;
       st.lastActionAt = now;
@@ -19471,27 +19749,45 @@ async function main() {
   }
 
   async function rejectReviewedSend({ key, kind, messages, st, flag, replyToMessageId, atUserId, quoteResolved }, sendJson) {
+    const assertFresh = captureDraftFreshness(key);
+    const delivery = { flag, token:st.agentToken, replyToMessageId, atUserId, assertFresh };
+    const recheck = () => {
+      try { assertFresh?.(); }
+      catch (error) {
+        cancelPresendFallback(key);
+        sendJson({ ok:false, error:error.message }, error.statusCode);
+        return true;
+      }
+      return false;
+    };
+    if (recheck()) return true;
     if (!presendReviewCfg()) return false;
-    const delivery = { flag, token:st.agentToken, replyToMessageId, atUserId };
     try {
       const reviewer = getPresendReviewer();
+      const active = activeTurnTriggers.get(state.sessions[key]);
+      const sessionId = state.sessions[key];
+      const collector = collectors.get(sessionId);
       const result = await reviewer.review({
+        accounting:{sessionId,turn:collector?.accountingTurn,step:collector?.accountingStep},
         key,
         kind,
         messages,
         groupName: groupNameForSceneV2(key),
         personaName: String(ACTIVE_CHARACTER?.name ?? '').trim() || '她',
         statusLines: presendReviewStatusLines(key, st),
+        focus: redactSensitiveText(formatWakeFocus(active?.wakeReason, active?.wakeAnchor, Date.now(), true)),
         recent: Array.isArray(st?.recentMessages) ? st.recentMessages : [],
       });
       if (!reviewDeliveryAllowed(key, delivery)) {
         sendJson({ ok:false, error:'发送已取消：会话或权限已变化' }, 403);
         return true;
       }
+      if (recheck()) return true;
       if (result && result.allow === false) {
+        if (result.action === 'discard') cancelPresendFallback(key);
         // 只给「真的评分不过」挂兜底；failOpen=false 时的服务异常不放兜底（那种情况用户要的是宁可不发）。
         const cfgReview = normalizePresendReviewConfig(cfg.socialV2?.review ?? {});
-        if (Number(result.score) > 0 && cfgReview.rejectFallbackMs > 0) {
+        if (result.action !== 'discard' && Number(result.score) > 0 && cfgReview.rejectFallbackMs > 0) {
           if (replyToMessageId != null && String(replyToMessageId).trim() && !quoteResolved) {
             const target = await resolveReplyTargetV2(st, kind, Number(key.split(':')[1]), String(replyToMessageId).trim());
             if (!target) { sendJson({ ok:false, error:'无法解析被引用消息' }, 400); return true; }
@@ -19503,7 +19799,7 @@ async function main() {
           }
         }
         const { error, score, threshold, reason, attempt } = result;
-        sendJson({ ok:false, error, review:{ score, threshold, reason, attempt } }, 422);
+        sendJson({ ok:false, error, review:{ score, threshold, reason, attempt, ...(result.action ? { action:result.action } : {}) } }, 422);
         return true;
       }
       return false;

@@ -307,6 +307,8 @@ await test('wake snapshot takes the NEWEST window and folds the older backlog (2
   assert.ok(JSON.stringify(snapshot).length <= h.cfg.socialV2.context.wakeMaxChars);
   // 折叠后窗口连续，回执正常推进（不再是旧的 0/卡住）
   assert.equal(snapshot.readThroughSeq, 3);
+  assert.deepEqual(seqs(st.unread), [1, 2, 3]);
+  await h.deliverPrompt(KEY, '', { wakeReason: 'anyMessage', silent: true });
   assert.deepEqual(seqs(st.unread), [2, 3]);
   // 真实展示：模型通过 unread/唤醒提示词看到后，回执才能推进（这里用 unread 模拟"看到"）。
   const notice = h.wakeFoldedNoticeV2(snapshot.folded);
@@ -333,6 +335,29 @@ await test('wakeFoldOld=false restores the old oldest-first behaviour', async ({
   assert.deepEqual(seqs(st.unread), [1, 2, 3]);
 });
 
+await test('fold receipt survives refusal, throw, in-flight arrival and rotated token', async ({h, st, append}) => {
+  for (let i = 1; i <= 15; i++) append('message ' + i);
+  const submit = h.api.sessions.prompt;
+  const deliver = () => h.deliverPrompt(KEY, '', {wakeReason:'anyMessage', silent:true});
+  h.api.sessions.prompt = async () => ({result:{ok:false, error:{code:'TEST', message:'fixture refusal'}}});
+  assert.equal((await deliver()).ok, false);
+  h.api.sessions.prompt = async () => { throw new Error('transport failure'); };
+  await assert.rejects(deliver(), /transport failure/);
+  assert.equal(h.buildWakeSnapshotV2(KEY).folded.count, 3);
+  h.api.sessions.prompt = async (...args) => {
+    st.agentToken = 'cd'.repeat(24);
+    return submit(...args);
+  };
+  await deliver();
+  assert.equal(st.unread.length, 15);
+  h.api.sessions.prompt = async (...args) => {
+    append('arrived during submission');
+    return submit(...args);
+  };
+  await deliver();
+  assert.deepEqual(seqs(st.unread), Array.from({length:13}, (_,i) => i + 4));
+});
+
 await test('default wake window (12) keeps the last 12 of a 15-message backlog', async ({ h, st, request, append }) => {
   h.cfg.socialV2.context.wakeRecentLimit = 4;
   for (let i = 1; i <= 15; i += 1) append(`m${i}`);
@@ -343,7 +368,7 @@ await test('default wake window (12) keeps the last 12 of a 15-message backlog',
   assert.equal(snapshot.folded.fromSeq, 1);
   assert.equal(snapshot.folded.toSeq, 3);
   assert.equal(snapshot.unreadCount, 12);
-  assert.equal(st.unread.length, 12, '更早的未读被折叠出 buffer');
+  assert.equal(st.unread.length, 15, '预览保留真实未读');
   // 折叠掉的不能从 recent 块"绕回来"（否则又等于把老消息塞回给她）
   assert.ok((snapshot.recent ?? []).every((m) => !Number.isSafeInteger(m.seq) || m.seq > 3),
     `recent 不得包含被折叠的 seq≤3：${JSON.stringify(seqs(snapshot.recent ?? []))}`);

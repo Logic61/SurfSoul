@@ -744,15 +744,20 @@ window.__ModuleLoader__.load({
       },
     }, label);
 
-    const QQ_FIELDS = [
-      { group: "连接与身份", note: "QQ 桥接 / DSH 连接", fields: [
-        F("dsh.baseUrl", "DSH 地址", "桥接连接本机 DSH 的 Web 地址"),
-        F("dsh.qqEngine", "QQ 对话引擎", "二代群聊和私聊，下次生成时生效", "select", { options: [["deepseek","DeepSeek"],["codex","Codex CLI"]] }),
-        F("dsh.qqCodexModel", "Codex 模型", "使用本机 Codex 登录", "select", { options: [["gpt-6.1-sol","Sol · gpt-6.1-sol"],["gpt-6-astra","Astra · gpt-6-astra"]] }),
-        F("dsh.qqCodexEffort", "Codex 思考强度", "Sol 和 Astra 共用，保存后从下一次 QQ 来信生效", "select", { options: [["low","轻度 · low"],["medium","中等 · medium"],["high","高 · high"],["xhigh","很高 · xhigh"],["max","极高 · max"],["ultra","最高 · ultra"]] }),
+    const MODEL_FIELDS = [
+        F("dsh.qqEngine", "QQ 对话引擎", "二代群聊和私聊，下次生成时生效", "select", { options: [["deepseek","DeepSeek"],["codex","Codex CLI"],["openai-api","OpenAI API（单独计费）"],["modelsnexus","ModelsNexus（Claude / Gemini）"]] }),
+        F("dsh.qqOpenAiModel", "OpenAI API 模型", "只列出该密钥可见且兼容 QQ 的模型；不在页面填密钥", "select"),
+        F("dsh.qqModelsNexusModel", "ModelsNexus 模型", "自动读取 Claude 和 Gemini 各自密钥可见的模型；思考强度由网关决定", "select"),
+        F("dsh.qqOpenAiEffort", "OpenAI API 思考强度", "启用该引擎时，对话上下文（含可见图片）将发送到 OpenAI API", "select", { options: ["low","medium","high","xhigh","max"] }),
+        F("dsh.qqCodexModel", "Codex 模型", "打开 QQ 设置时刷新本机 Codex 模型目录", "select"),
+        F("dsh.qqCodexEffort", "Codex 思考强度", "按当前模型可用档位显示，保存后从下一次 QQ 来信生效", "select"),
         F("dsh.provider", "DSH 模型提供方", "DeepSeek 的提供方标识"),
         F("dsh.model", "模型", "QQ 会话使用的模型"),
         F("dsh.reasoningEffort", "DeepSeek 思考强度", "low / high / max"),
+    ];
+    const QQ_FIELDS = [
+      { group: "连接与身份", note: "QQ 桥接 / DSH 连接", fields: [
+        F("dsh.baseUrl", "DSH 地址", "桥接连接本机 DSH 的 Web 地址"),
         F("dsh.authToken", "DSH token", "通常留空，由桥接自动发现", "password"),
         F("dsh.allowRemote", "允许远程 DSH", "默认关；关掉只连本机", "switch"),
         // ownerQQ 不在这里：它已上移到两个标签页顶部的「管理员（QQ ⇄ B站 · 同一个人）」卡片，
@@ -2044,6 +2049,102 @@ F("toolsPath", "bili.mjs 路径", "留空 = 用合体插件自带的 tools/", "t
     }
 
     // ── QQ 标签页 ───────────────────────────────────────────────────────────
+    const MODEL_KEYS = ['qqEngine','qqOpenAiModel','qqOpenAiEffort','qqModelsNexusModel','qqCodexModel','qqCodexEffort','provider','model','reasoningEffort'];
+    function modelPrefs(dsh) {
+      return Object.fromEntries(MODEL_KEYS.filter(k => dsh?.[k] !== undefined).map(k => [k,dsh[k]]));
+    }
+    function modelTabFields(cfg, catalog, openAi, nexus) {
+      const engine = cfg?.dsh?.qqEngine ?? 'deepseek';
+      const id = cfg?.dsh?.qqCodexModel;
+      const models = catalog?.models ?? [];
+      const model = models.find(item => item.id === id);
+      const { efforts = [], defaultEffort } = model?.reasoning ?? {};
+      const effort = [cfg?.dsh?.qqCodexEffort,"low",defaultEffort].find(id => efforts.some(item => item.id===id)) ?? efforts[0]?.id;
+      const modelOptions = models.map(item => [item.id,item.name]);
+      if (id && !model) modelOptions.unshift([id, id + "（当前保留）"]);
+      const selectedApi = cfg?.dsh?.qqOpenAiModel || "gpt-6.2-sol";
+      const apiModel = openAi?.models?.find(item => item.id === selectedApi);
+      const apiOptions = (openAi?.models || []).map(item=>[item.id,item.name]);
+      if (!apiModel) apiOptions.unshift([selectedApi,selectedApi + "（当前保留）"]);
+      const selectedNexus = cfg?.dsh?.qqModelsNexusModel || "";
+      const nexusOptions = (nexus?.models || []).map(item=>[item.id,item.name]);
+      if (!selectedNexus) nexusOptions.unshift(["","请选择 Claude 或 Gemini 模型"]);
+      else if (!nexusOptions.some(([id])=>id===selectedNexus)) nexusOptions.unshift([selectedNexus,selectedNexus+"（当前保留）"]);
+      const show = engine === "openai-api" ? ["qqOpenAiModel","qqOpenAiEffort"] :
+        engine === "modelsnexus" ? ["qqModelsNexusModel"] : engine === "codex" ? ["qqCodexModel","qqCodexEffort"] : ["provider","model","reasoningEffort"];
+      const fields = MODEL_FIELDS.filter(field => field.path[1] === "qqEngine" || show.includes(field.path[1])).map(field => {
+        const key = field.path[1];
+        if (key === "qqOpenAiModel") return {...field, options:apiOptions, readOnly:!openAi?.models?.length};
+        if (key === "qqModelsNexusModel") return {...field, options:nexusOptions, readOnly:!nexus?.models?.length};
+        if (key === "qqOpenAiEffort") return {...field, readOnly:!apiModel?.supportsReasoning, hint:apiModel && !apiModel.supportsReasoning ? "此模型不需要选择思考强度。" : field.hint};
+        if (key === "qqCodexModel") return {...field, options:modelOptions, readOnly:models.length === 0};
+        if (key === "qqCodexEffort") return {...field, readOnly:efforts.length === 0,
+          options:efforts.map(item => [item.id, item.name === item.id ? item.id : item.name + " · " + item.id])};
+        return field;
+      });
+      const values = {...cfg?.dsh,qqEngine:engine,qqOpenAiModel:selectedApi,qqModelsNexusModel:selectedNexus,qqOpenAiEffort:cfg?.dsh?.qqOpenAiEffort || "low",
+        qqCodexEffort:effort ?? cfg?.dsh?.qqCodexEffort};
+      return {group:{group:"QQ 对话模型",fields},values,effort,engine};
+    }
+    function mergeOpenAiCatalog(previous,candidate) {
+      const next = candidate ?? {status:"unavailable",reason:"settings"};
+      if (next.status === "ready" || next.status === "stale" || next.status === "unconfigured" || [401,403].includes(next.httpStatus) || !previous?.models?.length) return next;
+      return {...next,status:"stale",models:previous.models,unverified:previous.unverified};
+    }
+    function ModelTab({cfg,set,dirty,busy,save}) {
+      const [catalog,setCatalog] = useState(null);
+      const [openAi,setOpenAi] = useState(null);
+      const [nexus,setNexus] = useState(null);
+      const [refreshing,setRefreshing] = useState(false);
+      const requestId = useRef(0);
+      const refresh = async (force = false) => {
+        const seq = ++requestId.current;
+        setRefreshing(true);
+        const get = path => api(path).catch(()=>null);
+        const suffix = force?"?refresh=1":"";
+        const modelsNexus = get("/qq-modelsnexus-models"+suffix).then(result=>{
+          if (seq === requestId.current) setNexus(result || {failed:true});
+        });
+        const [codex, paid] = await Promise.all([get("/qq-codex-models"),get("/qq-openai-models"+suffix),modelsNexus]);
+        if (seq !== requestId.current) return;
+        if (codex) setCatalog(codex);
+        setOpenAi(previous => mergeOpenAiCatalog(previous,paid));
+        setRefreshing(false);
+      };
+      useEffect(()=>{void refresh();return()=>{requestId.current++;};},[]);
+      const {group,values,engine} = modelTabFields(cfg,catalog,openAi,nexus);
+      const nexusStatus = !nexus ? "ModelsNexus：正在查询 Claude 和 Gemini 目录…" : nexus.failed ?
+        "ModelsNexus 目录接口不可用，请检查 DSH 是否已重载。" : (nexus.families || []).map(item=>{
+          const claude = item.family === "claude";
+          const detail = item.status === "ready" ? item.count+" 个模型" : item.status === "unconfigured" ?
+            "未读取到 "+(claude?"CLAUDE_KEY":"GEMINI_ROUTER_KEY") : "查询失败"+(item.httpStatus?"（HTTP "+item.httpStatus+"）":"");
+          return (claude?"Claude":"Gemini")+"："+detail;
+        }).join(" · ");
+      const status = !openAi ? "正在查询 OpenAI 模型目录…" : openAi.status === "ready" ?
+        "当前密钥可见的 QQ 兼容候选：" + openAi.models.length + " 个。" : openAi.status === "unconfigured" ?
+        "当前 DSH 进程未读到 OPENAI_API_KEY。确认 Windows 用户变量后，从托盘完全退出并重新打开 DSH。" :
+        (openAi.status === "stale" ? "刷新失败，保留上次可用列表。" : "读取失败，保留已选模型。") +
+        (openAi.httpStatus ? " HTTP " + openAi.httpStatus + "。" : openAi.reason === "proxy" ? " 当前 DSH 的代理配置不满足要求。" :
+          openAi.reason === "settings" ? " 当前 DSH 未加载模型目录接口，请重开 DSH。" : " 请检查网络或代理。");
+      return h("div",null,h("div",{className:"qbw-card",style:{marginBottom:"10px"}},
+        h("h4",null,"QQ 对话模型"),
+        h("p",null,"仅二代 QQ 群聊和私聊。保存后，下一次模型调用读取设置，不自动重启桥接。"),
+        h(FieldGroups,{groups:[group],cfg:{dsh:values},set,readOnly:f=>f.readOnly||busy}),
+        engine==="openai-api"?h("p",{className:"qbw-hint"},"OpenAI API 独立计费；启用后，QQ 对话上下文（含模型可见图片）会发送到官方 API。"):null,
+        engine==="modelsnexus"?h("p",{className:"qbw-hint"},"启用后，QQ 模型可见上下文和图片会发往 modelsnexus.org，由所选模型的密钥计费。"):null,
+        h("div",{className:"qbw-actions"},
+          h(Btn,{onClick:save,disabled:busy||!dirty||(engine==="modelsnexus"&&!values.qqModelsNexusModel)},busy?"保存中…":"保存模型设置"),
+          dirty?h("span",{className:"qbw-dirty"},"尚未保存"):h("span",{className:"qbw-ok"},"当前设置已保存"))),
+        h("div",{className:"qbw-card"},
+          h("h4",null,"模型目录"),
+          h("p",{role:"status"},status),
+          h("p",{role:"status"},nexusStatus),
+          h("p",{className:"qbw-hint"},catalog?.models?.length ? "Codex CLI：本机模型目录 "+catalog.models.length+" 个。" : "Codex CLI：没有读到目录，已选模型保持不变。"),
+          h(Btn,{kind:"qbw-btn2",onClick:()=>void refresh(true),disabled:refreshing},refreshing?"正在刷新…":"刷新模型目录"),
+          openAi?.unverified?.length?h("details",null,h("summary",null,"其他账户可见 ID（不能直接选作 QQ 模型）"),
+            h("p",{className:"qbw-hint"},openAi.unverified.join("、"))):null));
+    }
+
     function QQTab({ cfg, set, admin, setAdmin, unified, setUnified, overview, busy, setBusy, toast, reload, goTab }) {
       const [query, setQuery] = useState("");
       const tools = Object.keys(cfg?.socialV2?.tools ?? {});
@@ -2061,17 +2162,6 @@ F("toolsPath", "bili.mjs 路径", "留空 = 用合体插件自带的 tools/", "t
         F("socialV2.sticker.collect.maxPerMinute", "每分钟最多收藏", "", "number", { min: 0 }),
         F("socialV2.sticker.collect.maxPerHour", "每小时最多收藏", "", "number", { min: 0 }),
         F("socialV2.sticker.collect.maxRemarkChars", "备注最大字符", "", "number", { min: 0 }),
-      ]});
-      groups.push({ group: "语音", fields: [
-        F("socialV2.voice.enabled", "启用语音发送", "", "switch"),
-F("socialV2.voice.dir", "语音库目录", "相对 surfcore 根目录；也可以点「浏览…」选绝对路径（需打开下面的开关）", "text", { browse: "dir" }),
-        F("socialV2.voice.maxSeconds", "最长秒数", "", "number", { min: 1 }),
-        F("socialV2.voice.maxBytes", "最大字节", "", "number"),
-        F("socialV2.voice.allowAbsolutePath", "允许绝对路径", "⚠️ 会扩大文件读取面", "switch"),
-        F("socialV2.voice.defaultVolume", "默认音量倍数", "", "number", { min: 0, max: 4, step: 0.1 }),
-        F("socialV2.voice.loudness", "响度档位", "quiet / normal / loud", "select", { options: [["quiet", "quiet"], ["normal", "normal"], ["loud", "loud"]] }),
-F("socialV2.voice.ffmpegPath", "ffmpeg 路径", "留空走 PATH", "text", { wide: true, browse: "file" }),
-        F("socialV2.voice.autoReadback", "自动回读", "", "switch"),
       ]});
       const filtered = query.trim()
         ? groups.map((g) => ({ ...g, fields: g.fields.filter((f) => `${g.group} ${f.label} ${f.hint ?? ""} ${f.path.join(".")}`.toLowerCase().includes(query.trim().toLowerCase())) })).filter((g) => g.fields.length)
@@ -2114,6 +2204,8 @@ F("socialV2.voice.ffmpegPath", "ffmpeg 路径", "留空走 PATH", "text", { wide
             "目的状态和 QQ / B站 / 记忆共用当前角色；载体切到桌宠后不会同时私聊你。"),
           h("div", { className: "qbw-actions", style: { borderTop: "none", marginTop: "6px", paddingTop: "0" } },
             h(Btn, { kind: "qbw-btn2", onClick: () => goTab?.("purpose") }, "去「目的」页设置"))),
+        h("div",{className:"qbw-infobox"},
+          "QQ 模型选择已移到「模型」。 ",h(Btn,{kind:"qbw-btn2",onClick:()=>goTab?.("models")},"打开模型设置")),
         h(AdvancedSettings, { note: "工具开关 / 早安问候 / 全部 QQ 参数：展开后同样可改" },
           h(QqFishGuardStatusCard, { busy }),
           h(ClosureCard, { cfg, set, overview, busy, reload }),
@@ -4840,6 +4932,7 @@ F("socialV2.voice.ffmpegPath", "ffmpeg 路径", "留空走 PATH", "text", { wide
     // ── 主组件 ──────────────────────────────────────────────────────────────
     const TABS = [
       ["overview", "概览"],
+      ["models", "模型"],
       ["characters", "角色"],
       ["purpose", "目的"],
       ["qq", "QQ"],
@@ -4974,6 +5067,22 @@ F("socialV2.voice.ffmpegPath", "ffmpeg 路径", "留空走 PATH", "text", { wide
         return next;
       }, [unified]);
 
+      const saveModels = async () => {
+        const expected = modelPrefs(JSON.parse(saved || "{}").qq?.dsh);
+        const draft = modelPrefs(qq?.dsh);
+        const changes = Object.fromEntries(Object.entries(draft).filter(([k,v])=>expected[k]!==v));
+        if (!Object.keys(changes).length) return;
+        setBusy("models"); setErr(""); setWarn("");
+        try {
+          const r = await api("/qq-model-settings",{method:"POST",body:{expected,changes}});
+          const sync = base => ({...base,dsh:{...base?.dsh,...r.modelSettings}});
+          setQq(current=>sync(current));
+          setSaved(previous=>{const val=JSON.parse(previous);return JSON.stringify({...val,qq:sync(val.qq)});});
+          setWarn("模型设置已保存，下一条 QQ 消息生效。");
+        } catch(e) { setErr("保存模型设置失败："+e.message); }
+        finally { setBusy(""); }
+      };
+
       const save = async (restartBridge = false) => {
         setBusy("save"); setErr(""); setWarn("");
         try {
@@ -5041,6 +5150,7 @@ F("socialV2.voice.ffmpegPath", "ffmpeg 路径", "留空走 PATH", "text", { wide
         if (tab === "overview") return h(OverviewTab, { overview, reload, busy, setBusy, toast: notify, unified, setUnified: setUnifiedPath, goTab: setTab });
         if (tab === "characters") return h(CharactersTab, { overview, busy, setBusy, toast: notify, reload, goTab: setTab, unified, setUnified: setUnifiedPath });
         if (tab === "purpose") return h(PurposeTab, { qq, setQq: setQqPath, unified, setUnified: setUnifiedPath, overview, busy, setBusy, toast: notify, reload, goTab: setTab });
+        if (tab === "models") return h(ModelTab,{cfg:qq,set:setQqPath,dirty:JSON.stringify(modelPrefs(qq.dsh))!==JSON.stringify(modelPrefs(JSON.parse(saved || "{}").qq?.dsh)),busy:!!busy,save:saveModels});
         if (tab === "qq") return h(QQTab, { cfg: qq, set: setQqPath, admin: unified?.admin ?? {}, setAdmin, unified, setUnified: setUnifiedPath, overview, busy, setBusy, toast: notify, reload, goTab: setTab });
         if (tab === "bili") return h(BiliTab, { cfg: bili, set: setBiliPath, qq: normalizedQq, setQqPath, admin: unified?.admin ?? {}, setAdmin, unified, setUnified: setUnifiedPath, qqPrivate: normalizedQq?.allow?.private ?? [], qqAllowAll: normalizedQq?.allowAllWhenEmpty === true, overview, busy, setBusy, toast: notify, reload });
         if (tab === "tokens") return h(TokenTab, { budget, limits: limitDraft, onChange: setLimitDraft, disabled: !!busy, alertedToday: tokenAlerted, onSave: () => save(false), busy, toast: notify });
@@ -5072,7 +5182,7 @@ F("socialV2.voice.ffmpegPath", "ffmpeg 路径", "留空走 PATH", "text", { wide
           err ? h("div", { className: "qbw-err", style: { marginBottom: "8px" } }, err) : null,
           warn ? h("div", { className: "qbw-warnbox", style: { marginBottom: "8px" } }, warn) : null,
           renderTab()),
-        h("div", { className: "qbw-foot" },
+        tab === "models" ? null : h("div", { className: "qbw-foot" },
           h(Btn, { onClick: () => save(false), disabled: !!busy || !dirty }, busy === "save" ? "保存中…" : "保存"),
           h(Btn, { kind: "qbw-btn2", onClick: () => save(true), disabled: !!busy || unified?.platforms?.start?.qq === false, title: unified?.platforms?.start?.qq === false ? "QQ 启动开关已关闭；先打开再重启" : undefined }, "保存并重启 QQ 桥接"),
           h(Btn, { kind: "qbw-btn2", onClick: reset, disabled: !!busy || !dirty }, "撤销改动"),
@@ -5128,6 +5238,9 @@ F("socialV2.voice.ffmpegPath", "ffmpeg 路径", "留空走 PATH", "text", { wide
     exports.inject = inject;
     exports.QQBIliWhaleSection = QQBIliWhaleSection;
     exports.QQ_FIELDS = QQ_FIELDS;
+    exports.MODEL_FIELDS = MODEL_FIELDS;
+    exports.modelTabFields = modelTabFields;
+    exports.mergeOpenAiCatalog = mergeOpenAiCatalog;
     exports.BILI_FIELDS = BILI_FIELDS;
     exports.QQ_BILI_SHARE_FIELDS = QQ_BILI_SHARE_FIELDS;
     // 仅供 Node 契约测试验证路径归一化；浏览器运行时不使用。

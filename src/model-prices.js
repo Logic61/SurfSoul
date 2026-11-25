@@ -179,12 +179,17 @@ export function isPeakAt(atMs, table = DEFAULT_PRICE_TABLE) {
 }
 
 /** 取某模型在某一时刻生效的单价（含峰谷判定）。 */
-export function ratesAt(model, atMs, table = DEFAULT_PRICE_TABLE) {
+export function ratesAt(model, atMs, table = DEFAULT_PRICE_TABLE, provider = '') {
   const key = String(model ?? '').trim();
-  const entry = table.models[key];
-  const chosen = entry ?? table.models[table.fallbackModel];
+  const scoped = provider && table.models[provider + '/' + key];
+  const entry = scoped || table.models[key];
+  const subscription = provider === 'surfcore-codex-cli';
+  const api = provider === 'surfcore-openai-api' || provider === 'surfcore-modelsnexus' || (!provider && /^(gpt-|chat-latest|o[1-9])/.test(key));
+  const billing = subscription ? 'subscription' : entry ? 'metered' : api ? 'unpriced' : 'estimated';
+  const excluded = billing === 'subscription' || billing === 'unpriced';
+  const chosen = excluded ? { label:key, off:ZERO_BUCKETS } : entry ?? table.models[table.fallbackModel];
   const off = chosen.off;
-  const peak = isPeakAt(atMs, table);
+  const peak = !api && !scoped && !subscription && isPeakAt(atMs, table);
   const factor = peak ? table.peakMultiplier : 1;
   return {
     model: key || table.fallbackModel,
@@ -194,7 +199,8 @@ export function ratesAt(model, atMs, table = DEFAULT_PRICE_TABLE) {
     currency: table.currency,
     symbol: table.symbol,
     unit: table.unit,
-    estimated: !entry,
+    billing,
+    estimated: billing === 'estimated',
     cacheHit: off.cacheHit * factor,
     cacheMiss: off.cacheMiss * factor,
     cacheWrite: (Number.isFinite(off.cacheWrite) ? off.cacheWrite : off.cacheMiss) * factor,
@@ -223,10 +229,10 @@ export function normalizeUsage(usage) {
   }
   return {
     // DSH 的 inputTokens 是「未命中」部分，不是总输入。
-    cacheMiss: pick(usage, 'cacheMiss', 'uncachedInputTokens', 'inputTokens'),
-    cacheHit: pick(usage, 'cacheHit', 'cacheReadTokens'),
-    cacheWrite: pick(usage, 'cacheWrite', 'cacheWriteTokens'),
-    output: pick(usage, 'output', 'outputTokens'),
+    cacheMiss: pick(usage, 'cacheMiss', 'uncachedInputTokens', 'inputTokens', 'input_tokens'),
+    cacheHit: pick(usage, 'cacheHit', 'cacheReadTokens', 'cache_read_input_tokens'),
+    cacheWrite: pick(usage, 'cacheWrite', 'cacheWriteTokens', 'cache_creation_input_tokens'),
+    output: pick(usage, 'output', 'outputTokens', 'output_tokens'),
     reasoning: pick(usage, 'reasoning', 'reasoningTokens')
   };
 }
@@ -258,9 +264,12 @@ export function costOfBuckets(buckets, rates) {
 }
 
 /** 一步到位：给桶 + 时间 + 模型，直接算钱。 */
-export function priceUsage(buckets, { model, at, table = DEFAULT_PRICE_TABLE } = {}) {
-  const rates = ratesAt(model, at, table);
-  return { rates, cost: costOfBuckets(buckets, rates) };
+export function priceUsage(buckets, { model, provider, at, table = DEFAULT_PRICE_TABLE } = {}) {
+  const rates = ratesAt(model, at, table, provider);
+  const cost = costOfBuckets(buckets, rates);
+  // Preserve the existing spending guard's estimate until the operator supplies an API tariff.
+  const budgetCost = rates.billing === 'unpriced' ? costOfBuckets(buckets, ratesAt(table.fallbackModel, at, table)).total : cost.total;
+  return { rates, cost, budgetCost };
 }
 
 /** 空桶常量（避免各处重复字面量）。 */

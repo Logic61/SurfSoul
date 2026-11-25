@@ -21,9 +21,11 @@ import { DEFAULT_LIMITS, normalizeLimits } from '../tools/lib/limits.mjs';
 import { dynamicDefaults, normalizeDynamics } from '../tools/lib/kinds.mjs';
 import { DEFAULT_QQ_FISH_GUARD, normalizeQqFishGuard } from '../../../src/fish-guard.js';
 import { adminFromSources, normalizeAdmin } from '../../../src/admin-identity.js';
-import { DEFAULT_MEMORY_CARD_CONFIG, normalizeMemoryCardConfig } from '../../../src/memory-card.js?rev=memfix-60b63add51';
+import { DEFAULT_MEMORY_CARD_CONFIG, normalizeMemoryCardConfig } from '../../../src/memory-card.js?rev=memfix-26a980c2b3';
 import { normalizeCardMode } from '../../../src/share-mode.js';
-import { validateCodexEffort } from './qq-codex-effort.js';
+import { DEFAULT_CODEX_MODEL, requireCodexModel, validateCodexEffort } from './qq-codex-catalog.js';
+import { OPENAI_QQ_DEFAULT, requireOpenAiQqModel, requireOpenAiQqEffort } from './qq-openai-api.js';
+import { MODELSNEXUS_ENGINE, requireModelsNexusModel } from './qq-modelsnexus.js';
 
 export const MASK = '********';
 
@@ -445,7 +447,6 @@ function normalizeTimes(value, fallback) {
 /** 保存前的 QQ 侧收敛：只做安全范围/类型校正，不认识的键原样保留。 */
 export function normalizeQqConfig(input) {
   const cfg = clone(input ?? {});
-  if (cfg.dsh?.qqCodexEffort !== undefined) validateCodexEffort(cfg.dsh.qqCodexEffort);
   cfg.allow = isPlainObject(cfg.allow) ? cfg.allow : {};
   cfg.deny = isPlainObject(cfg.deny) ? cfg.deny : {};
   cfg.allow.private = normalizeIdList(cfg.allow.private);
@@ -647,6 +648,22 @@ export function saveQqConfig(incoming) {
   const current = currentState.config;
   const restored = restoreMaskedSecrets(incoming, current);
   const next = normalizeQqConfig(deepMerge(current, restored));
+  const before = current.dsh ?? {};
+  const after = next.dsh ?? {};
+  if (after.qqEngine === MODELSNEXUS_ENGINE || after.qqModelsNexusModel !== before.qqModelsNexusModel) {
+    requireModelsNexusModel(after.qqModelsNexusModel);
+  }
+  if (after.qqEngine === 'openai-api' || after.qqOpenAiModel !== before.qqOpenAiModel ||
+      after.qqOpenAiEffort !== before.qqOpenAiEffort) {
+    requireOpenAiQqModel(after.qqOpenAiModel || OPENAI_QQ_DEFAULT);
+    requireOpenAiQqEffort(after.qqOpenAiEffort || 'low');
+  }
+  const effortChanged = after.qqCodexEffort !== before.qqCodexEffort;
+  if (after.qqCodexModel !== before.qqCodexModel || effortChanged ||
+      (after.qqEngine === 'codex' && before.qqEngine !== 'codex')) {
+    const model = requireCodexModel(after.qqCodexModel || DEFAULT_CODEX_MODEL);
+    if (effortChanged && after.qqCodexEffort !== undefined) validateCodexEffort(model, after.qqCodexEffort);
+  }
   // 先备份（坏文件也留一份事故现场），再把坏文件隔离成 .corrupt-<ts>，最后原子写。
   const backup = backupFile(QQ_CONFIG, 'qq-config');
   const corruptFile = currentState.corrupt ? quarantineCorruptFile(QQ_CONFIG, 'qq-config') : null;
@@ -658,6 +675,44 @@ export function saveQqConfig(incoming) {
     corrupt: currentState.corrupt,
     corruptFile,
   };
+}
+
+export const QQ_MODEL_KEYS = ['qqEngine','qqOpenAiModel','qqOpenAiEffort','qqModelsNexusModel','qqCodexModel','qqCodexEffort','provider','model','reasoningEffort'];
+function qqModelFields(dsh) {
+  return Object.fromEntries(QQ_MODEL_KEYS.filter(k => typeof dsh?.[k] === 'string').map(k => [k,dsh[k]]));
+}
+
+/** A model-only write must not validate or rewrite unrelated B站/persona/voice UI drafts. */
+export function saveQqModelSettings(changes, expected) {
+  if (!isPlainObject(changes) || !isPlainObject(expected) || !Object.keys(changes).length ||
+      Object.entries(changes).some(([k,v])=>!QQ_MODEL_KEYS.includes(k) || typeof v !== 'string' || v.length>120)) {
+    throw new Error('无效的模型设置');
+  }
+  const live=readJsonDetailed(QQ_CONFIG);
+  if (live.error || !live.exists || !isPlainObject(live.value) ||
+      (live.value.dsh !== undefined && !isPlainObject(live.value.dsh))) {
+    throw new Error('无法安全读取 QQ 配置；原文件未改动');
+  }
+  const current=qqModelFields(readQqConfig().config?.dsh);
+  if (QQ_MODEL_KEYS.some(k=>current[k] !== expected[k])) throw new Error('模型设置已被其他窗口修改，请重新读取后再保存');
+  const next={...current,...changes};
+  if (!['deepseek','codex','openai-api',MODELSNEXUS_ENGINE].includes(next.qqEngine || 'deepseek')) throw new Error('未知的 QQ 引擎');
+  if (next.qqEngine === MODELSNEXUS_ENGINE || Object.hasOwn(changes,'qqModelsNexusModel')) requireModelsNexusModel(next.qqModelsNexusModel);
+  if (next.qqEngine==='openai-api' || Object.hasOwn(changes,'qqOpenAiModel') || Object.hasOwn(changes,'qqOpenAiEffort')) {
+    const model=requireOpenAiQqModel(next.qqOpenAiModel || OPENAI_QQ_DEFAULT);
+    if (model.supportsReasoning) requireOpenAiQqEffort(next.qqOpenAiEffort || 'low');
+  }
+  if ((changes.qqEngine==='codex' && current.qqEngine!=='codex') || Object.hasOwn(changes,'qqCodexModel') || Object.hasOwn(changes,'qqCodexEffort')) {
+    const model=requireCodexModel(next.qqCodexModel || DEFAULT_CODEX_MODEL);
+    if (Object.hasOwn(changes,'qqCodexEffort')) validateCodexEffort(model,changes.qqCodexEffort);
+  }
+  for(const k of ['provider','model','reasoningEffort']) {
+    if (Object.hasOwn(changes,k) && !/^[A-Za-z0-9_.:-]{1,120}$/.test(changes[k])) throw new Error('DeepSeek 模型标识或档位无效');
+  }
+  const backup=backupFile(QQ_CONFIG,'qq-model-settings');
+  if (backup.error) throw new Error('模型设置备份失败，原文件未改动');
+  writeJsonAtomic(QQ_CONFIG,{...live.value,dsh:{...live.value.dsh,...changes}});
+  return next;
 }
 
 export function saveBiliConfig(incoming) {

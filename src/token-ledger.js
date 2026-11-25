@@ -33,6 +33,7 @@ import {
   normalizeUsage,
   priceUsage,
   ratesAt,
+  subBuckets,
   totalTokensOf
 } from './model-prices.js';
 
@@ -156,6 +157,8 @@ export function createTokenLedger({
       const prevEvicted = evicted.get(sid);
       if (prevEvicted && prevEvicted.dropped >= (Number(record.dropped) || 0)) return false;
       evicted.set(sid, {
+        billing: record.billing || {estimated: totalTokensOf(buckets)},
+        reviewDay: record.reviewDay,
         sessionId: sid,
         key: record.key,
         buckets,
@@ -188,17 +191,24 @@ export function createTokenLedger({
       return true;
     }
 
-    if (record.k === 'turn') {
+    if (record.k === 'turn' || record.k === 'aux') {
       const turn = Number(record.turn);
       const step = Number(record.step);
       const retry = Number.isFinite(Number(record.retry)) ? Number(record.retry) : 0;
       if (!Number.isFinite(turn) || !Number.isFinite(step)) return false;
-      const sk = sampleKeyOf(sid, turn, step, retry);
+      const auxiliaryId = record.k === 'aux' && record.id;
+      const sk = auxiliaryId ? 'aux|' + auxiliaryId : sampleKeyOf(sid, turn, step, retry);
       const prev = samples.get(sk);
       // 幂等关键：只有 seq **严格更新**才允许覆盖。
       // 相等 seq 只可能是同一条事件的重放（重连时 snapshot 会重发），
       // 若放行「相等 seq 覆盖」，旧快照就能把新数据改小 —— 花费会凭空缩水。
-      if (prev && seq >= 0 && prev.seq >= seq) return false;
+      if (prev && seq >= 0 && prev.seq >= seq) {
+        if (prev.seq === seq && !prev.provider && record.provider) {
+          prev.provider = record.provider;
+          if (record.model) prev.model = record.model;
+        }
+        return false;
+      }
       samples.set(sk, {
         sessionId: sid,
         key: record.key,
@@ -208,9 +218,10 @@ export function createTokenLedger({
         step,
         retry,
         model: record.model,
-        provider: record.provider,
+        provider: record.provider, auxiliaryId,
         buckets
       });
+      if (auxiliaryId) { sessionSeen.set(sid, Math.max(t, sessionSeen.get(sid) || 0)); return true; }
       const axis = retryAxis.get(sid);
       if (!axis || axis.seq <= seq) retryAxis.set(sid, { turn, step, retry, seq });
       if (t > (sessionSeen.get(sid) ?? 0)) sessionSeen.set(sid, t);
@@ -279,7 +290,7 @@ export function createTokenLedger({
     }
     for (const s of samples.values()) {
       out.push({
-        k: 'turn', t: s.t, sid: s.sessionId, key: s.key, seq: s.seq,
+        k: s.auxiliaryId ? 'aux' : 'turn', id: s.auxiliaryId || undefined, t: s.t, sid: s.sessionId, key: s.key, seq: s.seq,
         turn: s.turn, step: s.step, retry: s.retry,
         model: s.model, provider: s.provider, b: s.buckets
       });
@@ -287,7 +298,7 @@ export function createTokenLedger({
     for (const e of evicted.values()) {
       out.push({
         k: 'evict', t: sessionSeen.get(e.sessionId) ?? 0, sid: e.sessionId, key: e.key,
-        b: e.buckets, cost: e.cost, peak: e.byTier.peak, off: e.byTier.off,
+        b: e.buckets, cost: e.cost, billing:e.billing, reviewDay:e.reviewDay, peak: e.byTier.peak, off: e.byTier.off,
         estimated: e.estimated, dropped: e.dropped, maxSeq: Number(e.maxSeq) >= 0 ? Number(e.maxSeq) : -1
       });
     }
@@ -324,8 +335,11 @@ export function createTokenLedger({
     for (let i = 0; i < overflow; i += 1) {
       const [sampleId, sample] = ordered[i];
       samples.delete(sampleId);
-      const acc = evicted.get(sample.sessionId) ?? {
-        sessionId: sample.sessionId,
+      const sid = sample.auxiliaryId ? 'aux-archive/' + sample.sessionId : sample.sessionId;
+      if (sample.key) sessionKeys.set(sid, sample.key);
+      const acc = evicted.get(sid) ?? {
+        billing: {},
+        sessionId: sid,
         key: sample.key,
         buckets: { ...ZERO_BUCKETS },
         cost: 0,
@@ -341,13 +355,23 @@ export function createTokenLedger({
       if (Number.isFinite(sampleSeq) && sampleSeq >= 0) {
         acc.maxSeq = Math.max(Number(acc.maxSeq) >= 0 ? Number(acc.maxSeq) : -1, sampleSeq);
       }
-      const p = priceUsage(sample.buckets, { model: sample.model, at: sample.t || now(), table: priceTable });
+      const p = priceUsage(sample.buckets, { model: sample.model, provider: sample.provider, at: sample.t || now(), table: priceTable });
+      const kind = p.rates.billing;
+      acc.billing[kind] = (acc.billing[kind] || 0) + totalTokensOf(sample.buckets);
+      if (sample.auxiliaryId) {
+        const dayStart = new Date(sample.t).setHours(0, 0, 0, 0);
+        if (!acc.reviewDay || dayStart > acc.reviewDay.start) acc.reviewDay = {start:dayStart,cost:0,tokens:0};
+        if (dayStart === acc.reviewDay.start) {
+          acc.reviewDay.cost += p.budgetCost;
+          acc.reviewDay.tokens += totalTokensOf(sample.buckets);
+        }
+      }
       acc.cost += p.cost.total;
       acc.byTier[p.rates.tier] += p.cost.total;
       acc.estimated ||= p.rates.estimated;
       acc.dropped += 1;
       if (sample.key) acc.key = sample.key;
-      evicted.set(sample.sessionId, acc);
+      evicted.set(sid, acc);
       evictedDirty = true;
     }
     return overflow;
@@ -396,8 +420,8 @@ export function createTokenLedger({
     const t = Number.isFinite(Number(at)) ? Number(at)
       : (Number.isFinite(Number(event.time)) ? Number(event.time) : now());
     const seq = Number.isFinite(Number(event.seq)) ? Number(event.seq) : -1;
-    const eventModel = model ?? event.data?.model ?? event.data?.usage?.model;
-    const eventProvider = provider ?? event.data?.provider;
+    const eventModel = event.data?.message?.source?.model ?? model ?? event.data?.model ?? event.data?.usage?.model;
+    const eventProvider = event.data?.message?.source?.provider ?? provider ?? event.data?.provider;
 
     if (event.type === 'llm/retry-started') {
       const turn = Number(event.data?.turn);
@@ -424,7 +448,16 @@ export function createTokenLedger({
     const key = keyOf(sessionId);
     const sk = sampleKeyOf(sessionId, turn, step, retry);
     const prev = samples.get(sk);
-    if (prev && seq >= 0 && prev.seq >= seq) return false;
+    if (prev && seq >= 0 && prev.seq >= seq) {
+      if (prev.seq === seq && !prev.provider && eventProvider) {
+        prev.provider = eventProvider;
+        prev.model = eventModel ?? prev.model;
+        appendLine({k:'turn', t:prev.t, sid:sessionId, key:prev.key, seq, turn, step, retry,
+          model:prev.model, provider:eventProvider, b:prev.buckets});
+        maybeCompact();
+      }
+      return false;
+    }
 
     const record = {
       k: 'turn', t, sid: sessionId, key, seq,
@@ -463,7 +496,7 @@ export function createTokenLedger({
       && prev.buckets.cacheMiss === buckets.cacheMiss
       && prev.buckets.cacheHit === buckets.cacheHit
       && prev.buckets.cacheWrite === buckets.cacheWrite
-      && prev.buckets.output === buckets.output;
+      && prev.buckets.output === buckets.output && prev.model === model && prev.provider === provider;
     baselines.set(sessionId, { sessionId, key, seq, t, model, provider, buckets });
     if (t > (sessionSeen.get(sessionId) ?? 0)) sessionSeen.set(sessionId, t);
     // 内容与 seq 都没变的重复基线（重连重发）不再落盘：否则每重连一次就多一行，
@@ -480,14 +513,29 @@ export function createTokenLedger({
     return true;
   }
 
+  function recordReview({ id, sessionId, key, turn = 0, step = 0, retry = 0, model, usage, at = now() }) {
+    if (!id || !sessionId || !key || samples.has('aux|' + id)) return false;
+    const b = normalizeUsage(usage);
+    if (!totalTokensOf(b)) return false;
+    const record = {k:'aux',id,sid:sessionId,key,turn,step,retry,seq:-1,t:at,model,provider:'deepseek-review',b};
+    applyRecord(record, {fromDisk:false});
+    appendLine(record);
+    lastIngestAt = now();
+    maybeCompact();
+    return true;
+  }
+
   /** 摄入 snapshot 的全部历史记录（逐轮明细回填）。 */
   function ingestSnapshotRecords({ sessionId, records, at } = {}) {
     if (!Array.isArray(records)) return 0;
     let n = 0;
+    let selection;
     for (const entry of records) {
       const event = entry?.type === 'event' ? entry.event : entry;
       if (!event || typeof event !== 'object') continue;
-      if (ingestEvent({ sessionId, event, origin: 'snapshot', at })) n += 1;
+      if (event.type === 'request/header') selection = event.data?.header?.config;
+      if (event.type === 'model/selection') selection = event.data?.lastUsed ?? event.data?.next ?? event.data;
+      if (ingestEvent({ sessionId, event, origin: 'snapshot', at, model:selection?.model, provider:selection?.provider })) n += 1;
     }
     return n;
   }
@@ -513,8 +561,8 @@ export function createTokenLedger({
       if (!entry) {
         entry = {
           liveBuckets: { ...ZERO_BUCKETS },
-          liveCost: 0,
-          liveByTier: { peak: 0, off: 0 },
+          covered: { ...ZERO_BUCKETS },
+          billing: {subscription:0,unpriced:0,metered:0,estimated:0},
           allCost: 0,
           allByTier: { peak: 0, off: 0 },
           estimated: false,
@@ -524,15 +572,15 @@ export function createTokenLedger({
         index.set(s.sessionId, entry);
       }
       const base = baselines.get(s.sessionId);
-      const isLive = !base || s.seq > base.seq;
-      const p = priceUsage(s.buckets, { model: s.model, at: s.t || now(), table: priceTable });
+      const isLive = s.auxiliaryId || !base || s.seq > base.seq;
+      if (!isLive) entry.covered = addBuckets(entry.covered, s.buckets);
+      const p = priceUsage(s.buckets, { model: s.model, provider: s.provider, at: s.t || now(), table: priceTable });
+      entry.billing[p.rates.billing] += totalTokensOf(s.buckets);
       entry.estimated ||= p.rates.estimated;
       entry.allCost += p.cost.total;
       entry.allByTier[p.rates.tier] += p.cost.total;
       if (isLive) {
         entry.liveBuckets = addBuckets(entry.liveBuckets, s.buckets);
-        entry.liveCost += p.cost.total;
-        entry.liveByTier[p.rates.tier] += p.cost.total;
       }
       let row = entry.turns.get(s.turn);
       if (!row) {
@@ -554,11 +602,12 @@ export function createTokenLedger({
       }
       row.buckets = addBuckets(row.buckets, s.buckets);
       row.steps += 1;
+      if (s.auxiliaryId) row.reviewSteps = (row.reviewSteps || 0) + 1;
       row.attempts += s.retry > 0 ? 1 : 0;
       if (s.t < row.startedAt) row.startedAt = s.t;
       if (s.t > row.endedAt) row.endedAt = s.t;
-      if (s.model) { row.model = s.model; entry.models.add(s.model); }
-      if (s.provider) row.provider = s.provider;
+      if (s.model) { if (!s.auxiliaryId) row.model = s.model; entry.models.add(s.model); }
+      if (s.provider && !s.auxiliaryId) row.provider = s.provider;
       row.cost += p.cost.total;
       row.tier = row.tier === null || row.tier === p.rates.tier ? p.rates.tier : 'mixed';
     }
@@ -573,6 +622,7 @@ export function createTokenLedger({
       sessions: sessionIds.length,
       buckets: { ...ZERO_BUCKETS },
       cost: 0,
+      billing: {subscription:0,unpriced:0,metered:0,estimated:0},
       unattributedCost: 0,
       attributedCost: 0,
       byTier: { peak: 0, off: 0 },
@@ -594,12 +644,15 @@ export function createTokenLedger({
       const total = addBuckets(cumulative, liveBuckets);
       view.buckets = addBuckets(view.buckets, total);
 
-      let cost = (entry?.liveCost ?? 0) + (gone?.cost ?? 0);
-      view.byTier.peak += (entry?.liveByTier.peak ?? 0) + (gone?.byTier.peak ?? 0);
-      view.byTier.off += (entry?.liveByTier.off ?? 0) + (gone?.byTier.off ?? 0);
+      for (const k of Object.keys(view.billing)) view.billing[k] += (entry?.billing[k] || 0) + (rawGone?.billing?.[k] || 0);
+      let cost = (entry?.allCost ?? 0) + (rawGone?.cost ?? 0);
+      view.byTier.peak += (entry?.allByTier.peak ?? 0) + (rawGone?.byTier.peak ?? 0);
+      view.byTier.off += (entry?.allByTier.off ?? 0) + (rawGone?.byTier.off ?? 0);
       view.estimated ||= (entry?.estimated ?? false) || (gone?.estimated ?? false);
       if (base) {
-        const p = priceUsage(base.buckets, { model: base.model, at: base.t || now(), table: priceTable });
+        const remainder = subBuckets(base.buckets, addBuckets(entry?.covered, gone ? null : rawGone?.buckets));
+        const p = priceUsage(remainder, { model: base.model, provider: base.provider, at: base.t || now(), table: priceTable });
+        view.billing[p.rates.billing] += totalTokensOf(remainder);
         cost += p.cost.total;
         view.byTier[p.rates.tier] += p.cost.total;
         view.estimated ||= p.rates.estimated;
@@ -672,7 +725,7 @@ export function createTokenLedger({
       Number(s.retry) || 0
     ];
     for (const sample of samples.values()) {
-      if (sample.sessionId !== sid) continue;
+      if (sample.auxiliaryId || sample.sessionId !== sid) continue;
       if (!latest) { latest = sample; continue; }
       const a = rank(sample);
       const b = rank(latest);
@@ -699,7 +752,7 @@ export function createTokenLedger({
    * @param {{since?:number, categoryOf?:(key:string)=>string}} opts
    * @returns {{since:number, qq:{cost:number,tokens:number}, other:{cost:number,tokens:number}, total:{cost:number,tokens:number}, samples:number}}
    */
-  function dailyUsage({ since, categoryOf } = {}) {
+  function dailyUsage({ since, categoryOf, reviewsOnly = false } = {}) {
     const from = Number.isFinite(Number(since)) ? Number(since) : 0;
     const out = {
       since: from,
@@ -709,16 +762,22 @@ export function createTokenLedger({
       samples: 0
     };
     for (const s of samples.values()) {
-      if (s.t < from) continue;
+      if (s.t < from || (reviewsOnly && !s.auxiliaryId)) continue;
       const key = keyOf(s.sessionId) ?? s.key ?? '';
       const category = typeof categoryOf === 'function'
         ? String(categoryOf(key) || 'other')
         : (/^(?:group|private):/.test(key) ? 'qq' : 'other');
       const bucket = category === 'qq' ? out.qq : out.other;
-      const p = priceUsage(s.buckets, { model: s.model, at: s.t || now(), table: priceTable });
-      bucket.cost += p.cost.total;
+      const p = priceUsage(s.buckets, { model: s.model, provider: s.provider, at: s.t || now(), table: priceTable });
+      bucket.cost += p.budgetCost;
       bucket.tokens += totalTokensOf(s.buckets);
       out.samples += 1;
+    }
+    for (const e of evicted.values()) {
+      if (!e.reviewDay || e.reviewDay.start < from) continue;
+      const bucket = /^(?:group|private):/.test(e.key) ? out.qq : out.other;
+      bucket.cost += e.reviewDay.cost;
+      bucket.tokens += e.reviewDay.tokens;
     }
     out.total = {
       cost: out.qq.cost + out.other.cost,
@@ -750,11 +809,13 @@ export function createTokenLedger({
       turns: 0,
       steps: 0,
       conversations: conversations.length,
+      billing: {subscription:0,unpriced:0,metered:0,estimated:0},
       estimated: false
     };
     for (const c of conversations) {
       totals.buckets = addBuckets(totals.buckets, c.buckets);
       totals.cost += c.cost;
+      for (const k of Object.keys(totals.billing)) totals.billing[k] += c.billing[k];
       totals.attributedCost += c.attributedCost;
       totals.unattributedCost += c.unattributedCost;
       totals.byTier.peak += c.byTier.peak;
@@ -870,24 +931,26 @@ export function createTokenLedger({
     //   ① 被淘汰采样的累计（evicted）② 投影基线自身 ③ 仍然逐轮可拆、且没被基线覆盖的采样（seq > 基线 seq）。
     // 非 live 采样绝不能计入：基线已经包含了它的历史，再算一次就是重复计费，offChartCost 会凭空变大。
     let ledgerCost = 0;
+    const covered = new Map();
     let ledgerBuckets = { ...ZERO_BUCKETS };
     for (const e of evicted.values()) {
-      if (evictionCovered(e)) continue; // 已被投影基线覆盖：再加一次就是重复计费
+      if (evictionCovered(e)) { covered.set(e.sessionId,e.buckets); ledgerCost += Number(e.cost) || 0; continue; } // 已被投影基线覆盖：再加一次就是重复计费
       ledgerCost += Number(e.cost) || 0;
       ledgerBuckets = addBuckets(ledgerBuckets, e.buckets);
     }
     for (const base of baselines.values()) {
       // 与 sessionView() 同口径：基线没有逐时明细，按快照时刻（缺失时取当前）整体计价。
-      ledgerCost += priceUsage(base.buckets, { model: base.model, at: base.t || now(), table: priceTable }).cost.total;
+      // Price only the remainder once the individually routed samples have been counted below.
       ledgerBuckets = addBuckets(ledgerBuckets, base.buckets);
     }
     for (const s of samples.values()) {
       // 这条采样的计价只算一次：窗口内的桶与窗口外的"总额"共用同一个 p。
-      const p = priceUsage(s.buckets, { model: s.model, at: s.t || endAt, table: priceTable });
+      const p = priceUsage(s.buckets, { model: s.model, provider: s.provider, at: s.t || endAt, table: priceTable });
       const tokens = totalTokensOf(s.buckets);
       const base = baselines.get(s.sessionId);
-      if (!base || s.seq > base.seq) {
-        ledgerCost += p.cost.total;
+      ledgerCost += p.cost.total;
+      if (base && !s.auxiliaryId && s.seq <= base.seq) covered.set(s.sessionId,addBuckets(covered.get(s.sessionId),s.buckets));
+      if (s.auxiliaryId || !base || s.seq > base.seq) {
         ledgerBuckets = addBuckets(ledgerBuckets, s.buckets);
       }
       if (s.t < start || s.t >= end) continue;
@@ -934,6 +997,7 @@ export function createTokenLedger({
     // 旧实现在这里调 summary({ limit: 1 }) 只为拿一个总额 —— 那是又一次 buildIndex()（全量采样、
     // 每条约一次 priceUsage、还建两层 Map）加逐会话聚合，把控制台每 3 秒轮询一次的最热端点成本
     // 直接翻倍，也违背了本函数头「单遍扫描」的约定。现在用上面同一次遍历累出的权威总额。
+    for (const base of baselines.values()) ledgerCost += priceUsage(subBuckets(base.buckets,covered.get(base.sessionId)), {model:base.model,provider:base.provider,at:base.t || now(),table:priceTable}).cost.total;
     const ledgerTokens = totalTokensOf(ledgerBuckets);
     return {
       ok: true,
@@ -961,7 +1025,7 @@ export function createTokenLedger({
     const all = [...samples.values()].sort((a, b) => b.t - a.t);
     const out = [];
     for (const s of all.slice(0, n)) {
-      const p = priceUsage(s.buckets, { model: s.model, at: s.t || now(), table: priceTable });
+      const p = priceUsage(s.buckets, { model: s.model, provider: s.provider, at: s.t || now(), table: priceTable });
       out.push({
         time: s.t,
         key: keyOf(s.sessionId) ?? s.key ?? null,
@@ -970,6 +1034,7 @@ export function createTokenLedger({
         step: s.step,
         retry: s.retry,
         model: s.model ?? null,
+        provider: s.provider ?? null, billing:p.rates.billing, review:!!s.auxiliaryId,
         tokens: totalTokensOf(s.buckets),
         ...s.buckets,
         cost: p.cost.total,
@@ -1024,6 +1089,7 @@ export function createTokenLedger({
 
   return {
     ingestEvent,
+    recordReview,
     ingestBaseline,
     ingestSnapshotRecords,
     summary,

@@ -2376,11 +2376,9 @@ button:active:not(:disabled) {
       <div id="v2WakeStatusOutput" class="tool-log-table">（空）</div>
 
 </div></details>
-<details class="settings-group"><summary>初始提示词（预写某个群/私聊的环境，只在 AI 首次唤醒时看一次）</summary><div class="settings-content">
+<details class="settings-group"><summary>群聊与私聊的环境提示</summary><div class="settings-content">
       <div class="meta" style="margin-bottom:8px">
-        在这里提前告诉 AI「这个群是什么圈子、什么氛围、聊什么、有什么忌讳」。AI 只在<b>该会话的第一次唤醒</b>时收到一次，
-        之后不会重复注入（那时它已经在会话上下文里了）；AI 读不到也改不了这份设置。
-        如果 AI 已经在这个会话里首次唤醒过，需要重置该会话（「会话映射」里重置，或「重置二代状态」）后，下一次首次唤醒才会带上它。
+        写下这个圈子常聊的话题、氛围和忌讳。「本会话持续参考」会在下次唤醒时带入修改；「仅首次唤醒」在新的 DSH 会话开场时注入。
         留空保存等于删除；只写环境背景，别写指令式的要求（那是人格卡/仿真提示词的事）。
       </div>
       <div class="row">
@@ -2390,6 +2388,7 @@ button:active:not(:disabled) {
         <button id="v2InitPromptClear" class="small danger">删除</button>
         <span class="meta" id="v2InitPromptMsg"></span>
       </div>
+      <label>有效期 <select id="v2InitScope"><option value="session">本会话持续参考</option><option value="opening">仅首次唤醒</option></select></label>
       <textarea id="v2InitPromptText" rows="5" aria-label="初始提示词正文" placeholder="例如：这是一个偏技术的闲聊群，群友喜欢玩梗、聊模型和本地部署；氛围轻松，别长篇大论，遇到配置问题直接给结论。"></textarea>
       <div class="meta">
         当前 <span id="v2InitPromptCount">0</span> / <span id="v2InitPromptMax">2000</span> 字符（上限可在 config.json 的
@@ -2600,9 +2599,11 @@ button:active:not(:disabled) {
     </section>
 <section id="section-dsh" data-page="overview" class="card span-all">
       <h2 data-note="下一条消息生效">DSH 模型与思考强度</h2>
-      <div class="row"><label>QQ 对话引擎 <select id="qqEngine"><option value="deepseek">DeepSeek</option><option value="codex">Codex CLI</option></select></label>
-        <label>Codex 模型 <select id="qqCodexModel"><option>gpt-6.1-sol</option><option>gpt-6-astra</option></select></label>
-        <button id="qqEngineSave">保存引擎</button><span class="meta" id="qqEngineMsg"></span></div>
+      <div class="row"><label>QQ 对话引擎 <select id="qqEngine"><option value="deepseek">DeepSeek</option><option value="codex">Codex CLI</option><option value="openai-api">OpenAI API（单独计费）</option><option value="modelsnexus">ModelsNexus（Claude / Gemini）</option></select></label>
+        <label>Codex 模型 <select id="qqCodexModel"></select></label>
+        <label>OpenAI API 模型 <select id="qqOpenAiModel"></select></label>
+        <label id="qqModelsNexusField" hidden>ModelsNexus 模型 <select id="qqModelsNexusModel"></select></label>
+        <button id="qqEngineSave" disabled>保存引擎</button><span class="meta" id="qqEngineMsg"></span></div>
       <div class="meta">模型：<span id="dshModelText">-</span> ｜ 提供方：<span id="dshProviderText">-</span></div>
       <div class="row" style="margin-top:10px">
         <label for="dshEffortSelect" id="dshEffortLabel" style="flex:0 0 auto">思考强度</label>
@@ -3097,17 +3098,56 @@ async function refreshSimPrompt() {
 }
 
 // ── DSH 模型与思考强度 ──────────────────────────────────────────────────────
+let modelsNexusRequest = 0;
+async function refreshModelsNexusPicker(selected) {
+  const active = document.getElementById('qqEngine').value === 'modelsnexus';
+  const field = document.getElementById('qqModelsNexusField');
+  const picker = document.getElementById('qqModelsNexusModel');
+  if (selected !== undefined) picker.dataset.selected = selected;
+  field.hidden = !active;
+  field.style.display = active ? '' : 'none';
+  const seq = ++modelsNexusRequest;
+  if (!active) return;
+  let result;
+  try { result = await api('/api/dsh/modelsnexus-models'); } catch {}
+  if (seq !== modelsNexusRequest) return;
+  const models = result?.models || [];
+  const current = picker.dataset.selected || '';
+  picker.replaceChildren(...models.map(model=>new Option(model.name,model.id)));
+  if (current && !models.some(model=>model.id===current)) picker.add(new Option(current+'（当前保留）',current),0);
+  if (!current) {
+    const placeholder = new Option(models.length?'请选择 Claude 或 Gemini 模型':'未获取到模型目录','');
+    placeholder.disabled = true;
+    picker.add(placeholder,0);
+  }
+  picker.value = current;
+  picker.disabled = !models.length;
+}
+
 async function refreshDshModel() {
   try {
     const r = await api('/api/dsh/model');
     document.getElementById('dshModelText').textContent = r.model || '-';
     document.getElementById('dshProviderText').textContent = r.provider || '-';
     const select = document.getElementById('dshEffortSelect');
-    document.getElementById('qqEngine').value = r.qqEngine;
-    document.getElementById('qqCodexModel').value = r.qqCodexModel;
+    const engine = document.getElementById('qqEngine');
+    if (r.qqEngine) engine.value = r.qqEngine;
+    void refreshModelsNexusPicker(r.qqModelsNexusModel || '');
+    const modelSelect = document.getElementById('qqCodexModel');
+    const available = r.qqCodexModels || [];
+    modelSelect.replaceChildren(...available.map(item => new Option(item.name, item.id)));
+    if (r.qqCodexModel && !available.some(item => item.id === r.qqCodexModel)) {
+      modelSelect.add(new Option(r.qqCodexModel + '（当前目录不可用）', r.qqCodexModel), 0);
+    }
+    modelSelect.value = r.qqCodexModel || '';
+    const openAiSelect = document.getElementById('qqOpenAiModel');
+    openAiSelect.replaceChildren(...(r.qqOpenAiModels || []).map(item => new Option(item.name,item.id)));
+    openAiSelect.value = r.qqOpenAiModel || '';
+    document.getElementById('qqEngineSave').disabled = false;
     select.dataset.engine = r.effortEngine || 'deepseek';
-    document.getElementById('dshEffortLabel').textContent = (select.dataset.engine === 'codex' ? 'Codex' : 'DeepSeek') + ' 思考强度';
-    document.getElementById('dshEffortSave').disabled = false;
+    select.dataset.model = r.model || '';
+    document.getElementById('dshEffortLabel').textContent = ({codex:'Codex','openai-api':'OpenAI API',modelsnexus:'ModelsNexus'}[select.dataset.engine] || 'DeepSeek') + ' 思考强度';
+    document.getElementById('dshEffortSave').disabled = !r.options?.length;
     const labels = r.labels || {};
     select.replaceChildren();
     for (const option of (r.options || [])) {
@@ -3123,8 +3163,10 @@ async function refreshDshModel() {
     select.value = r.reasoningEffort;
     const parts = [];
     if (r.providerDefault) parts.push(`DSH 出厂默认是 ${r.providerDefault}`);
-    parts.push(r.catalogSource === 'dsh' ? '档位取自 DSH 实际公布的能力' : '未能读取 DSH 能力，档位为内置清单');
-    document.getElementById('dshEffortNote').textContent = parts.join('；') + '。';
+    parts.push(select.dataset.engine === 'codex'
+      ? (r.catalogSource === 'codex' ? '档位取自本机 Codex 模型目录' : '本机 Codex 目录暂不可用，已载入兼容列表')
+      : (r.catalogSource === 'dsh' ? '档位取自 DSH 实际公布的能力' : '未能读取 DSH 能力，档位为内置清单'));
+    document.getElementById('dshEffortNote').textContent = select.dataset.engine === 'modelsnexus' ? '思考强度由网关决定。' : parts.join('；') + '。';
     document.getElementById('dshEffortSideEffect').textContent = r.globalSideEffect
       ? '注意：切换会同时写入 DSH 的全局默认（~/.dsh/settings.yaml 的 agent-default-model），也就是 Web GUI 里新建会话的默认强度也会跟着变。'
       : '';
@@ -3297,9 +3339,16 @@ document.getElementById('roleInjectMaxSave').addEventListener('click', async () 
 });
 
 // ── DSH 思考强度 ────────────────────────────────────────────────────────────
+document.getElementById('qqEngine').addEventListener('change',()=>void refreshModelsNexusPicker());
 document.getElementById('qqEngineSave').addEventListener('click', async () => {
   const engine = document.getElementById('qqEngine').value, codexModel = document.getElementById('qqCodexModel').value;
-  const result = await api('/api/dsh/engine','POST',{engine,codexModel});
+  const openAiModel = document.getElementById('qqOpenAiModel').value;
+  const modelsNexusModel = document.getElementById('qqModelsNexusModel').value;
+  if (engine === 'modelsnexus' && !modelsNexusModel) {
+    document.getElementById('qqEngineMsg').textContent = '请先选择 Claude 或 Gemini 模型';
+    return;
+  }
+  const result = await api('/api/dsh/engine','POST',{engine,...(engine === 'modelsnexus' ? {modelsNexusModel} : engine === 'openai-api' ? {openAiModel} : {codexModel})});
   document.getElementById('qqEngineMsg').textContent = result.ok ? '已保存，下次生成时生效' : (result.error || '保存失败');
   if (result.ok) {
     document.getElementById('dshEffortMsg').textContent = '';
@@ -3312,7 +3361,7 @@ document.getElementById('dshEffortSave').addEventListener('click', async () => {
   msg.textContent = '保存中…';
   msg.className = 'meta';
   try {
-    const r = await api('/api/dsh/effort', 'POST', { engine: select.dataset.engine, reasoningEffort: select.value });
+    const r = await api('/api/dsh/effort', 'POST', { engine: select.dataset.engine, model:select.dataset.model, reasoningEffort: select.value });
     await refreshDshModel();
     msg.textContent = r.ok ? `✅ 已设为 ${r.reasoningEffort}，下一条消息生效` : ('❌ ' + (r.error || '保存失败'));
     msg.className = r.ok ? 'meta ok' : 'meta err';
@@ -4005,6 +4054,7 @@ async function loadV2InitialPrompt() {
       return;
     }
     v2InitPromptTextEl.value = r.text || '';
+    document.getElementById('v2InitScope').value = r.scope || 'opening';
     updateV2InitPromptCount();
     document.getElementById('v2InitPromptList').textContent = r.exists
       ? '该会话已设置初始提示词；再点「保存」会覆盖。'
@@ -4020,7 +4070,7 @@ async function saveV2InitialPrompt() {
   if (!key) { setV2InitPromptMsg('请输入会话 key（group:群号 或 private:QQ号）', 'err'); return; }
   setV2InitPromptMsg('保存中…');
   try {
-    const r = await api('/api/socialV2/initial-prompt', 'POST', { key, text: v2InitPromptTextEl.value });
+    const r = await api('/api/socialV2/initial-prompt', 'POST', { key, text: v2InitPromptTextEl.value, scope: document.getElementById('v2InitScope').value });
     if (!r.ok) { setV2InitPromptMsg('❌ ' + (r.error || '失败'), 'err'); return; }
     applyV2InitPromptMax(r.maxChars);
     if (r.deleted) {
@@ -4028,7 +4078,7 @@ async function saveV2InitialPrompt() {
       updateV2InitPromptCount();
       setV2InitPromptMsg('✅ 内容为空，已删除该会话的初始提示词', 'ok');
     } else {
-      setV2InitPromptMsg(`✅ 已保存（${r.chars} 字符），该会话下一次首次唤醒时注入`, 'ok');
+      setV2InitPromptMsg(`✅ 已保存（${r.chars} 字符）`, 'ok');
     }
   } catch (e) {
     setV2InitPromptMsg('❌ ' + (e.message || e), 'err');
@@ -5225,6 +5275,10 @@ function renderUsageConversations(r) {
   if (Number(totals.unattributedCost) > 0) {
     html += `<div class="meta" style="padding:8px 10px">其中 ${usageMoney(totals.unattributedCost, sym)} 来自更早的回合：它们只剩累计值（在逐轮快照窗口之外），无法再拆到具体某一轮。</div>`;
   }
+  if (totals.billing) {
+    const b = totals.billing;
+    html += '<div class="meta" style="padding:8px 10px">按渠道统计 token ｜ 订阅 ' + usageNum(b.subscription) + ' ｜ 已标价 API ' + usageNum(b.metered) + ' ｜ 待定价 ' + usageNum(b.unpriced) + ' ｜ 历史估算 ' + usageNum(b.estimated) + '。待定价调用计入 token；金额额度暂沿用保守估算。</div>';
+  }
   if (totals.estimated) {
     html += '<div class="meta" style="padding:8px 10px">⚠️ 有模型未登记在价目表里，这部分按 <code>deepseek-flash</code> 兜底价估算，可在 <code>config.json</code> 的 <code>pricing.models</code> 补充。</div>';
   }
@@ -5257,7 +5311,7 @@ function renderUsageTurns(r) {
     html += '<tr>'
       + `<td class="num">#${esc(t.turn)}</td>`
       + `<td>${esc(usageTime(t.endedAt))}</td>`
-      + `<td class="num">${usageNum(t.steps)}</td>`
+      + `<td class="num">${usageNum(t.steps)}${t.reviewSteps ? `（含 ${usageNum(t.reviewSteps)} 次评审）` : ''}</td>`
       + `<td class="num">${usageNum(b.cacheMiss)}</td>`
       + `<td class="num">${usageNum(b.cacheHit)}</td>`
       + `<td class="num">${usagePct(usageRate(b))}</td>`
@@ -5280,11 +5334,11 @@ function renderUsageRecent(r) {
       + `<td>${esc(usageTime(e.time))}</td>`
       + `<td>${esc(e.key || '未归属')}</td>`
       + `<td class="num">#${esc(e.turn)}</td>`
-      + `<td class="num">${esc(e.step)}</td>`
+      + `<td class="num">${esc(e.step)}${e.review ? ' · 发送前评审' : ''}</td>`
       + `<td class="num">${usageNum(e.cacheMiss)}</td>`
       + `<td class="num">${usageNum(e.cacheHit)}</td>`
       + `<td class="num">${usageNum(e.output)}</td>`
-      + `<td class="num">${usageMoney(e.cost, sym)}</td>`
+      + `<td class="num">${e.billing === 'subscription' ? '订阅' : e.billing === 'unpriced' ? '待定价' : usageMoney(e.cost, sym)}</td>`
       + `<td>${usageTierTag(e.tier)}</td>`
       + '</tr>';
   }

@@ -4,6 +4,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
 import { runNarration, loadNarrative, saveNarrative } from '../src/memcard-narrative.js';
+import { readEpisodeEvidence } from '../src/memory-evidence.js';
+import { scanFullRecords } from '../src/memory-card.js';
 import { bridgeHarness } from './audit-bridge-harness.mjs';
 
 test('300 existing episodes survive a new, idempotent, single-conversation batch', async t => {
@@ -69,4 +71,24 @@ test('new turns use the speaker target, relevant sticker metadata and the curren
     assert.equal(wake('[图片]',key,[{kind:'image',file:'x'}]), '');
     assert.doesNotMatch(wake('抓包，你又偷吃了','group:456'),/#19/);
   } finally {await h.close();}
+});
+
+test('archived references on either side of 5 MiB retain the same permitted evidence', t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(),'archive-threshold-'));
+  t.after(() => fs.rmSync(dir,{recursive:true,force:true}));
+  const paths = {dir,json:path.join(dir,'memory-card.json'),fullJsonl:path.join(dir,'memory-card-full.jsonl')};
+  fs.writeFileSync(paths.json, JSON.stringify({records:[]}));
+  const sources = ['arch','sensitive','other'].map(id => ({id,text:'中文证据',conversationKey:id==='other'?'group:9':'group:7',sensitive:id==='sensitive'}));
+  fs.writeFileSync(paths.fullJsonl,sources.map(r=>JSON.stringify(r)).join('\n')+'\n');
+  saveNarrative(dir,{episodes:[['yes',['arch']],['hidden',['sensitive']],['mixed',['arch','other']],['lost',['absent']]].map(([id,covers])=>({id,covers,text:'记得那天',title:id}))});
+  const eligible = () => readEpisodeEvidence(paths).map(row=>row.ep.id);
+  assert.deepEqual(eligible(), ['yes']);
+  const first = sources[0];
+  const scanned = [];
+  scanFullRecords(paths, row=>scanned.push(row.text), {chunkBytes:7});
+  assert.deepEqual(scanned, sources.map(r=>r.text));
+  fs.appendFileSync(paths.fullJsonl, (' '.repeat(4095)+'\n').repeat(1281));
+  fs.appendFileSync(paths.fullJsonl, JSON.stringify(first)+'\n');
+  assert.ok(fs.statSync(paths.fullJsonl).size > 5 * 1024 * 1024);
+  assert.deepEqual(eligible(), ['yes']);
 });

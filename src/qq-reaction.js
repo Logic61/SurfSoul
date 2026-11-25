@@ -1,3 +1,18 @@
+// This is the event that scheduled the wake. Choosing an answer target and
+// granting permissions are separate decisions.
+export function formatWakeFocus(reason, anchor, now = Date.now(), includeText = false) {
+  if (!anchor || anchor.isSelf || anchor.history || !Number.isSafeInteger(anchor.seq)) return '';
+  if (reason === 'poke' && anchor.kind !== 'poke') return '';
+  const sender = String(anchor.sender || '群友').replace(/\s+/g, ' ').slice(0, 24);
+  const name = anchor.isOwner ? sender + '（主人账号）' : sender;
+  const action = anchor.kind === 'poke' ? (anchor.poke?.targetIsSelf ? '戳了你' : '戳了别人')
+    : anchor.quoteTargetIsSelf ? '引用了你的消息' : anchor.atSelf ? '@了你' : '发来消息';
+  const age = Math.max(0, Math.floor((now - (anchor.time || now)) / 1000));
+  const elapsed = age >= 60 ? `，${Math.floor(age / 60)} 分钟前` : `，${age} 秒前`;
+  const text = includeText && anchor.kind !== 'poke' ? '「' + String(anchor.plain || anchor.text || '').replace(/\s+/g,' ').slice(0, 65) + '」' : '';
+  return `${name}${action}${text}（seq=${anchor.seq}${elapsed}）`;
+}
+
 // Anchor the inference to the last delivered row. Cursor pages and compact
 // snapshots may contain copies of rows; rows after that anchor are unseen.
 export function readReactionScene(messages, recent, privateChat = false, nickname = '') {

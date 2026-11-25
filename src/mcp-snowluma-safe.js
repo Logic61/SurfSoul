@@ -1146,7 +1146,7 @@ server.tool(
 
 server.tool(
   'qq_get_message_detail',
-  '按消息 ID 或本地 seq 查看发送者、引用和正文预览（最多 200 字）。看到 [文件] 且内容与聊天有关时传 includeFiles=true。图片文件返回图像，文本、PDF 和 DOCX 返回文字预览。',
+  '按消息 ID 或本地 seq 查看发送者、引用和正文预览（最多 200 字）。链接卡片的标题和完整地址在 links 字段。旧记录只显示 [卡片消息] 时也可用本工具查。看到 [文件] 且内容与聊天有关时传 includeFiles=true。图片文件返回图像，文本、PDF 和 DOCX 返回文字预览。',
   {
     key: z.string().describe('会话 key，格式 group:群号 或 private:QQ号'),
     token: z.string().describe('会话令牌（见唤醒提示中的【会话令牌】）'),

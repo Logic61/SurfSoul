@@ -42,6 +42,7 @@ export function emptySession() {
     dayCost: 0,
     lastSeq: -1,
     model: null,
+    provider: null,
     preset: null,
     title: null,
   };
@@ -58,6 +59,7 @@ export function normalizeSession(input) {
   out.dayCost = clamp0(input.dayCost);
   out.lastSeq = Number.isFinite(Number(input.lastSeq)) ? Number(input.lastSeq) : -1;
   out.model = typeof input.model === 'string' ? input.model : null;
+  out.provider = typeof input.provider === 'string' ? input.provider : null;
   out.preset = typeof input.preset === 'string' ? input.preset : null;
   out.title = typeof input.title === 'string' ? input.title : null;
   return out;
@@ -71,9 +73,10 @@ export function normalizeSession(input) {
  * @param {Array} events
  * @param {{dayStart:number, fallbackModel?:string, priceTable:()=>(object), defaultModel?:()=>string}} opts
  */
-export function sumUsageEvents(events, { dayStart, fallbackModel, priceTable, defaultModel = () => 'deepseek-flash' }) {
+export function sumUsageEvents(events, { dayStart, fallbackModel, fallbackProvider, priceTable, defaultModel = () => 'deepseek-flash' }) {
   const table = typeof priceTable === 'function' ? priceTable : () => priceTable;
   let model = fallbackModel || defaultModel();
+  let provider = fallbackProvider;
   let maxSeq = -1;
   const axis = { turn: -1, step: -1, retry: 0 };
   const chosen = new Map();
@@ -85,12 +88,15 @@ export function sumUsageEvents(events, { dayStart, fallbackModel, priceTable, de
       const selected = event.data?.model
         ?? event.data?.lastUsed?.model
         ?? event.data?.next?.model;
-      if (selected) model = String(selected);
+      if (selected) {
+        model = String(selected);
+        provider = event.data?.provider ?? event.data?.lastUsed?.provider ?? event.data?.next?.provider;
+      }
       continue;
     }
     if (event.type === 'request/header') {
       const selected = event.data?.header?.config?.model;
-      if (selected) model = String(selected);
+      if (selected) { model = String(selected); provider = event.data.header.config.provider; }
       continue;
     }
     if (event.type === 'llm/retry-started') {
@@ -120,15 +126,16 @@ export function sumUsageEvents(events, { dayStart, fallbackModel, priceTable, de
       at: Number(event.time) || Date.now(),
       buckets,
       model: event.data?.message?.source?.model ?? model,
+      provider: event.data?.message?.source?.provider ?? provider,
     });
   }
   let cost = 0;
   let tokens = 0;
   for (const sample of chosen.values()) {
     if (sample.at < dayStart) continue;
-    const p = priceUsage(sample.buckets, { model: sample.model, at: sample.at, table: table() });
-    cost += p.cost.total;
+    const p = priceUsage(sample.buckets, { model: sample.model, provider: sample.provider, at: sample.at, table: table() });
+    cost += p.budgetCost;
     tokens += totalTokensOf(sample.buckets);
   }
-  return { cost, tokens, maxSeq, model };
+  return { cost, tokens, maxSeq, model, provider };
 }

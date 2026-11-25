@@ -313,6 +313,7 @@ qq-dsh-bridge 把它单列成 L4 自我认知层，这里按 surfcore 的存储�
 - **写**：只有她主动调 `qq_memory_append(category="selfNote", content="一句")`；插件不自动生成
   （再叠一层 LLM 摘要就成叙事层重复，而且没人校验）。整句去重（重复只刷新 `lastTouchedAt`），
   40 条上限，超了淘汰最久没碰的；每条 200 字。
+  QQ 二代收到模仿自己口头禅的梗图或引用时，如果能认出反复出现的句式，收尾前可记一句习惯和下次想试的说法。DSH 小记保留当下的旁白，写入记忆走独立工具。
 - **读（克制注入）**：只在 **bootstrap（新会话第一轮）** 注入一次，块头是
   【你对自己的记录（你自己写下的，不是别人给你的设定）】；平时唤醒不带。换会话节奏由
   `socialV2.closure.rotateAfterClosures` / `rotateIdleMs` 决定（自然收尾 5 次后静置才换）。

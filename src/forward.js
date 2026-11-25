@@ -8,6 +8,7 @@
 // - 只格式化，不访问网络；调用方负责“id 必须来自当前会话已见消息”的校验
 
 import { truncateText } from './md-to-plain.js';
+import { extractQqCardLinks, formatQqCard, formatQqCqCards } from './qq-card-links.js';
 
 export function sanitizeForwardId(value) {
   const s = String(value ?? '').trim();
@@ -48,14 +49,16 @@ function segmentText(seg) {
     case 'file': return `[文件${d.name ?? ''}]`;
     case 'reply': return '[引用]';
     case 'forward': return '[转发]';
-    case 'json': return '[卡片消息]';
+    case 'json':
+    case 'share':
+    case 'xml': return formatQqCard(seg.type, d);
     default: return `[${seg.type ?? '未知'}]`;
   }
 }
 
 function sanitizeCqString(s) {
   // 如果 get_forward_msg 返回的是 CQ 字符串，转为占位符，避免把 CQ 码原样塞给 AI。
-  return String(s ?? '').replace(/\[CQ:[^\]]*\]/gi, '[媒体]');
+  return formatQqCqCards(String(s ?? '')).replace(/\[CQ:[^\]]*\]/gi, '[媒体]');
 }
 
 function contentToText(content) {
@@ -137,8 +140,8 @@ function nodeContent(node) {
       if (Array.isArray(candidate.content)) return candidate.content;
     }
   }
-  // 字符串内容没有可提取的媒体/嵌套转发
-  return [];
+  // CQ 字符串可以包含链接卡片，但没有可用的图片/转发定位信息。
+  return [topContent, dataContent].find(value => typeof value === 'string') ?? [];
 }
 
 function segmentMedia(seg) {
@@ -205,6 +208,7 @@ export function formatForwardResponse(data, options = {}) {
     if (fullText.length > maxCharsPerMessage) textTruncated = true;
     const content = nodeContent(node);
     const meta = collectSegmentMeta(content);
+    const links = extractQqCardLinks(content);
     return {
       index: index + 1,
       sender: senderName(node),
@@ -213,6 +217,7 @@ export function formatForwardResponse(data, options = {}) {
       messageId: nodeMessageId(node),
       messageSeq: nodeMessageSeq(node),
       text,
+      ...(links.length ? { links } : {}),
       media: meta.media,
       nestedForwardIds: meta.nestedForwardIds
     };

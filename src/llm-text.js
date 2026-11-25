@@ -132,7 +132,7 @@ export async function completeText({ user, system = '', model, maxTokens = 1200,
   const text = extractText(parsed);
   if (!text) {
     const reason = parsed?.stop_reason === 'max_tokens' ? '（max_tokens 被 thinking 吃光了，调大一点）' : '';
-    throw Object.assign(new Error(`补全接口没有返回正文${reason}`), { code: 'EMPTY', stopReason: parsed?.stop_reason ?? null });
+    throw Object.assign(new Error(`补全接口没有返回正文${reason}`), { code: 'EMPTY', stopReason: parsed?.stop_reason ?? null, usage:parsed?.usage, model:payload.model });
   }
   return { text, model: payload.model, usage: parsed?.usage ?? null };
 }

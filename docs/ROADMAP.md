@@ -1,5 +1,8 @@
 # 路线图与路线守则（ROADMAP）
 
+QQ 上下文优化的验收同时检查完整回合的回复质量、调用数与缓存用量。配置、回滚开关和离线验证命令见[QQ 模型与上下文指南](guides/QQ-OPENAI-API.md)。
+
+
 > 本文件是「做什么、按什么顺序做、什么时候该放弃」的唯一权威。**改路线先改这里**，再动代码。
 > 配套：开工动线见 [`../AGENTS.md`](../AGENTS.md)，踩坑见 [`PITFALLS.md`](PITFALLS.md)，交接见 [`HANDOFF.md`](HANDOFF.md)。
 
